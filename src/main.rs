@@ -6,15 +6,18 @@ mod models;
 mod routes;
 mod services;
 
-use parking_lot::Mutex;
+use std::sync::Arc;
 use routes::health::health;
 use routes::post::get_posts;
 
 #[launch]
-fn rocket() -> _ {
-    let db_conn = database::connect().expect("failed to connect to database");
+async fn rocket() -> _ {
+    // Load environment variables from .env file
+    dotenvy::dotenv().ok();
+    
+    let db_conn = database::connect().await.expect("failed to connect to database");
 
     rocket::build()
-        .manage(Mutex::new(db_conn))
+        .manage(Arc::new(db_conn))
         .mount("/", routes![health, get_posts])
 }

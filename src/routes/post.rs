@@ -1,12 +1,12 @@
 use crate::models::post::Post;
 use crate::services;
-use parking_lot::Mutex;
+use std::sync::Arc;
 use rocket::serde::json::Json;
 use rocket::State;
-use rusqlite::Connection;
+use tokio_postgres::Client;
 
 #[get("/posts")]
-pub fn get_posts(conn: &State<Mutex<Connection>>) -> Json<Vec<Post>> {
-    let conn = conn.lock();
-    Json(services::post::get_all_posts(&conn).unwrap_or_else(|_| vec![]))
+pub async fn get_posts(conn: &State<Arc<Client>>) -> Json<Vec<Post>> {
+    let posts = services::post::get_all_posts(&conn.inner()).await.unwrap_or_else(|_| vec![]);
+    Json(posts)
 }

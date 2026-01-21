@@ -1,10 +1,10 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Serialize, Deserialize)]
 pub struct Post {
-    pub id: i32,
+    pub id: Uuid,
     pub title: String,
-    pub body: String,
-    pub published_at: DateTime<Utc>,
+    pub created_by: Uuid,
+    pub slug: String,
 }

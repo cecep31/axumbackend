@@ -1,21 +1,23 @@
 use crate::models::post::Post;
-use rusqlite::{Connection, Result};
-use chrono::Utc;
+use tokio_postgres::Client;
+use uuid::Uuid;
 
-pub fn get_all_posts(conn: &Connection) -> Result<Vec<Post>> {
-    let mut stmt = conn.prepare("SELECT id, title, body, published_at FROM posts")?;
-    let post_iter = stmt.query_map([], |row| {
+pub async fn get_all_posts(client: &Client) -> Result<Vec<Post>, tokio_postgres::Error> {
+    let rows = client.query("SELECT id, title, created_by, slug FROM posts ORDER BY id", &[]).await?;
+
+    let posts: Result<Vec<Post>, _> = rows.iter().map(|row| {
+        let id: Uuid = row.get(0);
+        let title: String = row.get(1);
+        let created_by: Uuid = row.get(2);
+        let slug: String = row.get(3);
+
         Ok(Post {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            body: row.get(2)?,
-            published_at: row.get_ref(3)?.as_str()?.parse().unwrap_or(Utc::now()),
+            id,
+            title,
+            created_by,
+            slug,
         })
-    })?;
+    }).collect();
 
-    let mut posts = Vec::new();
-    for post in post_iter {
-        posts.push(post?);
-    }
-    Ok(posts)
+    posts
 }
