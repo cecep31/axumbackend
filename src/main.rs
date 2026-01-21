@@ -19,5 +19,5 @@ async fn rocket() -> _ {
 
     rocket::build()
         .manage(Arc::new(db_conn))
-        .mount("/", routes![health, get_posts, get_random_posts])
+        .mount("/v1", routes![health, get_posts, get_random_posts])
 }
