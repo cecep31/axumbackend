@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.85-alpine AS builder
+FROM rust:1-alpine AS builder
 
 WORKDIR /build
 
