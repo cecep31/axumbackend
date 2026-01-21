@@ -8,7 +8,7 @@ mod services;
 
 use std::sync::Arc;
 use routes::health::health;
-use routes::post::get_posts;
+use routes::post::{get_posts, get_random_posts};
 
 #[launch]
 async fn rocket() -> _ {
@@ -19,5 +19,5 @@ async fn rocket() -> _ {
 
     rocket::build()
         .manage(Arc::new(db_conn))
-        .mount("/", routes![health, get_posts])
+        .mount("/", routes![health, get_posts, get_random_posts])
 }
