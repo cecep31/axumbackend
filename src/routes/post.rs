@@ -24,7 +24,7 @@ pub async fn get_random_posts(
     State(conn): State<Arc<Client>>,
     query: Query<RandomPostQuery>,
 ) -> Json<ApiResponse<Vec<Post>>> {
-    let limit = query.limit.unwrap_or(9);
+    let limit = query.limit.unwrap_or(6);
     let posts = services::post::get_random_posts(&conn, limit).await.unwrap_or_else(|_| vec![]);
     let total = posts.len() as i64;
     Json(ApiResponse::with_meta(posts, total, Some(limit), None))
