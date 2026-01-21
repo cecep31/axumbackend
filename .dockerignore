@@ -1,0 +1,29 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+*.swp
+*.swo
+
+# Build artifacts
+target/
+Cargo.lock
+
+# Database
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
