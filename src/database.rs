@@ -14,16 +14,5 @@ pub async fn connect() -> Result<Client, Error> {
         }
     });
 
-    // Create the posts table if it doesn't exist
-    client.execute(
-        "CREATE TABLE IF NOT EXISTS posts (
-            id SERIAL PRIMARY KEY,
-            title VARCHAR(255) NOT NULL,
-            body TEXT NOT NULL,
-            published_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-        )",
-        &[],
-    ).await?;
-
     Ok(client)
 }
