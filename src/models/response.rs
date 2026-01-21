@@ -40,16 +40,4 @@ impl<T> ApiResponse<T> {
             meta: Meta { total, limit, offset },
         }
     }
-
-    pub fn error(message: String) -> Self {
-        ApiResponse {
-            success: false,
-            data: None,
-            meta: Meta {
-                total: 0,
-                limit: None,
-                offset: None,
-            },
-        }
-    }
 }

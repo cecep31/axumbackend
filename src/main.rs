@@ -1,29 +1,30 @@
-#[macro_use]
-extern crate rocket;
-
 mod database;
 mod models;
 mod routes;
 mod services;
 
-use std::sync::Arc;
-use rocket_cors::{CorsOptions, AllowedOrigins};
+use axum::{Router, routing::get};
 use routes::health::health;
 use routes::post::{get_posts, get_random_posts};
+use std::sync::Arc;
+use tower_http::cors::CorsLayer;
 
-#[launch]
-async fn rocket() -> _ {
+#[tokio::main]
+async fn main() {
     dotenvy::dotenv().ok();
 
-    let db_conn = database::connect().await.expect("failed to connect to database");
+    let db_conn = database::connect()
+        .await
+        .expect("failed to connect to database");
 
-    let cors = CorsOptions::default()
-        .allowed_origins(AllowedOrigins::all())
-        .to_cors()
-        .expect("Failed to create CORS");
+    let app = Router::new()
+        .route("/v1/health", get(health))
+        .route("/v1/posts", get(get_posts))
+        .route("/v1/posts/random", get(get_random_posts))
+        .with_state(Arc::new(db_conn))
+        .layer(CorsLayer::permissive());
 
-    rocket::build()
-        .manage(Arc::new(db_conn))
-        .mount("/v1", routes![health, get_posts, get_random_posts])
-        .attach(cors)
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+    println!("Server listening on 0.0.0.0:8001");
 }

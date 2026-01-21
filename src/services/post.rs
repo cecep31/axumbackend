@@ -61,8 +61,9 @@ pub async fn get_random_posts(client: &Client, limit: i64) -> Result<Vec<Post>, 
         let username: String = row.get(7);
 
         // Substring body to 200 characters max
-        let body = if body.len() > 200 {
-            format!("{}...", &body[..200])
+        let body = if body.chars().count() > 200 {
+            let truncated_body: String = body.chars().take(200).collect();
+            format!("{}...", truncated_body)
         } else {
             body
         };
