@@ -1,11 +1,13 @@
+mod config;
+mod controllers;
 mod database;
+mod error;
 mod models;
-mod routes;
 mod services;
 
 use axum::{Router, routing::get};
-use routes::health::health;
-use routes::post::{get_posts, get_random_posts};
+use controllers::health::health;
+use controllers::post::{get_posts, get_random_posts};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
@@ -13,12 +15,9 @@ use tower_http::cors::CorsLayer;
 async fn main() {
     dotenvy::dotenv().ok();
 
-    let port = std::env::var("PORT")
-        .unwrap_or_else(|_| "8000".to_string())
-        .parse::<u16>()
-        .expect("PORT must be a valid number");
+    let config = config::Config::from_env();
 
-    let db_conn = database::connect()
+    let db_conn = database::connect(&config.database_url)
         .await
         .expect("failed to connect to database");
 
@@ -30,7 +29,7 @@ async fn main() {
         .with_state(Arc::new(db_conn))
         .layer(CorsLayer::permissive());
 
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     println!("Server listening on {}", addr);
     axum::serve(listener, app).await.unwrap();
