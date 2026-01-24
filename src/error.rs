@@ -8,7 +8,7 @@ use serde_json::json;
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum AppError {
-    Database(tokio_postgres::Error),
+    Database(String),
     NotFound(String),
     BadRequest(String),
     InternalServerError(String),
@@ -17,9 +17,9 @@ pub enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
-            AppError::Database(e) => (
+            AppError::Database(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {}", msg),
             ),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
@@ -38,6 +38,6 @@ impl IntoResponse for AppError {
 
 impl From<tokio_postgres::Error> for AppError {
     fn from(err: tokio_postgres::Error) -> Self {
-        AppError::Database(err)
+        AppError::Database(err.to_string())
     }
 }

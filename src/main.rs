@@ -31,11 +31,17 @@ async fn main() {
 
     let config = config::Config::from_env();
 
-    let db_conn = database::connect(&config.database_url)
-        .await
-        .expect("failed to connect to database");
+    let pool = database::create_pool(&config.database_url, config.pool_max_size);
 
-    let app = handlers::create_router().with_state(Arc::new(db_conn));
+    tracing::info!(
+        "Database connection pool created with max_size={}",
+        config.pool_max_size
+    );
+
+    // Pre-warm pool connections to eliminate cold-start latency
+    database::warm_pool(&pool, config.pool_min_connections).await;
+
+    let app = handlers::create_router().with_state(Arc::new(pool));
 
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();

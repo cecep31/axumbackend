@@ -7,9 +7,9 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use deadpool_postgres::Pool;
 use serde::Deserialize;
 use std::sync::Arc;
-use tokio_postgres::Client;
 
 #[derive(Deserialize)]
 pub struct RandomPostQuery {
@@ -23,33 +23,49 @@ pub struct PaginationQuery {
 }
 
 pub async fn get_posts(
-    State(conn): State<Arc<Client>>,
+    State(pool): State<Arc<Pool>>,
     query: Query<PaginationQuery>,
-) -> Json<ApiResponse<Vec<Post>>> {
+) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(10);
+    
+    let conn = pool.get().await.map_err(|e| {
+        tracing::error!("Failed to get connection from pool: {}", e);
+        AppError::Database(e.to_string())
+    })?;
     
     let (posts, total) = services::post::get_all_posts(&conn, offset, limit)
         .await
         .unwrap_or_else(|_| (vec![], 0));
     
-    Json(ApiResponse::with_meta(posts, total, Some(limit), Some(offset)))
+    Ok(Json(ApiResponse::with_meta(posts, total, Some(limit), Some(offset))))
 }
 
 pub async fn get_random_posts(
-    State(conn): State<Arc<Client>>,
+    State(pool): State<Arc<Pool>>,
     query: Query<RandomPostQuery>,
-) -> Json<ApiResponse<Vec<Post>>> {
+) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
     let limit = query.limit.unwrap_or(6);
+    
+    let conn = pool.get().await.map_err(|e| {
+        tracing::error!("Failed to get connection from pool: {}", e);
+        AppError::Database(e.to_string())
+    })?;
+    
     let posts = services::post::get_random_posts(&conn, limit).await.unwrap_or_else(|_| vec![]);
     let total = posts.len() as i64;
-    Json(ApiResponse::with_meta(posts, total, Some(limit), None))
+    Ok(Json(ApiResponse::with_meta(posts, total, Some(limit), None)))
 }
 
 pub async fn get_post_by_username_and_slug(
-    State(conn): State<Arc<Client>>,
+    State(pool): State<Arc<Pool>>,
     Path((username, slug)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<Post>>, AppError> {
+    let conn = pool.get().await.map_err(|e| {
+        tracing::error!("Failed to get connection from pool: {}", e);
+        AppError::Database(e.to_string())
+    })?;
+    
     match services::post::get_post_by_username_and_slug(&conn, &username, &slug).await {
         Ok(Some(post)) => Ok(Json(ApiResponse::success(post))),
         Ok(None) => Err(AppError::NotFound(format!(
@@ -60,7 +76,7 @@ pub async fn get_post_by_username_and_slug(
     }
 }
 
-pub fn routes() -> Router<Arc<Client>> {
+pub fn routes() -> Router<Arc<Pool>> {
     Router::new()
         .route("/v1/posts", get(get_posts))
         .route("/v1/posts/random", get(get_random_posts))
