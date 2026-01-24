@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This is a Rust web backend application built with the Axum web framework (v0.7.5) using PostgreSQL. The project implements a blog post management system with REST API endpoints. Uses Rust edition 2024.
+This is a Rust web backend application built with the Axum web framework (v0.8.8) using PostgreSQL. The project implements a blog post management system with REST API endpoints. Uses Rust edition 2024.
 
 ## Build, Lint, and Test Commands
 
@@ -78,6 +78,15 @@ cargo fmt --check
 - Use `unwrap_or_else` or `unwrap_or` for fallible operations with defaults
 - Log errors with `eprintln!` for connection/background errors
 - Handle errors gracefully in handlers with fallbacks to empty collections
+- Define `AppError` enum with variants: Database, NotFound, BadRequest, InternalServerError
+- Implement `IntoResponse` for custom errors returning JSON with success: false
+- Use `From<tokio_postgres::Error>` for automatic error conversion
+
+### Logging and Tracing
+- Initialize tracing with `tracing_subscriber::registry()` and EnvFilter
+- Default log level is info, with tower_http at info and axum::rejection at trace
+- Use `tracing::info!`, `tracing::error!` macros throughout the application
+- Log server startup with address and any important events
 
 ### Async and Concurrency
 - All database operations are async using tokio-postgres
@@ -99,6 +108,8 @@ cargo fmt --check
 - Health check endpoint at `GET /health` returning `"OK"`
 - Use `Query<T>` for query parameters, `Json<T>` for request bodies
 - Add CORS with `tower_http::cors::CorsLayer::permissive()`
+- Add `TraceLayer` for request logging: `.layer(TraceLayer::new_for_http())`
+- Merge route groups with `.merge(sub_router)` in handlers/mod.rs
 
 ### Database Queries
 - Use parameterized queries with `$1`, `$2` placeholders
@@ -133,16 +144,3 @@ cargo fmt --check
 - **Handlers**: `src/handlers/{health,post,tag}.rs`
 - **Services**: `src/services/{post,tag}.rs`
 - **Config**: `src/config.rs`, `.env`
-
-## Dependencies
-
-- `axum` (v0.7.5) - Web framework with JSON support
-- `axum-extra` (v0.9.3) - Additional Axum utilities
-- `tower-http` (v0.5.2) - HTTP middleware including CORS
-- `tokio-postgres` (v0.7.12) - PostgreSQL async client
-- `postgres-types` (v0.2.9) - PostgreSQL type support
-- `serde` (v1.0.228) - Serialization framework
-- `serde_json` (v1.0.149) - JSON serialization
-- `uuid` (v1.11.0) - UUID generation
-- `chrono` (v0.4.43) - DateTime handling
-- `dotenvy` (v0.15) - Environment variable loading
