@@ -1,7 +1,6 @@
 use axum::{routing::get, Json, Router};
+use crate::database::DbPool;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio_postgres::Client;
 
 #[derive(Serialize, Deserialize)]
 pub struct HealthResponse {
@@ -16,7 +15,7 @@ pub async fn health() -> Json<HealthResponse> {
     })
 }
 
-pub fn routes() -> Router<Arc<Client>> {
+pub fn routes() -> Router<DbPool> {
     Router::new()
         .route("/", get(health))
         .route("/v1/health", get(health))

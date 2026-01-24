@@ -3,12 +3,11 @@ mod post;
 mod tag;
 
 use axum::Router;
-use std::sync::Arc;
-use tokio_postgres::Client;
+use crate::database::DbPool;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-pub fn create_router() -> Router<Arc<Client>> {
+pub fn create_router() -> Router<DbPool> {
     Router::new()
         .merge(health::routes())
         .merge(post::routes())

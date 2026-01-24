@@ -1,14 +1,17 @@
-use tokio_postgres::{Client, NoTls, Error};
+use deadpool_postgres::{Config, Pool, Runtime};
+use tokio_postgres::NoTls;
 
-pub async fn connect(database_url: &str) -> Result<Client, Error> {
-    let (client, connection) = tokio_postgres::connect(database_url, NoTls).await?;
+pub type DbPool = Pool;
 
-    // Spawn the connection handling in the background
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
-        }
-    });
-
-    Ok(client)
+/// Create a connection pool from the database URL
+/// 
+/// Default pool configuration:
+/// - max_size: 16 connections (CPU count * 4)
+/// - Connections are created lazily on demand
+/// - Connections are automatically recycled when returned to pool
+pub fn create_pool(database_url: &str) -> Pool {
+    let mut cfg = Config::new();
+    cfg.url = Some(database_url.to_string());
+    cfg.create_pool(Some(Runtime::Tokio1), NoTls)
+        .expect("Failed to create database pool")
 }

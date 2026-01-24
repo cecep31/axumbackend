@@ -5,7 +5,6 @@ mod handlers;
 mod models;
 mod services;
 
-use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -31,11 +30,11 @@ async fn main() {
 
     let config = config::Config::from_env();
 
-    let db_conn = database::connect(&config.database_url)
-        .await
-        .expect("failed to connect to database");
+    // Create connection pool instead of single connection
+    let pool = database::create_pool(&config.database_url);
+    tracing::info!("Database connection pool created");
 
-    let app = handlers::create_router().with_state(Arc::new(db_conn));
+    let app = handlers::create_router().with_state(pool);
 
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();

@@ -3,12 +3,14 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use deadpool_postgres::PoolError;
 use serde_json::json;
 
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum AppError {
     Database(tokio_postgres::Error),
+    Pool(PoolError),
     NotFound(String),
     BadRequest(String),
     InternalServerError(String),
@@ -20,6 +22,10 @@ impl IntoResponse for AppError {
             AppError::Database(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Database error: {}", e),
+            ),
+            AppError::Pool(e) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Connection pool error: {}", e),
             ),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
@@ -39,5 +45,11 @@ impl IntoResponse for AppError {
 impl From<tokio_postgres::Error> for AppError {
     fn from(err: tokio_postgres::Error) -> Self {
         AppError::Database(err)
+    }
+}
+
+impl From<PoolError> for AppError {
+    fn from(err: PoolError) -> Self {
+        AppError::Pool(err)
     }
 }
