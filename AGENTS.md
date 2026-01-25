@@ -19,8 +19,11 @@ cargo run
 # Run all tests
 cargo test
 
-# Run a single test by name
+# Run a single test by name (exact match)
 cargo test test_name
+
+# Run tests matching a pattern
+cargo test test_pattern
 
 # Run tests with output
 cargo test -- --nocapture
@@ -76,11 +79,12 @@ cargo fmt --check
 - Return `Result<T, tokio_postgres::Error>` for database operations
 - Use `?` operator for propagating errors in async contexts
 - Use `unwrap_or_else` or `unwrap_or` for fallible operations with defaults
-- Log errors with `eprintln!` for connection/background errors
+- Log errors with `tracing::error!` for connection/background errors
 - Handle errors gracefully in handlers with fallbacks to empty collections
-- Define `AppError` enum with variants: Database, NotFound, BadRequest, InternalServerError
-- Implement `IntoResponse` for custom errors returning JSON with success: false
-- Use `From<tokio_postgres::Error>` for automatic error conversion
+- Define `AppError` enum with variants: Database, Pool, NotFound, BadRequest, InternalServerError
+- Implement `IntoResponse` for custom errors returning JSON with `success: false`
+- Use `From<tokio_postgres::Error>` and `From<PoolError>` for automatic error conversion
+- Handle connection pool errors separately with `deadpool_postgres::PoolError`
 
 ### Logging and Tracing
 - Initialize tracing with `tracing_subscriber::registry()` and EnvFilter
@@ -89,10 +93,11 @@ cargo fmt --check
 - Log server startup with address and any important events
 
 ### Async and Concurrency
-- All database operations are async using tokio-postgres
+- All database operations are async using tokio-postgres with deadpool connection pooling
 - Use `tokio::spawn` for background connection handling
-- Wrap database client in `Arc<Client>` for Axum state management
-- Use `State<Arc<Client>>` for DI in route handlers
+- Use `DbPool` (deadpool::Pool) for connection pool management in Axum state
+- Use `State<DbPool>` for DI in route handlers
+- Get client from pool with `pool.get().await` in handlers
 
 ### Types and Serialization
 - Use `serde::{Serialize, Deserialize}` for all serializable types
@@ -110,6 +115,11 @@ cargo fmt --check
 - Add CORS with `tower_http::cors::CorsLayer::permissive()`
 - Add `TraceLayer` for request logging: `.layer(TraceLayer::new_for_http())`
 - Merge route groups with `.merge(sub_router)` in handlers/mod.rs
+
+### API Response Patterns
+- Use `ApiResponse<T>` wrapper struct with `success: bool`, `data: T`, `error: Option<String>`
+- All successful responses return `Json(ApiResponse::success(data))`
+- Error responses handled via `AppError` with `IntoResponse` returning `success: false` JSON
 
 ### Database Queries
 - Use parameterized queries with `$1`, `$2` placeholders
@@ -140,7 +150,9 @@ cargo fmt --check
 
 - **Entry point**: `src/main.rs`
 - **Database**: `src/database.rs`
-- **Models**: `src/models/{post,user,response}.rs`
+- **Error handling**: `src/error.rs`
+- **API response**: `src/response.rs`
+- **Config**: `src/config.rs`, `.env`
+- **Models**: `src/models/{post,user,tag}.rs`
 - **Handlers**: `src/handlers/{health,post,tag}.rs`
 - **Services**: `src/services/{post,tag}.rs`
-- **Config**: `src/config.rs`, `.env`
