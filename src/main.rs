@@ -3,6 +3,7 @@ mod database;
 mod error;
 mod handlers;
 mod models;
+mod response;
 mod services;
 
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

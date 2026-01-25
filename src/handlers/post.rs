@@ -1,7 +1,7 @@
 use crate::database::DbPool;
 use crate::error::AppError;
 use crate::models::post::Post;
-use crate::models::response::ApiResponse;
+use crate::response::ApiResponse;
 use crate::services;
 use axum::{
     extract::{Path, Query, State},
