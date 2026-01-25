@@ -9,7 +9,7 @@ pub async fn get_tags(State(pool): State<DbPool>) -> Result<Json<ApiResponse<Vec
     let client = pool.get().await?;
     let tags = services::tag::get_all_tags(&client).await?;
     let total = tags.len() as i64;
-    Ok(Json(ApiResponse::with_meta(tags, total, None, None)))
+    Ok(Json(ApiResponse::with_meta(tags, total, total, 0)))
 }
 
 pub fn routes() -> Router<DbPool> {

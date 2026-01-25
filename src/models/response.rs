@@ -2,17 +2,19 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub struct Meta {
-    pub total: i64,
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
+    pub total_items: i64,
+    pub offset: i64,
+    pub limit: i64,
+    pub total_pages: i64,
 }
 
 impl Default for Meta {
     fn default() -> Self {
         Meta {
-            total: 0,
-            limit: None,
-            offset: None,
+            total_items: 0,
+            offset: 0,
+            limit: 10,
+            total_pages: 0,
         }
     }
 }
@@ -33,11 +35,22 @@ impl<T> ApiResponse<T> {
         }
     }
 
-    pub fn with_meta(data: T, total: i64, limit: Option<i64>, offset: Option<i64>) -> Self {
+    pub fn with_meta(data: T, total: i64, limit: i64, offset: i64) -> Self {
+        let total_pages = if limit > 0 {
+            (total as f64 / limit as f64).ceil() as i64
+        } else {
+            0
+        };
+        
         ApiResponse {
             success: true,
             data: Some(data),
-            meta: Meta { total, limit, offset },
+            meta: Meta {
+                total_items: total,
+                offset,
+                limit,
+                total_pages,
+            },
         }
     }
 }

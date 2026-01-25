@@ -54,7 +54,7 @@ pub async fn get_posts(
     .await
     .unwrap_or_else(|_| (vec![], 0));
 
-    Ok(Json(ApiResponse::with_meta(posts, total, Some(limit), Some(offset))))
+    Ok(Json(ApiResponse::with_meta(posts, total, limit, offset)))
 }
 
 pub async fn get_random_posts(
@@ -67,7 +67,7 @@ pub async fn get_random_posts(
         .await
         .unwrap_or_else(|_| vec![]);
     let total = posts.len() as i64;
-    Ok(Json(ApiResponse::with_meta(posts, total, Some(limit), None)))
+    Ok(Json(ApiResponse::with_meta(posts, total, limit, 0)))
 }
 
 pub async fn get_posts_by_tag(
@@ -94,7 +94,7 @@ pub async fn get_posts_by_tag(
     .await
     .unwrap_or_else(|_| (vec![], 0));
 
-    Ok(Json(ApiResponse::with_meta(posts, total, Some(limit), Some(offset))))
+    Ok(Json(ApiResponse::with_meta(posts, total, limit, offset)))
 }
 
 pub async fn get_post_by_username_and_slug(
