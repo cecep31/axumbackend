@@ -15,10 +15,21 @@ pub struct RandomPostQuery {
     limit: Option<i64>,
 }
 
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum OrderDirection {
+    Asc,
+    Desc,
+}
+
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PaginationQuery {
     offset: Option<i64>,
     limit: Option<i64>,
+    search: Option<String>,
+    order_by: Option<String>,
+    order_direction: Option<OrderDirection>,
 }
 
 pub async fn get_posts(
@@ -28,10 +39,20 @@ pub async fn get_posts(
     let client = pool.get().await?;
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(10);
+    let search = query.search.as_deref();
+    let order_by = query.order_by.as_deref();
+    let order_direction = query.order_direction.as_ref();
 
-    let (posts, total) = services::post::get_all_posts(&client, offset, limit)
-        .await
-        .unwrap_or_else(|_| (vec![], 0));
+    let (posts, total) = services::post::get_all_posts(
+        &client,
+        offset,
+        limit,
+        search,
+        order_by,
+        order_direction,
+    )
+    .await
+    .unwrap_or_else(|_| (vec![], 0));
 
     Ok(Json(ApiResponse::with_meta(posts, total, Some(limit), Some(offset))))
 }
@@ -47,6 +68,33 @@ pub async fn get_random_posts(
         .unwrap_or_else(|_| vec![]);
     let total = posts.len() as i64;
     Ok(Json(ApiResponse::with_meta(posts, total, Some(limit), None)))
+}
+
+pub async fn get_posts_by_tag(
+    State(pool): State<DbPool>,
+    Path(tag): Path<String>,
+    query: Query<PaginationQuery>,
+) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
+    let client = pool.get().await?;
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(10);
+    let search = query.search.as_deref();
+    let order_by = query.order_by.as_deref();
+    let order_direction = query.order_direction.as_ref();
+
+    let (posts, total) = services::post::get_posts_by_tag(
+        &client,
+        &tag,
+        offset,
+        limit,
+        search,
+        order_by,
+        order_direction,
+    )
+    .await
+    .unwrap_or_else(|_| (vec![], 0));
+
+    Ok(Json(ApiResponse::with_meta(posts, total, Some(limit), Some(offset))))
 }
 
 pub async fn get_post_by_username_and_slug(
@@ -68,5 +116,6 @@ pub fn routes() -> Router<DbPool> {
     Router::new()
         .route("/v1/posts", get(get_posts))
         .route("/v1/posts/random", get(get_random_posts))
+        .route("/v1/posts/tag/{tag}", get(get_posts_by_tag))
         .route("/v1/posts/u/{username}/{slug}", get(get_post_by_username_and_slug))
 }

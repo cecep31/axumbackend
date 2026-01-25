@@ -2,6 +2,8 @@ mod health;
 mod post;
 mod tag;
 
+pub use post::OrderDirection;
+
 use axum::Router;
 use crate::database::DbPool;
 use tower_http::cors::CorsLayer;
