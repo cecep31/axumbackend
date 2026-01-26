@@ -91,7 +91,7 @@ The `Post` model includes:
 - `published`: Boolean indicating if the post is published
 - `view_count`: Number of views
 - `like_count`: Number of likes
-- `creator`: Associated User object
+- `user`: Associated User object
 - `tags`: List of associated Tag objects
 
 The `User` model includes:

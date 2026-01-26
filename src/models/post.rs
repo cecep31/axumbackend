@@ -19,7 +19,7 @@ pub struct Post {
     pub published: bool,
     pub view_count: i64,
     pub like_count: i64,
-    pub creator: User,
+    pub user: User,
     pub tags: Vec<Tag>,
 }
 
@@ -49,7 +49,7 @@ impl From<&Row> for Post {
             published: row.get(9),
             view_count: row.get(10),
             like_count: row.get(11),
-            creator: User {
+            user: User {
                 id: row.get(12),
                 username: row.get(13),
             },
@@ -76,7 +76,7 @@ impl Post {
             published: row.get(9),
             view_count: row.get(10),
             like_count: row.get(11),
-            creator: User {
+            user: User {
                 id: row.get(12),
                 username: row.get(13),
             },
