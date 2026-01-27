@@ -59,14 +59,14 @@ fn validate_order_field(order_by: Option<&str>) -> &str {
     ];
     order_by
         .filter(|f| VALID_FIELDS.contains(f))
-        .unwrap_or("id")
+        .unwrap_or("created_at")
 }
 
 /// Get order direction string
 fn get_order_dir(dir: Option<&crate::handlers::OrderDirection>) -> &'static str {
     match dir {
-        Some(crate::handlers::OrderDirection::Desc) => "DESC",
-        _ => "ASC",
+        Some(crate::handlers::OrderDirection::Asc) => "ASC",
+        _ => "DESC", // Default to DESC
     }
 }
 
