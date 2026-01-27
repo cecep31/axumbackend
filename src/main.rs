@@ -9,7 +9,7 @@ mod services;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
     // Initialize tracing subscriber for logging
@@ -33,7 +33,7 @@ async fn main() {
 
     // Create connection pool with configuration from environment
     let pool = database::create_pool(&config.database_url, &config.db_pool)
-        .expect("Failed to create database pool - check DATABASE_URL format");
+        .map_err(|e| format!("Failed to create database pool: {}. Check DATABASE_URL format", e))?;
     tracing::info!(
         "Database connection pool created (max_size: {}, timeout: {:?})",
         config.db_pool.max_size,
@@ -43,7 +43,10 @@ async fn main() {
     let app = handlers::create_router().with_state(pool);
 
     let addr = format!("0.0.0.0:{}", config.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .map_err(|e| format!("Failed to bind to {}: {}", addr, e))?;
     tracing::info!("Server listening on {}", addr);
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await?;
+    Ok(())
 }

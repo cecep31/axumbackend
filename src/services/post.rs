@@ -160,7 +160,7 @@ pub async fn get_posts_by_tag(
             }
         })
         .unwrap_or("id");
-    
+
     let order_dir = match order_direction {
         Some(crate::handlers::OrderDirection::Desc) => "DESC",
         _ => "ASC",
@@ -173,11 +173,11 @@ pub async fn get_posts_by_tag(
     let total: i64 = if let Some(ref search_val) = search_param {
         let total_row = client
             .query_one(
-                "SELECT COUNT(DISTINCT p.id) 
-                 FROM posts p 
-                 INNER JOIN users u ON p.created_by = u.id 
-                 INNER JOIN posts_to_tags ptt ON p.id = ptt.post_id 
-                 INNER JOIN tags t ON ptt.tag_id = t.id 
+                "SELECT COUNT(DISTINCT p.id)
+                 FROM posts p
+                 INNER JOIN users u ON p.created_by = u.id
+                 INNER JOIN posts_to_tags ptt ON p.id = ptt.post_id
+                 INNER JOIN tags t ON ptt.tag_id = t.id
                  WHERE t.name = $1 AND p.published = true AND (p.title ILIKE $2 OR p.body ILIKE $2 OR u.username ILIKE $2)",
                 &[&tag_name, search_val],
             )
@@ -186,10 +186,10 @@ pub async fn get_posts_by_tag(
     } else {
         let total_row = client
             .query_one(
-                "SELECT COUNT(DISTINCT p.id) 
-                 FROM posts p 
-                 INNER JOIN posts_to_tags ptt ON p.id = ptt.post_id 
-                 INNER JOIN tags t ON ptt.tag_id = t.id 
+                "SELECT COUNT(DISTINCT p.id)
+                 FROM posts p
+                 INNER JOIN posts_to_tags ptt ON p.id = ptt.post_id
+                 INNER JOIN tags t ON ptt.tag_id = t.id
                  WHERE t.name = $1 AND p.published = true",
                 &[&tag_name],
             )
@@ -200,25 +200,25 @@ pub async fn get_posts_by_tag(
     // Build main query
     let query = if search_param.is_some() {
         format!(
-            "SELECT DISTINCT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, u.id, u.username 
-             FROM posts p 
-             INNER JOIN users u ON p.created_by = u.id 
-             INNER JOIN posts_to_tags ptt ON p.id = ptt.post_id 
-             INNER JOIN tags t ON ptt.tag_id = t.id 
+            "SELECT DISTINCT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, u.id, u.username
+             FROM posts p
+             INNER JOIN users u ON p.created_by = u.id
+             INNER JOIN posts_to_tags ptt ON p.id = ptt.post_id
+             INNER JOIN tags t ON ptt.tag_id = t.id
              WHERE t.name = $1 AND p.published = true AND (p.title ILIKE $2 OR p.body ILIKE $2 OR u.username ILIKE $2)
-             ORDER BY p.{} {} 
+             ORDER BY p.{} {}
              LIMIT $3 OFFSET $4",
             order_field, order_dir
         )
     } else {
         format!(
-            "SELECT DISTINCT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, u.id, u.username 
-             FROM posts p 
-             INNER JOIN users u ON p.created_by = u.id 
-             INNER JOIN posts_to_tags ptt ON p.id = ptt.post_id 
-             INNER JOIN tags t ON ptt.tag_id = t.id 
+            "SELECT DISTINCT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, u.id, u.username
+             FROM posts p
+             INNER JOIN users u ON p.created_by = u.id
+             INNER JOIN posts_to_tags ptt ON p.id = ptt.post_id
+             INNER JOIN tags t ON ptt.tag_id = t.id
              WHERE t.name = $1 AND p.published = true
-             ORDER BY p.{} {} 
+             ORDER BY p.{} {}
              LIMIT $2 OFFSET $3",
             order_field, order_dir
         )
@@ -231,24 +231,37 @@ pub async fn get_posts_by_tag(
         client.query(&query, &[&tag_name, &limit, &offset]).await?
     };
 
-    // Fetch posts and then fetch their tags
     let mut posts: Vec<Post> = rows.iter().map(Post::from).collect();
 
-    for post in &mut posts {
-        // Fetch tags for this post
-        let tag_rows = client
-            .query(
-                "SELECT t.id, t.name, t.created_at 
-                 FROM tags t 
-                 INNER JOIN posts_to_tags ptt ON t.id = ptt.tag_id 
-                 WHERE ptt.post_id = $1 
-                 ORDER BY t.name",
-                &[&post.id],
-            )
-            .await?;
+    // Fetch all tags for all posts in a single query to avoid N+1 problem
+    if posts.is_empty() {
+        return Ok((posts, total));
+    }
 
-        let tags: Vec<Tag> = tag_rows.iter().map(Tag::from).collect();
-        post.tags = tags;
+    let post_ids: Vec<uuid::Uuid> = posts.iter().map(|p| p.id).collect();
+    let tag_rows = client
+        .query(
+            "SELECT t.id, t.name, t.created_at, ptt.post_id
+             FROM tags t
+             INNER JOIN posts_to_tags ptt ON t.id = ptt.tag_id
+             WHERE ptt.post_id = ANY($1)
+             ORDER BY t.name",
+            &[&post_ids],
+        )
+        .await?;
+
+    // Group tags by post_id using a HashMap
+    use std::collections::HashMap;
+    let mut tags_by_post: HashMap<uuid::Uuid, Vec<Tag>> = HashMap::new();
+    for row in &tag_rows {
+        let post_id: uuid::Uuid = row.get(3);
+        let tag = Tag::from(row);
+        tags_by_post.entry(post_id).or_default().push(tag);
+    }
+
+    // Assign tags to posts
+    for post in &mut posts {
+        post.tags = tags_by_post.remove(&post.id).unwrap_or_default();
     }
 
     Ok((posts, total))
