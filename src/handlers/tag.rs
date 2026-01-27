@@ -1,7 +1,7 @@
 use crate::database::DbPool;
 use crate::error::AppError;
-use crate::response::ApiResponse;
 use crate::models::tag::Tag;
+use crate::response::ApiResponse;
 use crate::services;
 use axum::{Json, Router, extract::State, routing::get};
 

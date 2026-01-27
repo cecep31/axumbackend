@@ -1,5 +1,5 @@
-use axum::{routing::get, Json, Router};
 use crate::database::DbPool;
+use axum::{Json, Router, routing::get};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]

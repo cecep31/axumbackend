@@ -4,8 +4,8 @@ mod tag;
 
 pub use post::OrderDirection;
 
-use axum::Router;
 use crate::database::DbPool;
+use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 

@@ -1,9 +1,9 @@
+use super::tag::Tag;
+use super::user::User;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::Row;
 use uuid::Uuid;
-use super::user::User;
-use super::tag::Tag;
 
 #[derive(Serialize, Deserialize)]
 pub struct Post {

@@ -13,10 +13,7 @@ pub type DbPool = Pool;
 ///
 /// # Errors
 /// Returns `CreatePoolError` if pool creation fails (e.g., invalid URL format)
-pub fn create_pool(
-    database_url: &str,
-    pool_config: &PoolConfig,
-) -> Result<Pool, CreatePoolError> {
+pub fn create_pool(database_url: &str, pool_config: &PoolConfig) -> Result<Pool, CreatePoolError> {
     let mut cfg = Config::new();
     cfg.url = Some(database_url.to_string());
 

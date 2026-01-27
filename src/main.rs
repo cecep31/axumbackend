@@ -32,8 +32,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = config::Config::from_env();
 
     // Create connection pool with configuration from environment
-    let pool = database::create_pool(&config.database_url, &config.db_pool)
-        .map_err(|e| format!("Failed to create database pool: {}. Check DATABASE_URL format", e))?;
+    let pool = database::create_pool(&config.database_url, &config.db_pool).map_err(|e| {
+        format!(
+            "Failed to create database pool: {}. Check DATABASE_URL format",
+            e
+        )
+    })?;
     tracing::info!(
         "Database connection pool created (max_size: {}, timeout: {:?})",
         config.db_pool.max_size,

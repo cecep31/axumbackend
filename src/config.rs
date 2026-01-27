@@ -106,8 +106,14 @@ impl PoolConfig {
                 "DB_POOL_CONNECTION_TIMEOUT",
                 DEFAULT_CONNECTION_TIMEOUT_SECS,
             )),
-            max_lifetime: parse_optional_duration("DB_POOL_MAX_LIFETIME", DEFAULT_MAX_LIFETIME_SECS),
-            idle_timeout: parse_optional_duration("DB_POOL_IDLE_TIMEOUT", DEFAULT_IDLE_TIMEOUT_SECS),
+            max_lifetime: parse_optional_duration(
+                "DB_POOL_MAX_LIFETIME",
+                DEFAULT_MAX_LIFETIME_SECS,
+            ),
+            idle_timeout: parse_optional_duration(
+                "DB_POOL_IDLE_TIMEOUT",
+                DEFAULT_IDLE_TIMEOUT_SECS,
+            ),
         }
     }
 }
@@ -131,9 +137,7 @@ fn parse_u16_env(key: &str, default: u16) -> u16 {
     env::var(key)
         .unwrap_or_else(|_| default.to_string())
         .parse::<u16>()
-        .unwrap_or_else(|_| {
-            panic!("{key} must be a valid u16 number (0-65535), got invalid value")
-        })
+        .unwrap_or_else(|_| panic!("{key} must be a valid u16 number (0-65535), got invalid value"))
 }
 
 /// Parse a u64 from environment variable with default fallback
@@ -141,9 +145,7 @@ fn parse_u64_env(key: &str, default: u64) -> u64 {
     env::var(key)
         .unwrap_or_else(|_| default.to_string())
         .parse::<u64>()
-        .unwrap_or_else(|_| {
-            panic!("{key} must be a valid u64 number, got invalid value")
-        })
+        .unwrap_or_else(|_| panic!("{key} must be a valid u64 number, got invalid value"))
 }
 
 /// Parse a usize from environment variable with default fallback
@@ -151,9 +153,7 @@ fn parse_usize_env(key: &str, default: usize) -> usize {
     env::var(key)
         .unwrap_or_else(|_| default.to_string())
         .parse::<usize>()
-        .unwrap_or_else(|_| {
-            panic!("{key} must be a valid usize number, got invalid value")
-        })
+        .unwrap_or_else(|_| panic!("{key} must be a valid usize number, got invalid value"))
 }
 
 /// Parse an optional duration from environment variable

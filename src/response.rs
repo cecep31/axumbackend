@@ -41,7 +41,7 @@ impl<T> ApiResponse<T> {
         } else {
             0
         };
-        
+
         ApiResponse {
             success: true,
             data: Some(data),

@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use deadpool_postgres::PoolError;
 use serde_json::json;
@@ -28,11 +28,8 @@ impl IntoResponse for AppError {
                 } else {
                     format!("Database error: {}", e)
                 };
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    error_msg,
-                )
-            },
+                (StatusCode::INTERNAL_SERVER_ERROR, error_msg)
+            }
             AppError::Pool(e) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("Connection pool error: {}", e),
