@@ -32,20 +32,25 @@ cargo fmt --check                   # check formatting
 - Write idiomatic Rust 2024 edition code
 - Prefer explicit error handling over unwrap/panic
 - Use async/await for all I/O operations
-- Use `Arc<Client>` for shared database state
 
 ### Imports and Modules
 - Organize: `models/`, `handlers/`, `services/`, `database.rs`
 - Each module has `mod.rs` exporting submodules
 - Use `crate::` for absolute imports
 - Group imports: std, external, internal
+- Example:
+  ```rust
+  use std::collections::HashMap;
+  use tokio_postgres::Client;
+  use crate::models::post::Post;
+  ```
 
 ### Naming Conventions
 - **Files**: snake_case (`post_handler.rs`)
 - **Structs**: PascalCase (`Post`, `ApiResponse`)
 - **Functions**: snake_case (`get_all_posts`)
 - **Variables**: snake_case (`db_conn`, `post_id`)
-- **Constants**: SCREAMING_SNAKE_CASE
+- **Constants**: SCREAMING_SNAKE_CASE with `const`
 - **Types**: Explicit in function signatures
 
 ### Formatting
@@ -56,8 +61,8 @@ cargo fmt --check                   # check formatting
 ### Error Handling
 - Return `Result<T, tokio_postgres::Error>` for DB operations
 - Use `?` for error propagation
-- Define `AppError` enum: Database, Pool, NotFound, BadRequest, InternalServerError
-- Implement `IntoResponse` returning `success: false` JSON
+- `AppError` enum: Database, Pool, NotFound, BadRequest, InternalServerError
+- Implement `IntoResponse` returning JSON: `{"success": false, "error": "...", "data": null}`
 - Handle `deadpool_postgres::PoolError` separately
 - Log with `tracing::error!` for background errors
 
@@ -70,12 +75,13 @@ cargo fmt --check                   # check formatting
 - Use `tokio-postgres` with deadpool connection pooling
 - `DbPool` (deadpool::Pool) in Axum state
 - `State<DbPool>` for DI in handlers
-- Get client: `pool.get().await`
+- Get client: `pool.get().await?`
 
 ### Types and Serialization
 - `serde::{Serialize, Deserialize}` for all serializable types
 - `Json<T>` from axum for responses
 - `uuid::Uuid` for IDs, `chrono::DateTime<Utc>` for timestamps
+- Models implement `From<&Row>` for database deserialization
 - Clone derives acceptable for simple types
 
 ### Axum Framework Patterns
@@ -84,20 +90,42 @@ cargo fmt --check                   # check formatting
 - CORS: `CorsLayer::permissive()`
 - Trace logging: `TraceLayer::new_for_http()`
 - Merge routers with `.merge(sub_router)`
+- Handler returns: `Result<Json<ApiResponse<T>>, AppError>`
 
 ### API Response Patterns
-- `ApiResponse<T>` wrapper: `success: bool`, `data: T`, `error: Option<String>`
+- `ApiResponse<T>` wrapper: `success: bool`, `data: Option<T>`, `meta: Meta`
+- Meta contains: `total_items`, `offset`, `limit`, `total_pages`
 - Success: `Json(ApiResponse::success(data))`
+- With pagination: `Json(ApiResponse::with_meta(data, total, limit, offset))`
 - Error: `AppError` with `IntoResponse`
 
 ### Database
 - Parameterized queries: `$1`, `$2`
-- Use `JOIN` for related data
-- Return `Result<Vec<T>, tokio_postgres::Error>` from services
+- Use `JOIN` for related data (e.g., `posts` JOIN `users`)
+- Escape LIKE patterns: replace `\`, `%`, `_` to prevent injection
+- Validate `order_by` fields against whitelist using match
+- Return `Result<(Vec<T>, i64), tokio_postgres::Error>` (data + total count)
+- Batch fetch tags to avoid N+1 queries using `ANY($1)` array parameter
+
+### Validation
+- Use `axum-valid` with `validator` for request validation
+- Wrap extractors with `Valid`: `Valid(Query<T>)`, `Valid(Path<T>)`
+- Define validation rules using derive macro:
+  ```rust
+  #[derive(Deserialize, Validate)]
+  pub struct PaginationQuery {
+      #[validate(range(min = 0, max = 10_000))]
+      offset: Option<i64>,
+      #[validate(range(min = 1, max = 100))]
+      limit: Option<i64>,
+  }
+  ```
+- Use regex validation for path parameters with `once_cell::Lazy`
 
 ### Security
 - Use `.env` files with `dotenvy` for secrets
-- Validate all query parameters
+- Validate all query parameters using `axum-valid`
+- Escape LIKE pattern characters to prevent injection
 - Parameterized queries prevent SQL injection
 
 ### Testing
@@ -122,3 +150,12 @@ cargo fmt --check                   # check formatting
 | Models | `src/models/{post,user,tag}.rs` |
 | Handlers | `src/handlers/{health,post,tag}.rs` |
 | Services | `src/services/{post,tag}.rs` |
+
+## Environment Variables
+
+```bash
+DATABASE_URL=host=localhost user=postgres password=postgres dbname=axumbackend
+PORT=8000
+DB_POOL_MAX_SIZE=20
+DB_POOL_CONNECTION_TIMEOUT=30
+```
