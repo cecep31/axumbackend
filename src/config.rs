@@ -7,7 +7,7 @@ use std::time::Duration;
 
 const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_DATABASE_URL: &str =
-    "host=localhost user=postgres password=postgres dbname=rocketbackend";
+    "host=localhost user=postgres password=postgres dbname=axumbackend";
 const DEFAULT_POOL_MAX_SIZE: usize = 20;
 const DEFAULT_CONNECTION_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_MAX_LIFETIME_SECS: u64 = 1800;
@@ -56,7 +56,8 @@ impl Config {
     pub fn from_env() -> Self {
         Self {
             port: parse_u16("PORT", DEFAULT_PORT),
-            database_url: env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string()),
+            database_url: env::var("DATABASE_URL")
+                .unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string()),
             db_pool: PoolConfig::from_env(),
         }
     }
@@ -70,8 +71,14 @@ impl PoolConfig {
                 "DB_POOL_CONNECTION_TIMEOUT",
                 DEFAULT_CONNECTION_TIMEOUT_SECS,
             )),
-            max_lifetime: parse_optional_duration("DB_POOL_MAX_LIFETIME", DEFAULT_MAX_LIFETIME_SECS),
-            idle_timeout: parse_optional_duration("DB_POOL_IDLE_TIMEOUT", DEFAULT_IDLE_TIMEOUT_SECS),
+            max_lifetime: parse_optional_duration(
+                "DB_POOL_MAX_LIFETIME",
+                DEFAULT_MAX_LIFETIME_SECS,
+            ),
+            idle_timeout: parse_optional_duration(
+                "DB_POOL_IDLE_TIMEOUT",
+                DEFAULT_IDLE_TIMEOUT_SECS,
+            ),
         }
     }
 }
