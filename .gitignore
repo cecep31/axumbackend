@@ -6,3 +6,6 @@
 
 # Database files
 *.db
+
+# Qwen IDE settings
+.qwen/
