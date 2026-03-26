@@ -1,2 +1,8 @@
-/target
+# Build artifacts
+/target/
+
+# Environment files
 .env
+
+# Database files
+*.db
