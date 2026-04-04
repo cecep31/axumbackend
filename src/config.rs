@@ -10,8 +10,6 @@ const DEFAULT_DATABASE_URL: &str =
     "host=localhost user=postgres password=postgres dbname=axumbackend";
 const DEFAULT_POOL_MAX_SIZE: usize = 20;
 const DEFAULT_CONNECTION_TIMEOUT_SECS: u64 = 30;
-const DEFAULT_MAX_LIFETIME_SECS: u64 = 1800;
-const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 600;
 
 // ============================================================================
 // Configuration Structures
@@ -30,10 +28,6 @@ pub struct Config {
 pub struct PoolConfig {
     pub max_size: usize,
     pub connection_timeout: Duration,
-    #[allow(dead_code)]
-    pub max_lifetime: Option<Duration>,
-    #[allow(dead_code)]
-    pub idle_timeout: Option<Duration>,
 }
 
 // ============================================================================
@@ -71,14 +65,6 @@ impl PoolConfig {
                 "DB_POOL_CONNECTION_TIMEOUT",
                 DEFAULT_CONNECTION_TIMEOUT_SECS,
             )),
-            max_lifetime: parse_optional_duration(
-                "DB_POOL_MAX_LIFETIME",
-                DEFAULT_MAX_LIFETIME_SECS,
-            ),
-            idle_timeout: parse_optional_duration(
-                "DB_POOL_IDLE_TIMEOUT",
-                DEFAULT_IDLE_TIMEOUT_SECS,
-            ),
         }
     }
 }
@@ -109,18 +95,4 @@ fn parse_usize(key: &str, default: usize) -> usize {
         .unwrap_or_else(|_| default.to_string())
         .parse::<usize>()
         .unwrap_or_else(|_| panic!("{key} must be a valid usize number"))
-}
-
-/// Parse an optional duration from environment variable.
-/// Returns `None` if value is "0" (no limit), otherwise `Some(Duration)`.
-fn parse_optional_duration(env_key: &str, default_secs: u64) -> Option<Duration> {
-    let value = env::var(env_key)
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(default_secs);
-
-    match value {
-        0 => None,
-        secs => Some(Duration::from_secs(secs)),
-    }
 }

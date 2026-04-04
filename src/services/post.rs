@@ -132,11 +132,21 @@ pub async fn get_random_posts(
     client: &Client,
     limit: i64,
 ) -> Result<Vec<Post>, tokio_postgres::Error> {
+    // Use TABLESAMPLE BERNOULLI for efficient random sampling.
+    // This scans only ~5% of the table instead of sorting all rows,
+    // then ORDER BY RANDOM() is applied only to the sampled rows (much faster).
     let rows = client
         .query(
-            "SELECT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, u.id, u.username 
-             FROM posts p INNER JOIN users u ON p.created_by = u.id 
-             WHERE p.published = true ORDER BY RANDOM() LIMIT $1",
+            "SELECT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url,
+                    p.created_at, p.updated_at, p.deleted_at, p.published,
+                    p.view_count, p.like_count, u.id, u.username
+             FROM (
+                 SELECT * FROM posts TABLESAMPLE BERNOULLI(5)
+             ) p
+             INNER JOIN users u ON p.created_by = u.id
+             WHERE p.published = true
+             ORDER BY RANDOM()
+             LIMIT $1",
             &[&limit],
         )
         .await?;

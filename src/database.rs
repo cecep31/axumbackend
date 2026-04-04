@@ -10,6 +10,7 @@ pub type DbPool = Pool;
 /// # Pool Configuration
 /// - `max_size`: Maximum number of connections in the pool
 /// - `connection_timeout`: Timeout for acquiring/creating/recycling connections
+///   The recycle timeout ensures connections are tested and refreshed when reused.
 ///
 /// # Errors
 /// Returns `CreatePoolError` if pool creation fails (e.g., invalid URL format)
@@ -24,7 +25,7 @@ pub fn create_pool(database_url: &str, pool_config: &PoolConfig) -> Result<Pool,
             create: Some(pool_config.connection_timeout),
             recycle: Some(pool_config.connection_timeout),
         },
-        ..Default::default()
+        queue_mode: Default::default(),
     });
 
     cfg.create_pool(Some(Runtime::Tokio1), NoTls)
