@@ -102,7 +102,7 @@ pub async fn get_all_posts(
     // Build and execute main query
     let query = if search_param.is_some() {
         format!(
-            "SELECT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, p.bookmark_count, u.id, u.username
+            "SELECT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, p.bookmark_count, u.id, u.username, u.image
              FROM posts p INNER JOIN users u ON p.created_by = u.id
              WHERE p.published = true AND (p.title ILIKE $1 OR p.body ILIKE $1 OR u.username ILIKE $1)
              ORDER BY p.{} {} LIMIT $2 OFFSET $3",
@@ -110,7 +110,7 @@ pub async fn get_all_posts(
         )
     } else {
         format!(
-            "SELECT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, p.bookmark_count, u.id, u.username
+            "SELECT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, p.bookmark_count, u.id, u.username, u.image
              FROM posts p INNER JOIN users u ON p.created_by = u.id
              WHERE p.published = true ORDER BY p.{} {} LIMIT $1 OFFSET $2",
             order_field, order_dir
@@ -140,7 +140,7 @@ pub async fn get_random_posts(
         .query(
             "SELECT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url,
                     p.created_at, p.updated_at, p.deleted_at, p.published,
-                    p.view_count, p.like_count, p.bookmark_count, u.id, u.username
+                    p.view_count, p.like_count, p.bookmark_count, u.id, u.username, u.image
              FROM (
                  SELECT * FROM posts TABLESAMPLE BERNOULLI(5)
              ) p
@@ -165,7 +165,7 @@ pub async fn get_post_by_username_and_slug(
 ) -> Result<Option<Post>, tokio_postgres::Error> {
     let row = client
         .query_opt(
-            "SELECT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, p.bookmark_count, u.id, u.username
+            "SELECT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, p.bookmark_count, u.id, u.username, u.image
              FROM posts p
              INNER JOIN users u ON p.created_by = u.id
              WHERE u.username = $1 AND p.slug = $2 AND p.published = true",
@@ -240,7 +240,7 @@ pub async fn get_posts_by_tag(
     // Build and execute main query
     let query = if search_param.is_some() {
         format!(
-            "SELECT DISTINCT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, p.bookmark_count, u.id, u.username
+            "SELECT DISTINCT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, p.bookmark_count, u.id, u.username, u.image
              FROM posts p INNER JOIN users u ON p.created_by = u.id
              INNER JOIN posts_to_tags ptt ON p.id = ptt.post_id
              INNER JOIN tags t ON ptt.tag_id = t.id
@@ -250,7 +250,7 @@ pub async fn get_posts_by_tag(
         )
     } else {
         format!(
-            "SELECT DISTINCT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, p.bookmark_count, u.id, u.username
+            "SELECT DISTINCT p.id, p.title, p.body, p.created_by, p.slug, p.photo_url, p.created_at, p.updated_at, p.deleted_at, p.published, p.view_count, p.like_count, p.bookmark_count, u.id, u.username, u.image
              FROM posts p INNER JOIN users u ON p.created_by = u.id
              INNER JOIN posts_to_tags ptt ON p.id = ptt.post_id
              INNER JOIN tags t ON ptt.tag_id = t.id

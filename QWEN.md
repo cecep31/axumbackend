@@ -30,7 +30,7 @@ The project follows a modular architecture with the following components:
 |------------|---------|---------|
 | `axum` | 0.8.8 | Web framework for routing and HTTP handling |
 | `axum-valid` | 0.24 | Request validation integration |
-| `tokio-postgres` | 0.7.16 | PostgreSQL async client |
+| `tokio-postgres` | 0.7.17 | PostgreSQL async client |
 | `deadpool-postgres` | 0.14 | Connection pooling |
 | `serde` | 1.0 | Serialization/deserialization |
 | `chrono` | 0.4.43 | Date/time handling with UTC |
@@ -81,7 +81,7 @@ Create a `.env` file in the project root with the following variables:
 
 ```bash
 # Server Configuration
-PORT=8000
+PORT=8080
 
 # Database Configuration
 DATABASE_URL="postgresql://postgres:password@localhost:5432/axumbackend"
@@ -95,7 +95,7 @@ DB_POOL_IDLE_TIMEOUT=600
 
 ### Running the Application
 
-The application connects to a PostgreSQL database specified by the `DATABASE_URL` environment variable. The server listens on the configured port (defaults to 8000).
+The application connects to a PostgreSQL database specified by the `DATABASE_URL` environment variable. The server listens on the configured port (defaults to 8080).
 
 ## API Endpoints
 
@@ -107,7 +107,6 @@ The application connects to a PostgreSQL database specified by the `DATABASE_URL
 | `GET` | `/v1/posts/random?limit=N` | Get N random posts (default: 6) |
 | `GET` | `/v1/posts/tag/{tag}` | Get posts by tag name |
 | `GET` | `/v1/posts/u/{username}/{slug}` | Get specific post by author and slug |
-| `GET` | `/v1/tags` | Get all tags (paginated) |
 
 ### Query Parameters
 
@@ -115,12 +114,11 @@ The application connects to a PostgreSQL database specified by the `DATABASE_URL
 - `offset` (optional, default: 0): Pagination offset (0-10000)
 - `limit` (optional, default: 10): Items per page (1-100)
 - `search` (optional): Search term for title, body, or username
-- `order_by` (optional): Sort field (id, title, created_at, updated_at, view_count, like_count)
+- `order_by` (optional): Sort field (id, title, created_at, updated_at, view_count, like_count, bookmark_count)
 - `order_direction` (optional): Sort direction (asc, desc)
 
-**Tags endpoint** (`/v1/tags`):
-- `offset` (optional, default: 0): Pagination offset
-- `limit` (optional, default: 50): Items per page
+**Random posts endpoint** (`/v1/posts/random`):
+- `limit` (optional, default: 6): Number of random posts to fetch (1-100)
 
 ### Response Format
 
@@ -178,7 +176,7 @@ Error responses:
 
 - Use `axum-valid` with `validator` derive macros
 - Wrap extractors: `Valid(Query<T>)`, `Valid(Path<T>)`
-- Regex validation for path parameters using `once_cell::Lazy`
+- Regex validation for path parameters using `once_cell::sync::Lazy`
 - Validation rules via `#[validate(...)]` attributes
 
 ### Database Patterns
@@ -268,6 +266,7 @@ pub struct Post {
     pub published: bool,
     pub view_count: i64,
     pub like_count: i64,
+    pub bookmark_count: i64,
     pub user: User,
     pub tags: Vec<Tag>,
 }

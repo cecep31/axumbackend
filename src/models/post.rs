@@ -54,6 +54,7 @@ impl From<&Row> for Post {
             user: User {
                 id: row.get(13),
                 username: row.get(14),
+                image: row.get(15),
             },
             tags: Vec::new(),
         }
@@ -82,6 +83,7 @@ impl Post {
             user: User {
                 id: row.get(13),
                 username: row.get(14),
+                image: row.get(15),
             },
             tags: Vec::new(),
         }
