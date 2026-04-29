@@ -1,6 +1,6 @@
 # AGENTS.md - Axum Backend
 
-Single Rust binary (Axum 0.8.8 + tokio-postgres + deadpool-postgres). No workspace, no DB migrations in repo.
+Single Rust binary (Axum 0.8.8, edition 2024, tokio-postgres, deadpool-postgres). No workspace, no DB migrations in repo.
 
 ## Build & Run
 
@@ -9,15 +9,18 @@ cargo run          # requires PostgreSQL and env vars
 cargo build --release
 ```
 
-No custom build scripts or task runners. No tests exist yet (`cargo test` compiles but runs nothing).
+No custom build scripts or task runners. No tests exist yet (`cargo test` compiles but runs 0 tests).
 
 ## Environment
 
-`.env` is optional (`dotenvy::dotenv().ok()` in main.rs). Key vars:
+`.env` is optional (`dotenvy::dotenv().ok()` in main.rs). The app has hardcoded defaults for every variable, so it can start without `.env` (but will fail to connect to DB if defaults are wrong).
+
+Key vars:
 
 ```bash
 PORT=8080                                       # default, not 8000
 DATABASE_URL="postgresql://user:pass@host/db"   # or keyword/value format: host=localhost user=postgres ...
+                                                  # default: host=localhost user=postgres password=postgres dbname=axumbackend
 DB_POOL_MAX_SIZE=20
 DB_POOL_CONNECTION_TIMEOUT=30
 ```
@@ -26,7 +29,7 @@ DB_POOL_CONNECTION_TIMEOUT=30
 
 - **Router wiring**: `handlers/mod.rs` merges sub-routers with `.merge()` and applies `TraceLayer::new_for_http()` + `CorsLayer::permissive()` globally.
 - **State**: `DbPool` (alias for `deadpool_postgres::Pool`) is passed via Axum `State<DbPool>`. Acquire client with `pool.get().await?`.
-- **Routes**: All API routes under `/v1`. `health` handler also mounts on `/` root.
+- **Routes**: All API routes under `/v1`. `health` handler mounts on `/` and `/health` (the README incorrectly lists `/v1/health`).
 - **No DB migrations**: Schema is not tracked in this repo.
 
 ## API Patterns
@@ -45,7 +48,7 @@ DB_POOL_CONNECTION_TIMEOUT=30
 
 ## Docker
 
-Multi-stage Alpine build. Build stage needs `musl-dev postgresql-dev`; runtime needs `libpq`.
+Multi-stage Alpine build (`rust:1-alpine` → `alpine:3.19`). Build stage needs `musl-dev postgresql-dev`; runtime needs `libpq`. Exposes port 8080, runs as non-root user `app` (uid 1000).
 
 ## CI
 
