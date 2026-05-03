@@ -1,12 +1,12 @@
 # Build stage
-FROM rust:1-alpine AS builder
+FROM rust:1-trixie AS builder
 
 WORKDIR /build
 
 # Install build dependencies
-# musl-dev: required for Rust compilation on Alpine
-# postgresql-dev: required for tokio-postgres crate
-RUN apk add --no-cache musl-dev postgresql-dev
+# libpq-dev: required for tokio-postgres crate
+# pkg-config: required for linking C libraries
+RUN apt-get update && apt-get install -y libpq-dev pkg-config && rm -rf /var/lib/apt/lists/*
 
 # Create a dummy main.rs to cache dependencies
 RUN mkdir src
@@ -25,16 +25,16 @@ RUN touch src/main.rs
 RUN cargo build --release
 
 # Production stage
-FROM alpine:3.19 AS production
+FROM debian:trixie-slim AS production
 
 # Install runtime dependencies
-# libpq: PostgreSQL client library (required for tokio-postgres)
+# libpq5: PostgreSQL client library (required for tokio-postgres)
 # binutils: required for strip command
 # ca-certificates: required if app makes HTTPS requests
-RUN apk add --no-cache libpq binutils ca-certificates
+RUN apt-get update && apt-get install -y libpq5 binutils ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
-RUN addgroup -g 1000 app && adduser -u 1000 -G app -s /bin/sh -D app
+RUN groupadd -g 1000 app && useradd -u 1000 -g app -s /bin/sh -m -d /home/app app
 
 # Copy binary from builder and strip it
 COPY --from=builder /build/target/release/axumbackend /usr/local/bin/
