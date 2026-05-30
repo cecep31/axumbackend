@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod database;
 pub mod dto;
+pub mod email;
 pub mod entities;
 pub mod error;
 pub mod handlers;

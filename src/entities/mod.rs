@@ -1,7 +1,9 @@
+pub mod auth_activity_logs;
 pub mod bookmark_folders;
 pub mod holding_types;
 pub mod holdings;
 pub mod notifications;
+pub mod password_reset_tokens;
 pub mod post_bookmarks;
 pub mod post_comments;
 pub mod post_likes;

@@ -1,12 +1,14 @@
 use crate::auth::Claims;
 use crate::config::JwtConfig;
-use crate::entities::{sessions, users};
+use crate::email;
+use crate::entities::{auth_activity_logs, password_reset_tokens, sessions, users};
 use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use rand::{Rng, distributions::Alphanumeric};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Set,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -32,12 +34,27 @@ pub struct RegisterResponse {
     pub username: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct AuthActivityLogResponse {
+    pub id: Uuid,
+    pub user_id: Option<Uuid>,
+    pub activity_type: String,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: chrono::DateTime<Utc>,
+}
+
 #[derive(Debug)]
 pub enum AuthError {
     Db(DbErr),
     UserExists,
     InvalidCredentials,
     InvalidToken,
+    TokenExpired,
+    TokenUsed,
     Token(jsonwebtoken::errors::Error),
     Hash(bcrypt::BcryptError),
 }
@@ -69,11 +86,61 @@ fn generate_refresh_token() -> String {
     format!("pl_{}", random)
 }
 
+fn generate_prefixed_token(prefix: &str) -> String {
+    let random: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect();
+    format!("{}_{}", prefix, random)
+}
+
 fn make_user_brief(user: &users::Model) -> UserBrief {
     UserBrief {
         id: user.id,
         email: user.email.clone(),
         username: user.username.clone(),
+    }
+}
+
+fn activity_response(log: auth_activity_logs::Model) -> AuthActivityLogResponse {
+    AuthActivityLogResponse {
+        id: log.id,
+        user_id: log.user_id,
+        activity_type: log.activity_type,
+        ip_address: log.ip_address,
+        user_agent: log.user_agent,
+        status: log.status,
+        error_message: log.error_message,
+        metadata: log.metadata,
+        created_at: log.created_at.with_timezone(&Utc),
+    }
+}
+
+pub async fn log_activity(
+    db: &DatabaseConnection,
+    user_id: Option<Uuid>,
+    activity_type: &str,
+    status: &str,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    error_message: Option<String>,
+    metadata: Option<serde_json::Value>,
+) {
+    let log = auth_activity_logs::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        user_id: Set(user_id),
+        activity_type: Set(activity_type.to_string()),
+        ip_address: Set(ip_address),
+        user_agent: Set(user_agent),
+        status: Set(status.to_string()),
+        error_message: Set(error_message),
+        metadata: Set(metadata),
+        created_at: Set(Utc::now().into()),
+    };
+
+    if let Err(err) = log.insert(db).await {
+        tracing::warn!(?err, activity_type, "failed to log auth activity");
     }
 }
 
@@ -149,6 +216,18 @@ pub async fn register(
     .insert(db)
     .await?;
 
+    log_activity(
+        db,
+        Some(user.id),
+        "register",
+        "success",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
     Ok(RegisterResponse {
         id: user.id,
         email: user.email,
@@ -170,18 +249,69 @@ pub async fn login(
         )
         .filter(users::Column::DeletedAt.is_null())
         .one(db)
-        .await?
-        .ok_or(AuthError::InvalidCredentials)?;
+        .await?;
+
+    let Some(user) = user else {
+        log_activity(
+            db,
+            None,
+            "login_failed",
+            "failure",
+            None,
+            user_agent.clone(),
+            None,
+            None,
+        )
+        .await;
+        return Err(AuthError::InvalidCredentials);
+    };
 
     let Some(hashed_password) = &user.password else {
+        log_activity(
+            db,
+            Some(user.id),
+            "login_failed",
+            "failure",
+            None,
+            user_agent.clone(),
+            None,
+            None,
+        )
+        .await;
         return Err(AuthError::InvalidCredentials);
     };
 
     if !verify(password, hashed_password)? {
+        log_activity(
+            db,
+            Some(user.id),
+            "login_failed",
+            "failure",
+            None,
+            user_agent.clone(),
+            None,
+            None,
+        )
+        .await;
         return Err(AuthError::InvalidCredentials);
     }
 
-    create_token_and_session(db, &user, user_agent).await
+    let response = create_token_and_session(db, &user, user_agent.clone()).await?;
+    let mut active: users::ActiveModel = user.clone().into();
+    active.last_logged_at = Set(Some(Utc::now().into()));
+    let _ = active.update(db).await;
+    log_activity(
+        db,
+        Some(user.id),
+        "login",
+        "success",
+        None,
+        user_agent,
+        None,
+        None,
+    )
+    .await;
+    Ok(response)
 }
 
 pub async fn check_username_availability(
@@ -228,7 +358,7 @@ pub async fn refresh_token(
         let _ = sessions::Entity::delete_by_id(refresh_token.to_string())
             .exec(db)
             .await;
-        return Err(AuthError::InvalidToken);
+        return Err(AuthError::TokenExpired);
     }
 
     let user = users::Entity::find_by_id(session.user_id)
@@ -240,12 +370,305 @@ pub async fn refresh_token(
     sessions::Entity::delete_by_id(refresh_token.to_string())
         .exec(db)
         .await?;
-    create_token_and_session(db, &user, user_agent).await
+    let response = create_token_and_session(db, &user, user_agent.clone()).await?;
+    log_activity(
+        db,
+        Some(user.id),
+        "token_refresh",
+        "success",
+        None,
+        user_agent,
+        None,
+        None,
+    )
+    .await;
+    Ok(response)
 }
 
-pub async fn logout(db: &DatabaseConnection, refresh_token: &str) -> Result<(), AuthError> {
+pub async fn logout(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    refresh_token: &str,
+    user_agent: Option<String>,
+) -> Result<(), AuthError> {
     sessions::Entity::delete_by_id(refresh_token.to_string())
         .exec(db)
         .await?;
+    log_activity(
+        db,
+        Some(user_id),
+        "logout",
+        "success",
+        None,
+        user_agent,
+        None,
+        None,
+    )
+    .await;
     Ok(())
+}
+
+pub async fn forgot_password(
+    db: &DatabaseConnection,
+    email: &str,
+    user_agent: Option<String>,
+) -> Result<(), AuthError> {
+    let user = users::Entity::find()
+        .filter(users::Column::Email.eq(email))
+        .filter(users::Column::DeletedAt.is_null())
+        .one(db)
+        .await?;
+
+    let Some(user) = user else {
+        return Ok(());
+    };
+
+    password_reset_tokens::Entity::delete_many()
+        .filter(password_reset_tokens::Column::UserId.eq(user.id))
+        .exec(db)
+        .await?;
+
+    let reset_token = generate_prefixed_token("pr");
+    let token = password_reset_tokens::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        user_id: Set(user.id),
+        token: Set(reset_token.clone()),
+        created_at: Set(Utc::now().into()),
+        expires_at: Set((Utc::now() + Duration::hours(1)).into()),
+        used_at: Set(None),
+    };
+    token.insert(db).await?;
+
+    let reset_link = build_password_reset_link(&reset_token);
+
+    if email::is_configured() {
+        if let Err(err) = email::send_password_reset_email(email, &reset_link).await {
+            log_activity(
+                db,
+                Some(user.id),
+                "password_reset_request",
+                "failure",
+                None,
+                user_agent,
+                Some("Failed to send email".to_string()),
+                None,
+            )
+            .await;
+            tracing::warn!(?err, user_id = %user.id, "failed to send password reset email");
+            return Ok(());
+        }
+
+        log_activity(
+            db,
+            Some(user.id),
+            "password_reset_request",
+            "success",
+            None,
+            user_agent,
+            None,
+            None,
+        )
+        .await;
+        return Ok(());
+    }
+
+    log_activity(
+        db,
+        Some(user.id),
+        "password_reset_request",
+        "success",
+        None,
+        user_agent,
+        None,
+        Some(serde_json::json!({
+            "devMode": true,
+            "resetLink": reset_link,
+        })),
+    )
+    .await;
+    Ok(())
+}
+
+fn build_password_reset_link(token: &str) -> String {
+    let base = &crate::config::EmailConfig::get().frontend_reset_password_url;
+    let separator = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{separator}token={token}")
+}
+
+pub async fn reset_password(
+    db: &DatabaseConnection,
+    token: &str,
+    password: &str,
+    user_agent: Option<String>,
+) -> Result<(), AuthError> {
+    let reset_token = password_reset_tokens::Entity::find()
+        .filter(password_reset_tokens::Column::Token.eq(token))
+        .one(db)
+        .await?
+        .ok_or(AuthError::InvalidToken)?;
+
+    if reset_token.used_at.is_some() {
+        return Err(AuthError::TokenUsed);
+    }
+
+    if reset_token.expires_at.with_timezone(&Utc) < Utc::now() {
+        return Err(AuthError::TokenExpired);
+    }
+
+    let user = users::Entity::find_by_id(reset_token.user_id)
+        .filter(users::Column::DeletedAt.is_null())
+        .one(db)
+        .await?
+        .ok_or(AuthError::InvalidToken)?;
+
+    let hashed = hash(password, DEFAULT_COST)?;
+    let mut active_user: users::ActiveModel = user.clone().into();
+    active_user.password = Set(Some(hashed));
+    active_user.updated_at = Set(Some(Utc::now().into()));
+    active_user.update(db).await?;
+
+    let mut active_token: password_reset_tokens::ActiveModel = reset_token.into();
+    active_token.used_at = Set(Some(Utc::now().into()));
+    active_token.update(db).await?;
+
+    sessions::Entity::delete_many()
+        .filter(sessions::Column::UserId.eq(user.id))
+        .exec(db)
+        .await?;
+
+    log_activity(
+        db,
+        Some(user.id),
+        "password_reset",
+        "success",
+        None,
+        user_agent,
+        None,
+        None,
+    )
+    .await;
+    Ok(())
+}
+
+pub async fn change_password(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    current_password: &str,
+    new_password: &str,
+    user_agent: Option<String>,
+) -> Result<(), AuthError> {
+    let user = users::Entity::find_by_id(user_id)
+        .filter(users::Column::DeletedAt.is_null())
+        .one(db)
+        .await?
+        .ok_or(AuthError::InvalidCredentials)?;
+
+    let Some(hashed_password) = &user.password else {
+        return Err(AuthError::InvalidCredentials);
+    };
+
+    if !verify(current_password, hashed_password)? {
+        log_activity(
+            db,
+            Some(user.id),
+            "password_change",
+            "failure",
+            None,
+            user_agent,
+            None,
+            None,
+        )
+        .await;
+        return Err(AuthError::InvalidCredentials);
+    }
+
+    let hashed = hash(new_password, DEFAULT_COST)?;
+    let mut active_user: users::ActiveModel = user.clone().into();
+    active_user.password = Set(Some(hashed));
+    active_user.updated_at = Set(Some(Utc::now().into()));
+    active_user.update(db).await?;
+
+    log_activity(
+        db,
+        Some(user.id),
+        "password_change",
+        "success",
+        None,
+        user_agent,
+        None,
+        None,
+    )
+    .await;
+    Ok(())
+}
+
+pub async fn get_activity_logs(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    activity_type: Option<String>,
+    limit: u64,
+    offset: u64,
+) -> Result<(Vec<AuthActivityLogResponse>, i64), AuthError> {
+    let mut query =
+        auth_activity_logs::Entity::find().filter(auth_activity_logs::Column::UserId.eq(user_id));
+
+    if let Some(activity_type) = activity_type {
+        query = query.filter(auth_activity_logs::Column::ActivityType.eq(activity_type));
+    }
+
+    let total = query.clone().count(db).await? as i64;
+    let logs = query
+        .order_by_desc(auth_activity_logs::Column::CreatedAt)
+        .offset(offset)
+        .limit(limit)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(activity_response)
+        .collect();
+
+    Ok((logs, total))
+}
+
+pub async fn get_recent_activity(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    limit: u64,
+) -> Result<Vec<AuthActivityLogResponse>, AuthError> {
+    let logs = auth_activity_logs::Entity::find()
+        .filter(auth_activity_logs::Column::UserId.eq(user_id))
+        .order_by_desc(auth_activity_logs::Column::CreatedAt)
+        .limit(limit)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(activity_response)
+        .collect();
+
+    Ok(logs)
+}
+
+pub async fn get_failed_logins(
+    db: &DatabaseConnection,
+    since_hours: i64,
+    limit: u64,
+    offset: u64,
+) -> Result<(Vec<AuthActivityLogResponse>, i64), AuthError> {
+    let since = Utc::now() - Duration::hours(since_hours);
+    let query = auth_activity_logs::Entity::find()
+        .filter(auth_activity_logs::Column::ActivityType.eq("login_failed"))
+        .filter(auth_activity_logs::Column::CreatedAt.gte(since));
+
+    let total = query.clone().count(db).await? as i64;
+    let logs = query
+        .order_by_desc(auth_activity_logs::Column::CreatedAt)
+        .offset(offset)
+        .limit(limit)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(activity_response)
+        .collect();
+
+    Ok((logs, total))
 }

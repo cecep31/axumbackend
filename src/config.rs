@@ -12,6 +12,8 @@ const DEFAULT_POOL_MAX_SIZE: usize = 20;
 const DEFAULT_CONNECTION_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_JWT_SECRET: &str = "your-secret-key";
 const DEFAULT_JWT_EXPIRY_HOURS: i64 = 3;
+const DEFAULT_EMAIL_FROM: &str = "noreply@pilput.net";
+const DEFAULT_FRONTEND_RESET_PASSWORD_URL: &str = "http://localhost:3000/reset-password";
 
 // ============================================================================
 // Configuration Structures
@@ -24,6 +26,7 @@ pub struct Config {
     pub database_url: String,
     pub db_pool: PoolConfig,
     pub jwt: JwtConfig,
+    pub email: EmailConfig,
 }
 
 /// Database connection pool configuration
@@ -40,7 +43,16 @@ pub struct JwtConfig {
     pub expiry_hours: i64,
 }
 
+/// Email delivery configuration
+#[derive(Debug, Clone)]
+pub struct EmailConfig {
+    pub resend_api_key: String,
+    pub from: String,
+    pub frontend_reset_password_url: String,
+}
+
 static JWT_CONFIG: OnceLock<JwtConfig> = OnceLock::new();
+static EMAIL_CONFIG: OnceLock<EmailConfig> = OnceLock::new();
 
 impl JwtConfig {
     fn from_env() -> Self {
@@ -56,6 +68,27 @@ impl JwtConfig {
 
     pub fn get() -> &'static JwtConfig {
         JWT_CONFIG.get().expect("JwtConfig not initialized")
+    }
+}
+
+impl EmailConfig {
+    fn from_env() -> Self {
+        Self {
+            resend_api_key: env::var("RESEND_API_KEY").unwrap_or_default(),
+            from: env::var("EMAIL_FROM").unwrap_or_else(|_| DEFAULT_EMAIL_FROM.to_string()),
+            frontend_reset_password_url: env::var("FRONTEND_RESET_PASSWORD_URL")
+                .unwrap_or_else(|_| DEFAULT_FRONTEND_RESET_PASSWORD_URL.to_string()),
+        }
+    }
+
+    pub fn init(cfg: EmailConfig) {
+        EMAIL_CONFIG
+            .set(cfg)
+            .expect("EmailConfig already initialized");
+    }
+
+    pub fn get() -> &'static EmailConfig {
+        EMAIL_CONFIG.get().expect("EmailConfig not initialized")
     }
 }
 
@@ -85,6 +118,7 @@ impl Config {
                 .unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string()),
             db_pool: PoolConfig::from_env(),
             jwt: JwtConfig::from_env(),
+            email: EmailConfig::from_env(),
         }
     }
 }
