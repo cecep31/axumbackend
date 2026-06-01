@@ -37,6 +37,18 @@ pub struct RandomPostQuery {
     pub limit: Option<i64>,
 }
 
+#[derive(Deserialize, Validate)]
+pub struct MyPostsAnalyticsQuery {
+    pub start_date: Option<chrono::NaiveDate>,
+    pub end_date: Option<chrono::NaiveDate>,
+}
+
+#[derive(Deserialize, Validate)]
+pub struct MyPostsLikesByMonthQuery {
+    #[validate(range(min = 1, max = 24))]
+    pub months: Option<i64>,
+}
+
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 pub enum OrderDirection {

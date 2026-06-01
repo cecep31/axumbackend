@@ -89,6 +89,7 @@ pub async fn rate_limit(
                 message: "Too many requests".to_string(),
                 data: None,
                 error: Some("Too many requests. Please try again later.".to_string()),
+                errors: None,
                 meta: None,
             });
 

@@ -173,7 +173,9 @@ async fn create_token_and_session(
         user_id: Set(user.id),
         created_at: Set(Some(now.into())),
         user_agent: Set(user_agent),
-        expires_at: Set(Some((now + Duration::days(30)).into())),
+        expires_at: Set(Some(
+            (now + Duration::days(jwt.refresh_token_expiry_days)).into(),
+        )),
     };
     session.insert(db).await?;
 

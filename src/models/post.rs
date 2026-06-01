@@ -17,6 +17,7 @@ pub struct Post {
     pub id: Uuid,
     pub title: String,
     pub body: Option<String>,
+    #[serde(skip_serializing)]
     pub created_by: Uuid,
     pub slug: String,
     pub photo_url: Option<String>,
@@ -24,6 +25,7 @@ pub struct Post {
     pub updated_at: Option<DateTime<Utc>>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub published: bool,
+    pub published_at: Option<DateTime<Utc>>,
     pub view_count: i64,
     pub like_count: i64,
     pub bookmark_count: i64,
@@ -61,6 +63,7 @@ impl Post {
             updated_at: to_utc(post.updated_at),
             deleted_at: to_utc(post.deleted_at),
             published: post.published.unwrap_or(true),
+            published_at: to_utc(post.published_at),
             view_count: post.view_count.unwrap_or_default(),
             like_count: post.like_count.unwrap_or_default(),
             bookmark_count: post.bookmark_count.unwrap_or_default(),

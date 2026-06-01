@@ -35,9 +35,13 @@ pub struct UserResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_following: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_super_admin: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<Profile>,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 fn to_utc(value: Option<DateTime<FixedOffset>>) -> Option<DateTime<Utc>> {
@@ -96,9 +100,11 @@ impl UserResponse {
             followers_count: user.followers_count.unwrap_or_default(),
             following_count: user.following_count.unwrap_or_default(),
             is_following,
+            is_super_admin: user.is_super_admin,
             profile: profile.map(Into::into),
             created_at: to_utc(user.created_at),
             updated_at: to_utc(user.updated_at),
+            deleted_at: to_utc(user.deleted_at),
         }
     }
 }

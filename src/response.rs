@@ -28,6 +28,8 @@ pub struct ApiResponse<T> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<Meta>,
 }
 
@@ -38,6 +40,7 @@ impl<T> ApiResponse<T> {
             message: message.into(),
             data: Some(data),
             error: None,
+            errors: None,
             meta: None,
         }
     }
@@ -60,6 +63,7 @@ impl<T> ApiResponse<T> {
             message: message.into(),
             data: Some(data),
             error: None,
+            errors: None,
             meta: Some(Meta {
                 total_items: total,
                 offset,

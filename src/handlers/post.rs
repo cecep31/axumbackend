@@ -2,8 +2,8 @@ use crate::auth::AuthUser;
 use crate::database::DbPool;
 use crate::dto::common::{PostIdPath, UsernamePath};
 use crate::dto::post::{
-    CreatePostRequest, PostPaginationQuery, PostPath, RandomPostQuery, TagPath, UpdatePostRequest,
-    post_pagination_params,
+    CreatePostRequest, MyPostsAnalyticsQuery, MyPostsLikesByMonthQuery, PostPaginationQuery,
+    PostPath, RandomPostQuery, TagPath, UpdatePostRequest, post_pagination_params,
 };
 use crate::error::AppError;
 use crate::models::post::{Post, SitemapPost};
@@ -120,6 +120,25 @@ pub async fn get_trending_posts(
     Ok(Json(ApiResponse::success_with_message(
         "Successfully retrieved trending posts",
         posts,
+    )))
+}
+
+pub async fn get_posts_for_you(
+    State(pool): State<DbPool>,
+    _auth_user: AuthUser,
+    Valid(query): Valid<Query<PostPaginationQuery>>,
+) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
+    let (offset, limit, search, order_by, order_direction) = post_pagination_params(&query);
+    let (posts, total) =
+        services::post::get_all_posts(&pool, offset, limit, search, order_by, order_direction)
+            .await?;
+
+    Ok(Json(ApiResponse::with_meta_message(
+        "Successfully retrieved posts",
+        posts,
+        total,
+        limit,
+        offset,
     )))
 }
 
@@ -335,6 +354,121 @@ pub async fn get_posts_by_username(
     )))
 }
 
+pub async fn get_my_posts(
+    State(pool): State<DbPool>,
+    auth_user: AuthUser,
+    Valid(query): Valid<Query<PostPaginationQuery>>,
+) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(10);
+    let (posts, total) =
+        services::post::get_posts_by_created_by(&pool, auth_user.id, offset, limit).await?;
+
+    Ok(Json(ApiResponse::with_meta_message(
+        "Successfully retrieved posts",
+        posts,
+        total,
+        limit,
+        offset,
+    )))
+}
+
+pub async fn get_my_post(
+    State(pool): State<DbPool>,
+    auth_user: AuthUser,
+    Valid(Path(params)): Valid<Path<PostIdPath>>,
+) -> Result<Json<ApiResponse<Post>>, AppError> {
+    match services::post::get_post_by_id_for_author(&pool, params.id, auth_user.id).await? {
+        Some(post) => Ok(Json(ApiResponse::success_with_message(
+            "Successfully retrieved post",
+            post,
+        ))),
+        None => Err(AppError::NotFound("Post not found".to_string())),
+    }
+}
+
+pub async fn update_my_post(
+    State(pool): State<DbPool>,
+    auth_user: AuthUser,
+    Valid(Path(params)): Valid<Path<PostIdPath>>,
+    Valid(Json(req)): Valid<Json<UpdatePostRequest>>,
+) -> Result<Json<ApiResponse<Post>>, AppError> {
+    ensure_author(&pool, params.id, &auth_user).await?;
+    match services::post::update_post(
+        &pool,
+        params.id,
+        services::post::UpdatePostInput {
+            title: req.title,
+            photo_url: req.photo_url,
+            slug: req.slug,
+            body: req.body,
+            published: req.published,
+            tags: req.tags,
+        },
+    )
+    .await?
+    {
+        Some(post) => Ok(Json(ApiResponse::success_with_message(
+            "Post updated successfully",
+            post,
+        ))),
+        None => Err(AppError::NotFound("Post not found".to_string())),
+    }
+}
+
+pub async fn delete_my_post(
+    State(pool): State<DbPool>,
+    auth_user: AuthUser,
+    Valid(Path(params)): Valid<Path<PostIdPath>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    ensure_author(&pool, params.id, &auth_user).await?;
+    match services::post::soft_delete_post(&pool, params.id).await? {
+        true => Ok(Json(ApiResponse::success_with_message(
+            "Successfully deleted post",
+            serde_json::Value::Null,
+        ))),
+        false => Err(AppError::NotFound("Post not found".to_string())),
+    }
+}
+
+pub async fn get_my_posts_analytics(
+    State(pool): State<DbPool>,
+    auth_user: AuthUser,
+    Valid(query): Valid<Query<MyPostsAnalyticsQuery>>,
+) -> Result<Json<ApiResponse<crate::models::post_view::MyPostsAnalyticsResponse>>, AppError> {
+    let analytics = services::post_view::get_my_posts_analytics(
+        &pool,
+        auth_user.id,
+        query.start_date,
+        query.end_date,
+    )
+    .await?;
+
+    Ok(Json(ApiResponse::success_with_message(
+        "Successfully retrieved post analytics",
+        analytics,
+    )))
+}
+
+pub async fn get_my_posts_likes_by_month(
+    State(pool): State<DbPool>,
+    auth_user: AuthUser,
+    Valid(query): Valid<Query<MyPostsLikesByMonthQuery>>,
+) -> Result<Json<ApiResponse<Vec<crate::models::post_view::MyPostsLikesByMonthResponse>>>, AppError>
+{
+    let data = services::post_view::get_my_posts_likes_by_month(
+        &pool,
+        auth_user.id,
+        query.months.unwrap_or(12),
+    )
+    .await?;
+
+    Ok(Json(ApiResponse::success_with_message(
+        "Successfully retrieved likes by month",
+        data,
+    )))
+}
+
 pub async fn get_post(
     State(pool): State<DbPool>,
     Valid(Path(params)): Valid<Path<PostIdPath>>,
@@ -421,6 +555,17 @@ pub fn routes() -> Router<DbPool> {
         .route("/api/posts", get(get_posts).post(create_post))
         .route("/api/posts/random", get(get_random_posts))
         .route("/api/posts/trending", get(get_trending_posts))
+        .route("/api/posts/me", get(get_my_posts))
+        .route("/api/posts/me/analytics", get(get_my_posts_analytics))
+        .route(
+            "/api/posts/me/analytics/likes-by-month",
+            get(get_my_posts_likes_by_month),
+        )
+        .route(
+            "/api/posts/me/{id}",
+            get(get_my_post).put(update_my_post).delete(delete_my_post),
+        )
+        .route("/api/posts/feed/for-you", get(get_posts_for_you))
         .route("/api/posts/sitemap", get(get_posts_for_sitemap))
         .route("/api/posts/username/{username}", get(get_posts_by_username))
         .route(

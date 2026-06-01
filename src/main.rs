@@ -1,4 +1,4 @@
-use axumbackend::{config, database, handlers};
+use axumbackend::{config, database, handlers, rate_limit::RateLimiter};
 use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -42,7 +42,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.db_pool.connection_timeout
     );
 
-    let app = handlers::create_router().with_state(pool);
+    let limiter = if config.rate_limit.max_requests == 0 {
+        tracing::info!("Rate limiter disabled");
+        None
+    } else {
+        tracing::info!(
+            "Rate limiter enabled (max_requests: {}, window: {:?})",
+            config.rate_limit.max_requests,
+            config.rate_limit.window
+        );
+        Some(RateLimiter::new(
+            config.rate_limit.max_requests,
+            config.rate_limit.window,
+        ))
+    };
+
+    let app = handlers::create_router(limiter).with_state(pool);
 
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr)

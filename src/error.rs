@@ -40,6 +40,7 @@ impl IntoResponse for AppError {
             message: error_message.clone(),
             data: None,
             error: Some(error_message),
+            errors: None,
             meta: None,
         });
 

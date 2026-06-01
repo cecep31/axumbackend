@@ -94,6 +94,21 @@ pub async fn delete_user(
     }
 }
 
+pub async fn restore_user(
+    State(pool): State<DbPool>,
+    _admin_user: AdminUser,
+    Valid(Path(params)): Valid<Path<UserIdPath>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    match services::user::restore(&pool, params.id).await {
+        Ok(true) => Ok(Json(ApiResponse::success_with_message(
+            "Successfully restored user",
+            serde_json::Value::Null,
+        ))),
+        Ok(false) => Err(AppError::NotFound("User not found".to_string())),
+        Err(e) => Err(AppError::from(e)),
+    }
+}
+
 pub async fn get_by_username(
     State(pool): State<DbPool>,
     Valid(Path(params)): Valid<Path<UsernamePath>>,
@@ -235,5 +250,6 @@ pub fn routes() -> Router<DbPool> {
         .route("/api/users/{id}/followers", get(get_followers))
         .route("/api/users/{id}/following", get(get_following))
         .route("/api/users/{id}/follow-stats", get(get_follow_stats))
+        .route("/api/users/{id}/restore", post(restore_user))
         .route("/api/users/{id}", get(get_by_id).delete(delete_user))
 }

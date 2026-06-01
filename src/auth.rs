@@ -1,6 +1,8 @@
 use crate::config::JwtConfig;
 use crate::error::AppError;
+use crate::response::ApiResponse;
 use axum::{
+    Json,
     extract::FromRequestParts,
     http::{StatusCode, request::Parts},
     response::{IntoResponse, Response},
@@ -28,6 +30,22 @@ pub struct AuthUser {
     pub is_super_admin: bool,
 }
 
+fn auth_error(status: StatusCode, message: impl Into<String>) -> Response {
+    let message = message.into();
+    (
+        status,
+        Json(ApiResponse::<serde_json::Value> {
+            success: false,
+            message: message.clone(),
+            data: None,
+            error: Some(message),
+            errors: None,
+            meta: None,
+        }),
+    )
+        .into_response()
+}
+
 impl<S> FromRequestParts<S> for AuthUser
 where
     S: Send + Sync,
@@ -36,15 +54,21 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let Some(header) = parts.headers.get(axum::http::header::AUTHORIZATION) else {
-            return Err((StatusCode::UNAUTHORIZED, "missing authorization header").into_response());
+            return Err(auth_error(
+                StatusCode::UNAUTHORIZED,
+                "missing authorization header",
+            ));
         };
 
         let Ok(header) = header.to_str() else {
-            return Err((StatusCode::UNAUTHORIZED, "invalid authorization header").into_response());
+            return Err(auth_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid authorization header",
+            ));
         };
 
         let Some(token) = header.strip_prefix("Bearer ") else {
-            return Err((StatusCode::UNAUTHORIZED, "invalid bearer token").into_response());
+            return Err(auth_error(StatusCode::UNAUTHORIZED, "invalid bearer token"));
         };
 
         let token = decode::<Claims>(
@@ -52,7 +76,7 @@ where
             &DecodingKey::from_secret(JwtConfig::get().secret.as_bytes()),
             &Validation::default(),
         )
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid or expired token").into_response())?;
+        .map_err(|_| auth_error(StatusCode::UNAUTHORIZED, "invalid or expired token"))?;
 
         Ok(AuthUser {
             id: token.claims.user_id,
@@ -76,7 +100,7 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let auth_user = AuthUser::from_request_parts(parts, state).await?;
         if !auth_user.is_super_admin {
-            return Err((StatusCode::FORBIDDEN, "admin access required").into_response());
+            return Err(auth_error(StatusCode::FORBIDDEN, "admin access required"));
         }
         Ok(AdminUser(auth_user))
     }

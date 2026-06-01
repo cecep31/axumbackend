@@ -4,6 +4,20 @@ use serde::Serialize;
 use uuid::Uuid;
 
 #[derive(Serialize)]
+pub struct MyPostsAnalyticsResponse {
+    pub total_posts: i64,
+    pub total_views: i64,
+    pub total_likes: i64,
+    pub total_bookmarks: i64,
+}
+
+#[derive(Serialize)]
+pub struct MyPostsLikesByMonthResponse {
+    pub month: String,
+    pub total_likes: i64,
+}
+
+#[derive(Serialize)]
 pub struct PostViewResponse {
     pub id: Uuid,
     pub post_id: Uuid,

@@ -184,6 +184,48 @@ pub async fn get_posts_by_username(
     Ok((hydrate_posts(db, post_models, true).await?, total))
 }
 
+pub async fn get_posts_by_created_by(
+    db: &DatabaseConnection,
+    user_id: uuid::Uuid,
+    offset: i64,
+    limit: i64,
+) -> Result<(Vec<Post>, i64), DbErr> {
+    let query = posts::Entity::find()
+        .filter(posts::Column::CreatedBy.eq(user_id))
+        .filter(posts::Column::DeletedAt.is_null());
+
+    let total = query.clone().count(db).await? as i64;
+    let post_models = query
+        .order_by_desc(posts::Column::CreatedAt)
+        .limit(limit.max(0) as u64)
+        .offset(offset.max(0) as u64)
+        .all(db)
+        .await?;
+
+    Ok((hydrate_posts(db, post_models, true).await?, total))
+}
+
+pub async fn get_post_by_id_for_author(
+    db: &DatabaseConnection,
+    post_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> Result<Option<Post>, DbErr> {
+    let post = posts::Entity::find_by_id(post_id)
+        .filter(posts::Column::CreatedBy.eq(user_id))
+        .filter(posts::Column::DeletedAt.is_null())
+        .one(db)
+        .await?;
+
+    match post {
+        Some(post) => {
+            let user = post.find_related(users::Entity).one(db).await?;
+            let tags = post.find_related(tags::Entity).all(db).await?;
+            Ok(Some(hydrate_post(&post, user, tags, false).await?))
+        }
+        None => Ok(None),
+    }
+}
+
 pub async fn get_random_posts(db: &DatabaseConnection, limit: i64) -> Result<Vec<Post>, DbErr> {
     let post_models = posts::Entity::find()
         .filter(posts::Column::Published.eq(true))

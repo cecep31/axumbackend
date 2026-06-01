@@ -11,7 +11,15 @@ pub struct SitemapTag {
 pub struct Tag {
     pub id: i32,
     pub name: String,
-    pub created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TrendingTag {
+    pub id: i32,
+    pub name: String,
+    pub total_views: i64,
+    pub total_likes: i64,
+    pub trending_score: i64,
 }
 
 fn to_utc(value: Option<DateTime<FixedOffset>>) -> Option<DateTime<Utc>> {
@@ -23,7 +31,6 @@ impl From<crate::entities::tags::Model> for Tag {
         Self {
             id: model.id,
             name: model.name,
-            created_at: to_utc(model.created_at),
         }
     }
 }

@@ -89,3 +89,20 @@ pub async fn soft_delete(db: &DatabaseConnection, id: Uuid) -> Result<bool, DbEr
 
     Ok(true)
 }
+
+pub async fn restore(db: &DatabaseConnection, id: Uuid) -> Result<bool, DbErr> {
+    let Some(user) = users::Entity::find_by_id(id)
+        .filter(users::Column::DeletedAt.is_not_null())
+        .one(db)
+        .await?
+    else {
+        return Ok(false);
+    };
+
+    let mut active = user.into_active_model();
+    active.deleted_at = Set(None);
+    active.updated_at = Set(Some(Utc::now().into()));
+    active.update(db).await?;
+
+    Ok(true)
+}
