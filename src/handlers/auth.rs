@@ -1,9 +1,9 @@
 use crate::auth::AuthUser;
 use crate::database::DbPool;
 use crate::dto::auth::{
-    ActivityLogQuery, AvailabilityResponse, ChangePasswordRequest, CheckUsernameRequest, EmailPath,
-    FailedLoginsQuery, ForgotPasswordRequest, LoginRequest, LogoutRequest, RecentActivityQuery,
-    RefreshTokenRequest, RegisterRequest, ResetPasswordRequest,
+    ActivityLogQuery, ChangePasswordRequest, FailedLoginsQuery, ForgotPasswordRequest,
+    LoginRequest, LogoutRequest, RecentActivityQuery, RefreshTokenRequest, RegisterRequest,
+    ResetPasswordRequest,
 };
 use crate::error::AppError;
 use crate::rate_limit::{RateLimiter, rate_limit};
@@ -11,7 +11,7 @@ use crate::response::ApiResponse;
 use crate::services::{self, auth::AuthError};
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     middleware,
     routing::{get, post},
@@ -79,42 +79,6 @@ pub async fn login(
     Ok(Json(ApiResponse::success_with_message(
         "Login successful",
         response,
-    )))
-}
-
-pub async fn check_username(
-    State(pool): State<DbPool>,
-    Valid(Json(req)): Valid<Json<CheckUsernameRequest>>,
-) -> Result<Json<ApiResponse<AvailabilityResponse>>, AppError> {
-    let available = services::auth::check_username_availability(&pool, &req.username)
-        .await
-        .map_err(|err| map_auth_error("Failed to check username availability", err))?;
-
-    Ok(Json(ApiResponse::success_with_message(
-        "Username availability checked",
-        AvailabilityResponse {
-            username: Some(req.username),
-            email: None,
-            available,
-        },
-    )))
-}
-
-pub async fn check_email(
-    State(pool): State<DbPool>,
-    Valid(Path(params)): Valid<Path<EmailPath>>,
-) -> Result<Json<ApiResponse<AvailabilityResponse>>, AppError> {
-    let available = services::auth::check_email_availability(&pool, &params.email)
-        .await
-        .map_err(|err| map_auth_error("Failed to check email availability", err))?;
-
-    Ok(Json(ApiResponse::success_with_message(
-        "Email availability checked",
-        AvailabilityResponse {
-            username: None,
-            email: Some(params.email),
-            available,
-        },
     )))
 }
 
@@ -296,8 +260,6 @@ pub fn routes() -> Router<DbPool> {
     let login_limiter = RateLimiter::new(5, Duration::from_secs(60));
     let register_limiter = RateLimiter::new(3, Duration::from_secs(60));
     let refresh_limiter = RateLimiter::new(20, Duration::from_secs(60));
-    let availability_limiter = RateLimiter::new(30, Duration::from_secs(60));
-
     Router::new()
         .route(
             "/api/auth/register",
@@ -307,20 +269,6 @@ pub fn routes() -> Router<DbPool> {
         .route(
             "/api/auth/login",
             post(login).route_layer(middleware::from_fn_with_state(login_limiter, rate_limit)),
-        )
-        .route(
-            "/api/auth/check-username",
-            post(check_username).route_layer(middleware::from_fn_with_state(
-                availability_limiter.clone(),
-                rate_limit,
-            )),
-        )
-        .route(
-            "/api/auth/email/{email}",
-            get(check_email).route_layer(middleware::from_fn_with_state(
-                availability_limiter,
-                rate_limit,
-            )),
         )
         .route(
             "/api/auth/refresh",

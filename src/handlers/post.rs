@@ -11,7 +11,7 @@ use crate::response::ApiResponse;
 use crate::services;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
     routing::{get, post},
 };
 use axum_valid::Valid;
@@ -140,6 +140,47 @@ pub async fn get_posts_for_you(
         limit,
         offset,
     )))
+}
+
+fn detect_allowed_image(data: &[u8]) -> bool {
+    let is_jpeg = data.len() >= 3 && data[0..3] == [0xff, 0xd8, 0xff];
+    let is_png = data.len() >= 8 && data[0..8] == [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let is_webp = data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP";
+    is_jpeg || is_png || is_webp
+}
+
+pub async fn upload_image_posts(
+    _auth_user: AuthUser,
+    mut multipart: Multipart,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    const MAX_POST_IMAGE_SIZE: usize = 1024 * 1024;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|err| AppError::BadRequest(format!("Failed to upload image: {err}")))?
+    {
+        if field.name() != Some("image") {
+            continue;
+        }
+
+        let data = field
+            .bytes()
+            .await
+            .map_err(|err| AppError::BadRequest(format!("Failed to read image: {err}")))?;
+        if data.len() > MAX_POST_IMAGE_SIZE {
+            return Err(AppError::BadRequest("File is too large".to_string()));
+        }
+        if !detect_allowed_image(&data) {
+            return Err(AppError::BadRequest("Invalid file type".to_string()));
+        }
+
+        return Err(AppError::BadRequest(
+            "Storage is not configured".to_string(),
+        ));
+    }
+
+    Err(AppError::BadRequest("No file uploaded".to_string()))
 }
 
 pub async fn get_posts_for_sitemap(
@@ -566,6 +607,7 @@ pub fn routes() -> Router<DbPool> {
             get(get_my_post).put(update_my_post).delete(delete_my_post),
         )
         .route("/api/posts/feed/for-you", get(get_posts_for_you))
+        .route("/api/posts/image", post(upload_image_posts))
         .route("/api/posts/sitemap", get(get_posts_for_sitemap))
         .route("/api/posts/username/{username}", get(get_posts_by_username))
         .route(

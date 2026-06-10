@@ -1,6 +1,8 @@
 mod auth;
 mod bookmark;
+mod chat;
 mod comment;
+mod exchange_rate;
 mod health;
 mod holding;
 mod notification;
@@ -19,7 +21,9 @@ pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<DbPool>
         .merge(health::routes())
         .merge(auth::routes())
         .merge(bookmark::routes())
+        .merge(chat::routes())
         .merge(comment::routes())
+        .merge(exchange_rate::routes())
         .merge(holding::routes())
         .merge(notification::routes())
         .merge(post::routes())

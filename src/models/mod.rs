@@ -1,4 +1,5 @@
 pub mod bookmark;
+pub mod chat;
 pub mod comment;
 pub mod holding;
 pub mod notification;

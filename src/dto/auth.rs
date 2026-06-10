@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use validator::Validate;
 
 #[derive(Deserialize, Validate)]
@@ -17,12 +17,6 @@ pub struct LoginRequest {
     pub identifier: String,
     #[validate(length(min = 6))]
     pub password: String,
-}
-
-#[derive(Deserialize, Validate)]
-pub struct CheckUsernameRequest {
-    #[validate(length(min = 3, max = 30))]
-    pub username: String,
 }
 
 #[derive(Deserialize, Validate)]
@@ -83,17 +77,4 @@ pub struct FailedLoginsQuery {
     pub limit: Option<i64>,
     #[validate(range(min = 1, max = 8760))]
     pub since_hours: Option<i64>,
-}
-
-#[derive(Deserialize, Validate)]
-pub struct EmailPath {
-    #[validate(email)]
-    pub email: String,
-}
-
-#[derive(Serialize)]
-pub struct AvailabilityResponse {
-    pub username: Option<String>,
-    pub email: Option<String>,
-    pub available: bool,
 }
