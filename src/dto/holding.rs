@@ -113,3 +113,14 @@ pub struct MonthlyQuery {
     pub end_month: Option<i32>,
     pub end_year: Option<i32>,
 }
+
+/// Query params for `GET /api/holdings/calendar` (corporate-actions calendar).
+/// `from`/`to` are optional `YYYY-MM-DD` strings.
+#[derive(Deserialize, Validate)]
+pub struct CalendarQuery {
+    /// Inclusive start date (`YYYY-MM-DD`). Defaults to the first day of the
+    /// current month.
+    pub from: Option<String>,
+    /// Inclusive end date (`YYYY-MM-DD`). Defaults to 3 months from today.
+    pub to: Option<String>,
+}

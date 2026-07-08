@@ -11,7 +11,7 @@ use crate::response::ApiResponse;
 use crate::services;
 use axum::{
     Json, Router,
-    extract::{Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     routing::{get, post},
 };
 use axum_valid::Valid;
@@ -607,7 +607,10 @@ pub fn routes() -> Router<DbPool> {
             get(get_my_post).put(update_my_post).delete(delete_my_post),
         )
         .route("/api/posts/feed/for-you", get(get_posts_for_you))
-        .route("/api/posts/image", post(upload_image_posts))
+        .route(
+            "/api/posts/image",
+            post(upload_image_posts).route_layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
         .route("/api/posts/sitemap", get(get_posts_for_sitemap))
         .route("/api/posts/username/{username}", get(get_posts_by_username))
         .route(

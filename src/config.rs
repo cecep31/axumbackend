@@ -61,6 +61,7 @@ pub struct Config {
     pub queue: QueueConfig,
     pub openrouter: OpenRouterConfig,
     pub github: GitHubConfig,
+    pub market: MarketConfig,
 }
 
 /// Database connection pool configuration
@@ -157,8 +158,17 @@ pub struct GitHubConfig {
     pub redirect_uri: String,
 }
 
+/// External financial market data provider configuration.
+#[derive(Debug, Clone)]
+pub struct MarketConfig {
+    /// RapidAPI key for the Indonesia Stock Exchange (IDX) corporate-actions API.
+    /// Leave empty to disable IDX corporate-action fetching (returns empty results).
+    pub rapidapi_idx_key: String,
+}
+
 static JWT_CONFIG: OnceLock<JwtConfig> = OnceLock::new();
 static EMAIL_CONFIG: OnceLock<EmailConfig> = OnceLock::new();
+static MARKET_CONFIG: OnceLock<MarketConfig> = OnceLock::new();
 
 impl JwtConfig {
     fn from_env() -> Self {
@@ -253,6 +263,7 @@ impl Config {
             queue: QueueConfig::from_env(),
             openrouter: OpenRouterConfig::from_env(),
             github: GitHubConfig::from_env(),
+            market: MarketConfig::from_env(),
         }
     }
 }
@@ -399,6 +410,24 @@ impl GitHubConfig {
             redirect_uri: env::var("GITHUB_REDIRECT_URI")
                 .unwrap_or_else(|_| DEFAULT_GITHUB_REDIRECT_URI.to_string()),
         }
+    }
+}
+
+impl MarketConfig {
+    fn from_env() -> Self {
+        Self {
+            rapidapi_idx_key: env::var("RAPIDAPI_IDX_KEY").unwrap_or_default(),
+        }
+    }
+
+    pub fn init(cfg: MarketConfig) {
+        MARKET_CONFIG
+            .set(cfg)
+            .expect("MarketConfig already initialized");
+    }
+
+    pub fn get() -> &'static MarketConfig {
+        MARKET_CONFIG.get().expect("MarketConfig not initialized")
     }
 }
 

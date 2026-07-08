@@ -55,7 +55,7 @@ pub async fn get_by_id(
     _admin_user: AdminUser,
     Valid(Path(params)): Valid<Path<UserIdPath>>,
 ) -> Result<Json<ApiResponse<UserResponse>>, AppError> {
-    match services::user::get_by_id(&pool, params.id).await {
+    match services::user::get_admin_by_id(&pool, params.id).await {
         Ok(Some(user)) => Ok(Json(ApiResponse::success_with_message(
             "Successfully retrieved user",
             user,
@@ -69,7 +69,7 @@ pub async fn get_me(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
 ) -> Result<Json<ApiResponse<UserResponse>>, AppError> {
-    match services::user::get_by_id(&pool, auth_user.id).await {
+    match services::user::get_current_user(&pool, auth_user.id).await {
         Ok(Some(user)) => Ok(Json(ApiResponse::success_with_message(
             "Successfully retrieved current user",
             user,

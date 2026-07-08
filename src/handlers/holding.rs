@@ -1,10 +1,11 @@
 use crate::auth::AuthUser;
 use crate::database::DbPool;
 use crate::dto::holding::{
-    CompareQuery, CreateHoldingRequest, DuplicateHoldingRequest, HoldingPath, HoldingQuery,
-    MonthlyQuery, SummaryQuery, TrendsQuery, UpdateHoldingRequest,
+    CalendarQuery, CompareQuery, CreateHoldingRequest, DuplicateHoldingRequest, HoldingPath,
+    HoldingQuery, MonthlyQuery, SummaryQuery, TrendsQuery, UpdateHoldingRequest,
 };
 use crate::error::AppError;
+use crate::models::corporate_action::CorporateActionCalendarResponse;
 use crate::models::holding::{
     DuplicateResultItem, HoldingMonthComparisonResponse, HoldingMonthlyDataResponse,
     HoldingResponse, HoldingSummaryResponse, HoldingSyncResponse, HoldingTrendResponse,
@@ -18,6 +19,7 @@ use axum::{
     routing::{get, post},
 };
 use axum_valid::Valid;
+use chrono::{Datelike, NaiveDate, Utc};
 
 fn map_holding_error(err: HoldingError) -> AppError {
     match err {
@@ -307,6 +309,34 @@ pub async fn duplicate_holdings(
     ))
 }
 
+/// `GET /api/holdings/calendar` — corporate-actions calendar (dividends + RUPS)
+/// for the authenticated user. Mirrors echobackend's `CorporateActionHandler.GetCalendar`.
+pub async fn get_calendar(
+    _auth_user: AuthUser,
+    Valid(Query(query)): Valid<Query<CalendarQuery>>,
+) -> Result<Json<ApiResponse<CorporateActionCalendarResponse>>, AppError> {
+    let now = Utc::now();
+    let from = query
+        .from
+        .as_deref()
+        .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+        .unwrap_or_else(|| {
+            NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
+                .expect("first day of current month is always valid")
+        });
+    let to = query
+        .to
+        .as_deref()
+        .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+        .unwrap_or_else(|| services::corporate_action::add_months(now.date_naive(), 3));
+
+    let result = services::corporate_action::get_calendar(from, to).await;
+    Ok(Json(ApiResponse::success_with_message(
+        "Corporate actions calendar fetched successfully",
+        result,
+    )))
+}
+
 pub fn routes() -> Router<DbPool> {
     Router::new()
         .route("/api/holdings", get(get_holdings).post(create_holding))
@@ -314,6 +344,7 @@ pub fn routes() -> Router<DbPool> {
         .route("/api/holdings/trends", get(get_trends))
         .route("/api/holdings/compare", get(compare_months))
         .route("/api/holdings/monthly", get(get_monthly_data))
+        .route("/api/holdings/calendar", get(get_calendar))
         .route("/api/holdings/duplicate", post(duplicate_holdings))
         .route("/api/holdings/sync", post(sync_prices))
         .route(

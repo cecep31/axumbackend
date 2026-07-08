@@ -55,7 +55,12 @@ async fn load_like_user_map(
     db: &DatabaseConnection,
     likes: &[post_likes::Model],
 ) -> Result<std::collections::HashMap<Uuid, UserResponse>, DbErr> {
-    user_hydration::load_user_response_map(db, likes.iter().map(|like| like.user_id)).await
+    user_hydration::load_user_response_map(
+        db,
+        likes.iter().map(|like| like.user_id),
+        crate::models::user::UserView::General,
+    )
+    .await
 }
 
 pub async fn like_post(

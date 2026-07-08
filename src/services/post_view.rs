@@ -61,7 +61,12 @@ async fn load_view_user_map(
     db: &DatabaseConnection,
     views: &[post_views::Model],
 ) -> Result<std::collections::HashMap<Uuid, UserResponse>, DbErr> {
-    user_hydration::load_user_response_map(db, views.iter().filter_map(|view| view.user_id)).await
+    user_hydration::load_user_response_map(
+        db,
+        views.iter().filter_map(|view| view.user_id),
+        crate::models::user::UserView::General,
+    )
+    .await
 }
 
 pub async fn record_view(

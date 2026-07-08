@@ -182,7 +182,7 @@ pub async fn profile(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
 ) -> Result<Json<ApiResponse<crate::models::user::UserResponse>>, AppError> {
-    match services::user::get_by_id(&pool, auth_user.id).await {
+    match services::user::get_current_user(&pool, auth_user.id).await {
         Ok(Some(user)) => Ok(Json(ApiResponse::success_with_message(
             "Profile retrieved successfully",
             user,
