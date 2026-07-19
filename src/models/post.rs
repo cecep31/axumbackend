@@ -23,13 +23,16 @@ pub struct Post {
     pub photo_url: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<DateTime<Utc>>,
     pub published: bool,
     pub published_at: Option<DateTime<Utc>>,
     pub view_count: i64,
     pub like_count: i64,
     pub bookmark_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<User>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<Tag>,
 }
 

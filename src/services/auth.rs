@@ -1,5 +1,5 @@
 use crate::auth::Claims;
-use crate::config::JwtConfig;
+use crate::config::{GitHubConfig, JwtConfig};
 use crate::email;
 use crate::entities::{auth_activity_logs, password_reset_tokens, sessions, users};
 use bcrypt::{DEFAULT_COST, hash, verify};
@@ -10,7 +10,9 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect, Set,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use uuid::Uuid;
 
 #[derive(Serialize)]
@@ -57,11 +59,19 @@ pub enum AuthError {
     TokenUsed,
     Token(jsonwebtoken::errors::Error),
     Hash(bcrypt::BcryptError),
+    Request(reqwest::Error),
+    OAuth(String),
 }
 
 impl From<DbErr> for AuthError {
     fn from(err: DbErr) -> Self {
         Self::Db(err)
+    }
+}
+
+impl From<reqwest::Error> for AuthError {
+    fn from(err: reqwest::Error) -> Self {
+        Self::Request(err)
     }
 }
 
@@ -673,4 +683,256 @@ pub async fn get_failed_logins(
         .collect();
 
     Ok((logs, total))
+}
+
+// ============================================================================
+// GitHub OAuth
+// ============================================================================
+
+const GITHUB_AUTHORIZE_URL: &str = "https://github.com/login/oauth/authorize";
+const GITHUB_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
+const GITHUB_USER_URL: &str = "https://api.github.com/user";
+const GITHUB_USER_EMAILS_URL: &str = "https://api.github.com/user/emails";
+const OAUTH_EXCHANGE_TTL_MINUTES: i64 = 2;
+
+/// GitHub user profile as returned by `GET https://api.github.com/user`.
+/// Mirrors echobackend's `service.GithubUser`.
+#[derive(Debug, Deserialize)]
+pub struct GithubUser {
+    pub login: String,
+    pub id: i64,
+    pub avatar_url: Option<String>,
+    pub email: Option<String>,
+    pub name: Option<String>,
+    pub html_url: Option<String>,
+}
+
+struct OAuthExchangeEntry {
+    response: AuthTokenResponse,
+    expires_at: chrono::DateTime<Utc>,
+}
+
+static OAUTH_EXCHANGE_CODES: OnceLock<Mutex<HashMap<String, OAuthExchangeEntry>>> = OnceLock::new();
+
+fn oauth_exchange_store() -> &'static Mutex<HashMap<String, OAuthExchangeEntry>> {
+    OAUTH_EXCHANGE_CODES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn github_http_client() -> Result<reqwest::Client, AuthError> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(AuthError::Request)
+}
+
+/// Build the GitHub authorization URL for the OAuth redirect endpoint.
+pub fn github_oauth_url(state: &str) -> String {
+    let config = GitHubConfig::get();
+    let mut url = reqwest::Url::parse(GITHUB_AUTHORIZE_URL).expect("GitHub authorize URL is valid");
+    url.query_pairs_mut()
+        .append_pair("client_id", &config.client_id)
+        .append_pair("redirect_uri", &config.redirect_uri)
+        .append_pair("scope", "user:email")
+        .append_pair("state", state);
+    url.to_string()
+}
+
+/// Exchange a GitHub authorization code for a GitHub access token.
+pub async fn get_github_token(code: &str) -> Result<String, AuthError> {
+    let config = GitHubConfig::get();
+    let response = github_http_client()?
+        .post(GITHUB_ACCESS_TOKEN_URL)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .form(&[
+            ("client_id", config.client_id.as_str()),
+            ("client_secret", config.client_secret.as_str()),
+            ("code", code),
+            ("redirect_uri", config.redirect_uri.as_str()),
+        ])
+        .send()
+        .await?;
+
+    let body: serde_json::Value = response.json().await?;
+    body.get("access_token")
+        .and_then(|value| value.as_str())
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| AuthError::OAuth("no access_token in GitHub response".to_string()))
+}
+
+/// Fetch the GitHub profile for the given GitHub access token.
+pub async fn fetch_github_user(token: &str) -> Result<GithubUser, AuthError> {
+    let response = github_http_client()?
+        .get(GITHUB_USER_URL)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(reqwest::header::ACCEPT, "application/vnd.github.v3+json")
+        .header(reqwest::header::USER_AGENT, "pilput-axumbackend")
+        .send()
+        .await?;
+
+    if response.status() != reqwest::StatusCode::OK {
+        return Err(AuthError::OAuth(format!(
+            "GitHub API returned status {}",
+            response.status()
+        )));
+    }
+
+    Ok(response.json::<GithubUser>().await?)
+}
+
+/// Fetch the primary email of the GitHub account, falling back to the first
+/// email in the list. Mirrors echobackend's `fetchGithubUserEmail`.
+pub async fn fetch_github_user_email(token: &str) -> Result<Option<String>, AuthError> {
+    #[derive(Debug, Deserialize)]
+    struct GithubEmail {
+        email: String,
+        primary: bool,
+    }
+
+    let response = github_http_client()?
+        .get(GITHUB_USER_EMAILS_URL)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(reqwest::header::ACCEPT, "application/vnd.github.v3+json")
+        .header(reqwest::header::USER_AGENT, "pilput-axumbackend")
+        .send()
+        .await?;
+
+    if response.status() != reqwest::StatusCode::OK {
+        return Err(AuthError::OAuth(format!(
+            "GitHub API returned status {}",
+            response.status()
+        )));
+    }
+
+    let emails: Vec<GithubEmail> = response.json().await?;
+    if let Some(primary) = emails.iter().find(|entry| entry.primary) {
+        return Ok(Some(primary.email.clone()));
+    }
+    Ok(emails.into_iter().next().map(|entry| entry.email))
+}
+
+/// Sign in (or register) a user from a GitHub profile and issue tokens.
+/// Mirrors echobackend's `authService.SignInWithGithub`.
+pub async fn sign_in_with_github(
+    db: &DatabaseConnection,
+    github_user: &GithubUser,
+    user_agent: Option<String>,
+) -> Result<AuthTokenResponse, AuthError> {
+    let existing = users::Entity::find()
+        .filter(users::Column::GithubId.eq(github_user.id))
+        .filter(users::Column::DeletedAt.is_null())
+        .one(db)
+        .await?;
+
+    let user = match existing {
+        Some(user) => user,
+        None => {
+            let email = github_user
+                .email
+                .clone()
+                .filter(|email| !email.is_empty())
+                .unwrap_or_else(|| format!("{}@github.placeholder", github_user.id));
+
+            let new_user = users::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                email: Set(email),
+                username: Set(Some(github_user.login.clone())),
+                github_id: Set(Some(github_user.id)),
+                image: Set(github_user.avatar_url.clone()),
+                created_at: Set(Some(Utc::now().into())),
+                updated_at: Set(Some(Utc::now().into())),
+                ..Default::default()
+            };
+
+            match new_user.insert(db).await {
+                Ok(user) => user,
+                Err(err) => {
+                    log_activity(
+                        db,
+                        None,
+                        "oauth_login_failed",
+                        "failure",
+                        None,
+                        user_agent,
+                        None,
+                        Some(serde_json::json!({
+                            "provider": "github",
+                            "error": err.to_string(),
+                        })),
+                    )
+                    .await;
+                    return Err(AuthError::Db(err));
+                }
+            }
+        }
+    };
+
+    let response = match create_token_and_session(db, &user, user_agent.clone()).await {
+        Ok(response) => response,
+        Err(err) => {
+            log_activity(
+                db,
+                Some(user.id),
+                "oauth_login_failed",
+                "failure",
+                None,
+                user_agent,
+                None,
+                Some(serde_json::json!({ "provider": "github" })),
+            )
+            .await;
+            return Err(err);
+        }
+    };
+
+    log_activity(
+        db,
+        Some(user.id),
+        "oauth_login",
+        "success",
+        None,
+        user_agent,
+        None,
+        Some(serde_json::json!({ "provider": "github" })),
+    )
+    .await;
+
+    let mut active_user: users::ActiveModel = user.clone().into();
+    active_user.last_logged_at = Set(Some(Utc::now().into()));
+    let _ = active_user.update(db).await;
+
+    Ok(response)
+}
+
+/// Create a one-time OAuth exchange code (2-minute TTL) holding the issued
+/// tokens. Mirrors echobackend's in-memory fallback of `CreateOAuthExchangeCode`.
+pub fn create_oauth_exchange_code(response: AuthTokenResponse) -> String {
+    let code = generate_prefixed_token("oc");
+    let now = Utc::now();
+    let mut store = oauth_exchange_store()
+        .lock()
+        .expect("oauth exchange store lock poisoned");
+    store.retain(|_, entry| entry.expires_at > now);
+    store.insert(
+        code.clone(),
+        OAuthExchangeEntry {
+            response,
+            expires_at: now + Duration::minutes(OAUTH_EXCHANGE_TTL_MINUTES),
+        },
+    );
+    code
+}
+
+/// Atomically redeem and delete a one-time OAuth exchange code.
+/// Mirrors echobackend's `ExchangeOAuthCode`.
+pub fn exchange_oauth_code(code: &str) -> Result<AuthTokenResponse, AuthError> {
+    let now = Utc::now();
+    let mut store = oauth_exchange_store()
+        .lock()
+        .expect("oauth exchange store lock poisoned");
+    store.retain(|_, entry| entry.expires_at > now);
+    store
+        .remove(code)
+        .map(|entry| entry.response)
+        .ok_or(AuthError::InvalidToken)
 }

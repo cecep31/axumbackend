@@ -1,7 +1,9 @@
 use crate::auth::{AdminUser, AuthUser};
 use crate::database::DbPool;
 use crate::dto::common::{PaginationQuery, UsernamePath};
-use crate::dto::user::{FollowRequest, UserIdPath};
+use crate::dto::user::{
+    FollowRequest, UserDeletedFilter, UserDetailQuery, UserIdPath, UserListQuery,
+};
 use crate::error::AppError;
 use crate::models::user::UserResponse;
 use crate::models::user_follow::{FollowResponse, FollowStats};
@@ -35,11 +37,14 @@ fn map_follow_error(err: services::user_follow::UserFollowError) -> AppError {
 pub async fn get_users(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    Valid(query): Valid<Query<PaginationQuery>>,
+    Valid(query): Valid<Query<UserListQuery>>,
 ) -> Result<Json<ApiResponse<Vec<UserResponse>>>, AppError> {
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(10);
-    let (users, total) = services::user::get_users(&pool, offset, limit).await?;
+    let deleted_filter = UserDeletedFilter::parse(query.deleted.as_deref())
+        .map_err(AppError::BadRequest)?;
+    let (users, total) =
+        services::user::get_users(&pool, offset, limit, deleted_filter).await?;
 
     Ok(Json(ApiResponse::with_meta_message(
         "Successfully retrieved users",
@@ -52,10 +57,17 @@ pub async fn get_users(
 
 pub async fn get_by_id(
     State(pool): State<DbPool>,
-    _admin_user: AdminUser,
+    admin_user: AdminUser,
     Valid(Path(params)): Valid<Path<UserIdPath>>,
+    Valid(Query(query)): Valid<Query<UserDetailQuery>>,
 ) -> Result<Json<ApiResponse<UserResponse>>, AppError> {
-    match services::user::get_admin_by_id(&pool, params.id).await {
+    let result = if query.deleted.as_deref() == Some("true") {
+        services::user::get_admin_by_id_deleted_only(&pool, params.id).await
+    } else {
+        services::user::get_admin_by_id(&pool, params.id, Some(admin_user.0.id)).await
+    };
+
+    match result {
         Ok(Some(user)) => Ok(Json(ApiResponse::success_with_message(
             "Successfully retrieved user",
             user,
@@ -100,12 +112,18 @@ pub async fn restore_user(
     Valid(Path(params)): Valid<Path<UserIdPath>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     match services::user::restore(&pool, params.id).await {
-        Ok(true) => Ok(Json(ApiResponse::success_with_message(
+        Ok(()) => Ok(Json(ApiResponse::success_with_message(
             "Successfully restored user",
             serde_json::Value::Null,
         ))),
-        Ok(false) => Err(AppError::NotFound("User not found".to_string())),
-        Err(e) => Err(AppError::from(e)),
+        Err(services::user::RestoreError::NotFound) => {
+            Err(AppError::NotFound("User not found".to_string()))
+        }
+        Err(services::user::RestoreError::Conflict) => Err(AppError::Conflict(
+            "Cannot restore user: email or username already taken by another active user"
+                .to_string(),
+        )),
+        Err(services::user::RestoreError::Db(e)) => Err(AppError::from(e)),
     }
 }
 
@@ -157,20 +175,12 @@ pub async fn check_follow_status(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     Valid(Path(params)): Valid<Path<UserIdPath>>,
-) -> Result<Json<ApiResponse<FollowResponse>>, AppError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     let is_following = services::user_follow::is_following(&pool, auth_user.id, params.id).await?;
-    let response = FollowResponse {
-        is_following,
-        message: if is_following {
-            "User is followed".to_string()
-        } else {
-            "User is not followed".to_string()
-        },
-    };
 
     Ok(Json(ApiResponse::success_with_message(
         "Successfully checked follow status",
-        response,
+        serde_json::json!({ "is_following": is_following }),
     )))
 }
 
@@ -218,7 +228,7 @@ pub async fn get_follow_stats(
 ) -> Result<Json<ApiResponse<FollowStats>>, AppError> {
     match services::user_follow::get_follow_stats(&pool, params.id).await? {
         Some(stats) => Ok(Json(ApiResponse::success_with_message(
-            "Successfully retrieved follow stats",
+            "Successfully retrieved follow statistics",
             stats,
         ))),
         None => Err(AppError::NotFound("User not found".to_string())),

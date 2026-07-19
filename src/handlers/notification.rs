@@ -17,7 +17,7 @@ pub async fn get_notifications(
     auth_user: AuthUser,
     Valid(query): Valid<Query<NotificationQuery>>,
 ) -> Result<Json<ApiResponse<Vec<NotificationResponse>>>, AppError> {
-    let limit = query.limit.unwrap_or(10);
+    let limit = query.limit.unwrap_or(20);
     let offset = query.offset.unwrap_or(0);
     let (notifications, total) =
         services::notification::get_notifications(&pool, auth_user.id, query.unread, limit, offset)

@@ -170,8 +170,11 @@ pub struct DuplicateResultItem {
     pub year: i32,
 }
 
+/// Preserves the declared column scale (e.g. `numeric(18,2)`) instead of
+/// stripping trailing zeros, matching echobackend's raw Postgres `numeric`
+/// text output.
 fn decimal_to_string(value: Decimal) -> String {
-    value.normalize().to_string()
+    value.to_string()
 }
 
 fn maybe_decimal_to_string(value: Option<Decimal>) -> Option<String> {

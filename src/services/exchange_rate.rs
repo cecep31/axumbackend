@@ -1,9 +1,17 @@
 use crate::dto::exchange_rate::ExchangeRateResponse;
 use chrono::Utc;
+use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 const YAHOO_SPARK_URL: &str = "https://query1.finance.yahoo.com/v7/finance/spark";
+/// Mirrors echobackend's `exchangeRateCacheTTL` (`internal/service/exchange_rate_service.go`).
+const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+
+static CACHE: Lazy<Mutex<HashMap<(String, String), (Instant, ExchangeRateResponse)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug)]
 pub enum ExchangeRateError {
@@ -19,6 +27,23 @@ impl From<reqwest::Error> for ExchangeRateError {
     }
 }
 
+fn cache_get(from: &str, to: &str) -> Option<ExchangeRateResponse> {
+    let cache = CACHE.lock().unwrap();
+    let (stored_at, response) = cache.get(&(from.to_string(), to.to_string()))?;
+    if stored_at.elapsed() < CACHE_TTL {
+        let mut response = response.clone();
+        response.cached = true;
+        Some(response)
+    } else {
+        None
+    }
+}
+
+fn cache_set(from: &str, to: &str, response: ExchangeRateResponse) {
+    let mut cache = CACHE.lock().unwrap();
+    cache.insert((from.to_string(), to.to_string()), (Instant::now(), response));
+}
+
 pub async fn get_rate(from: String, to: String) -> Result<ExchangeRateResponse, ExchangeRateError> {
     let from = normalize_currency_code(&from);
     let to = normalize_currency_code(&to);
@@ -26,8 +51,14 @@ pub async fn get_rate(from: String, to: String) -> Result<ExchangeRateResponse, 
         return Err(ExchangeRateError::InvalidCurrencyPair);
     }
 
+    if let Some(cached) = cache_get(&from, &to) {
+        return Ok(cached);
+    }
+
     if from == to {
-        return Ok(response(&from, &to, &format!("{from}{to}=X"), 1.0));
+        let result = response(&from, &to, &format!("{from}{to}=X"), 1.0);
+        cache_set(&from, &to, result.clone());
+        return Ok(result);
     }
 
     let direct_symbol = yahoo_currency_symbol(&from, &to);
@@ -39,7 +70,9 @@ pub async fn get_rate(from: String, to: String) -> Result<ExchangeRateResponse, 
         .copied()
         .filter(|rate| *rate > 0.0)
     {
-        return Ok(response(&from, &to, &direct_symbol, rate));
+        let result = response(&from, &to, &direct_symbol, rate);
+        cache_set(&from, &to, result.clone());
+        return Ok(result);
     }
 
     if let Some(inverse_rate) = quotes
@@ -48,7 +81,9 @@ pub async fn get_rate(from: String, to: String) -> Result<ExchangeRateResponse, 
         .filter(|rate| *rate > 0.0)
     {
         let rate = ((1.0 / inverse_rate) * 100_000_000.0).round() / 100_000_000.0;
-        return Ok(response(&from, &to, &inverse_symbol, rate));
+        let result = response(&from, &to, &inverse_symbol, rate);
+        cache_set(&from, &to, result.clone());
+        return Ok(result);
     }
 
     Err(ExchangeRateError::NotFound(from, to))

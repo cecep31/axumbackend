@@ -18,6 +18,7 @@ use uuid::Uuid;
 pub enum ChatError {
     Db(DbErr),
     ConversationNotFound,
+    ConversationNotOwned,
     MessageNotFound,
 }
 
@@ -32,12 +33,33 @@ async fn owned_conversation(
     id: Uuid,
     user_id: Uuid,
 ) -> Result<chat_conversations::Model, ChatError> {
-    chat_conversations::Entity::find_by_id(id)
-        .filter(chat_conversations::Column::UserId.eq(user_id))
+    let conversation = chat_conversations::Entity::find_by_id(id)
         .filter(chat_conversations::Column::DeletedAt.is_null())
         .one(db)
         .await?
-        .ok_or(ChatError::ConversationNotFound)
+        .ok_or(ChatError::ConversationNotFound)?;
+    if conversation.user_id != user_id {
+        return Err(ChatError::ConversationNotOwned);
+    }
+    Ok(conversation)
+}
+
+fn normalized_role(role: Option<String>) -> String {
+    match role.as_deref().map(str::trim) {
+        Some(trimmed) if !trimmed.is_empty() => trimmed.to_string(),
+        _ => "user".to_string(),
+    }
+}
+
+fn build_conversation_title(title: Option<String>, content: &str) -> String {
+    if let Some(title) = title {
+        let trimmed = title.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let normalized: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalized.chars().take(50).collect()
 }
 
 async fn touch_conversation(
@@ -81,8 +103,6 @@ pub async fn get_user_conversations(
         .filter(chat_conversations::Column::DeletedAt.is_null());
     let total = base.clone().count(db).await? as i64;
     let conversations = base
-        .order_by_desc(chat_conversations::Column::IsPinned)
-        .order_by_desc(chat_conversations::Column::PinnedAt)
         .order_by_desc(chat_conversations::Column::UpdatedAt)
         .offset(offset)
         .limit(limit)
@@ -170,7 +190,7 @@ pub async fn create_message(
     let message = chat_messages::ActiveModel {
         conversation_id: Set(conversation_id),
         user_id: Set(user_id),
-        role: Set(req.role.unwrap_or_else(|| "user".to_string())),
+        role: Set(normalized_role(req.role)),
         content: Set(req.content),
         model: Set(req.model),
         prompt_tokens: Set(Some(0)),
@@ -191,11 +211,7 @@ pub async fn create_conversation_message(
     user_id: Uuid,
     req: CreateChatConversationStreamRequest,
 ) -> Result<ChatStreamResult, ChatError> {
-    let title = req
-        .title
-        .clone()
-        .filter(|title| !title.trim().is_empty())
-        .unwrap_or_else(|| req.content.chars().take(80).collect());
+    let title = build_conversation_title(req.title.clone(), &req.content);
     let conversation =
         create_conversation(db, user_id, CreateChatConversationRequest { title }).await?;
     let conversation_id =
@@ -229,7 +245,7 @@ pub async fn get_messages(
     owned_conversation(db, conversation_id, user_id).await?;
     let messages = chat_messages::Entity::find()
         .filter(chat_messages::Column::ConversationId.eq(conversation_id))
-        .order_by_asc(chat_messages::Column::CreatedAt)
+        .order_by_desc(chat_messages::Column::CreatedAt)
         .all(db)
         .await?;
     Ok(messages.into_iter().map(message_response).collect())

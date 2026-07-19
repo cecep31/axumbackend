@@ -161,8 +161,11 @@ async fn user_growth_trend(
         count: i64,
     }
 
+    // echobackend computes `start`/`end` independently: `start` defaults to
+    // `now - 30 days` regardless of whether `end_date` was supplied.
     let end = parse_date(range.end_date).unwrap_or_else(|| Utc::now().date_naive());
-    let start = parse_date(range.start_date).unwrap_or_else(|| end - Duration::days(30));
+    let start =
+        parse_date(range.start_date).unwrap_or_else(|| Utc::now().date_naive() - Duration::days(30));
     let rows = DayCount::find_by_statement(Statement::from_string(
         DbBackend::Postgres,
         format!(
@@ -237,9 +240,27 @@ pub async fn engagement(
         "SELECT COALESCE(SUM(view_count), 0)::bigint AS value FROM posts WHERE published = true",
     )
     .await?;
+    // Mirrors echobackend's GetEngagementMetrics: when `start_date` is given,
+    // the previous period is derived dynamically as the window immediately
+    // preceding it with the same duration; otherwise it falls back to the
+    // fixed now-60d..now-30d window.
+    let (prev_start, prev_end) = match parse_date(range.start_date) {
+        Some(start_date) => {
+            let end_date = parse_date(range.end_date).unwrap_or_else(|| Utc::now().date_naive());
+            let duration = end_date - start_date;
+            (start_date - duration, start_date)
+        }
+        None => (
+            Utc::now().date_naive() - Duration::days(60),
+            Utc::now().date_naive() - Duration::days(30),
+        ),
+    };
     let previous_likes = scalar_i64(
         db,
-        "SELECT COUNT(*)::bigint AS value FROM post_likes WHERE created_at >= NOW() - INTERVAL '60 days' AND created_at <= NOW() - INTERVAL '30 days'",
+        &format!(
+            "SELECT COUNT(*)::bigint AS value FROM post_likes WHERE created_at >= '{}' AND created_at <= '{}'",
+            prev_start, prev_end
+        ),
     )
     .await?;
     let change_percent = if previous_likes > 0 {

@@ -34,6 +34,7 @@ fn map_holding_error(err: HoldingError) -> AppError {
         HoldingError::DuplicateSameMonth => {
             AppError::BadRequest("Cannot duplicate holdings into the same month".to_string())
         }
+        HoldingError::InvalidRange => AppError::BadRequest("Invalid monthly range".to_string()),
     }
 }
 
@@ -217,9 +218,16 @@ pub async fn compare_months(
     let (current_month, current_year) = services::holding::default_current_month_year();
     let to_month = query.to_month.unwrap_or(current_month);
     let to_year = query.to_year.unwrap_or(current_year);
-    let (default_from_month, default_from_year) = services::holding::prev_month(to_month, to_year);
-    let from_month = query.from_month.unwrap_or(default_from_month);
-    let from_year = query.from_year.unwrap_or(default_from_year);
+
+    // Mirrors echobackend's CompareMonths query parsing: only derive From via
+    // prevMonth(To) when *both* fromMonth and fromYear are omitted; if only
+    // one is missing, it's filled from To's own value.
+    let (from_month, from_year) = match (query.from_month, query.from_year) {
+        (None, None) => services::holding::prev_month(to_month, to_year),
+        (None, Some(from_year)) => (to_month, from_year),
+        (Some(from_month), None) => (from_month, to_year),
+        (Some(from_month), Some(from_year)) => (from_month, from_year),
+    };
 
     let result = services::holding::compare_months(
         &pool,
@@ -245,10 +253,26 @@ pub async fn get_monthly_data(
     let (current_month, current_year) = services::holding::default_current_month_year();
     let start_month = query.start_month.unwrap_or(current_month);
     let start_year = query.start_year.unwrap_or(current_year);
-    let (default_end_month, default_end_year) =
-        services::holding::prev_n_months(start_month, start_year, 11);
-    let end_month = query.end_month.unwrap_or(default_end_month);
-    let end_year = query.end_year.unwrap_or(default_end_year);
+
+    // Mirrors echobackend's parseMonthlyQuery: only derive End via
+    // prevNMonths(Start, 11) when *both* endMonth and endYear are omitted;
+    // if only one is missing, it's filled from Start's own value.
+    let (mut end_month, mut end_year) = match (query.end_month, query.end_year) {
+        (None, None) => services::holding::prev_n_months(start_month, start_year, 11),
+        (None, Some(end_year)) => (start_month, end_year),
+        (Some(end_month), None) => (end_month, start_year),
+        (Some(end_month), Some(end_year)) => (end_month, end_year),
+    };
+    let mut start_month = start_month;
+    let mut start_year = start_year;
+
+    // The service expects Start to be the chronologically latest month and
+    // End the oldest — normalize so callers can pass them in any order
+    // (also guards against the forward-iterating loop never terminating).
+    if end_year > start_year || (end_year == start_year && end_month > start_month) {
+        std::mem::swap(&mut start_month, &mut end_month);
+        std::mem::swap(&mut start_year, &mut end_year);
+    }
 
     let result = services::holding::monthly_data(
         &pool,

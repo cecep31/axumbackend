@@ -52,6 +52,9 @@ Server starts on `http://localhost:8000`
 | GET | `/api/auth/profile` | Get current user profile |
 | PATCH | `/api/auth/password` | Change password |
 | GET | `/api/auth/activity-logs` | Get current user auth activity |
+| GET | `/api/auth/oauth/github` | Redirect to GitHub authorization (sets `github_oauth_state` cookie) |
+| GET | `/api/auth/oauth/github/callback` | GitHub OAuth callback; redirects to frontend with one-time `code` |
+| POST | `/api/auth/oauth/exchange` | Exchange one-time OAuth code for access/refresh tokens |
 | GET | `/api/posts` | Get all posts |
 | GET | `/api/posts/random?limit=N` | Get random posts |
 | GET | `/api/posts/tag/{tag}` | Get posts by tag |

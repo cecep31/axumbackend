@@ -1,33 +1,24 @@
 use crate::auth::{AdminUser, AuthUser};
 use crate::database::DbPool;
-use crate::dto::common::PaginationQuery;
-use crate::dto::tag::{CreateTagRequest, TagIdPath, TrendingTagQuery, UpdateTagRequest};
+use crate::dto::tag::{CreateTagRequest, TagIdPath, UpdateTagRequest};
 use crate::error::AppError;
 use crate::models::tag::{SitemapTag, Tag, TrendingTag};
 use crate::response::ApiResponse;
 use crate::services;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     routing::get,
 };
 use axum_valid::Valid;
 
-pub async fn get_tags(
-    State(pool): State<DbPool>,
-    Valid(query): Valid<Query<PaginationQuery>>,
-) -> Result<Json<ApiResponse<Vec<Tag>>>, AppError> {
-    let client = pool;
-    let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(50);
+const TRENDING_TAGS_LIMIT: i64 = 5;
 
-    let (tags, total) = services::tag::get_all_tags(&client, offset, limit).await?;
-    Ok(Json(ApiResponse::with_meta_message(
+pub async fn get_tags(State(pool): State<DbPool>) -> Result<Json<ApiResponse<Vec<Tag>>>, AppError> {
+    let tags = services::tag::get_all_tags(&pool).await?;
+    Ok(Json(ApiResponse::success_with_message(
         "Successfully retrieved tags",
         tags,
-        total,
-        limit,
-        offset,
     )))
 }
 
@@ -44,9 +35,8 @@ pub async fn get_tags_for_sitemap(
 
 pub async fn get_trending_tags(
     State(pool): State<DbPool>,
-    Valid(query): Valid<Query<TrendingTagQuery>>,
 ) -> Result<Json<ApiResponse<Vec<TrendingTag>>>, AppError> {
-    let tags = services::tag::get_trending_tags(&pool, query.limit.unwrap_or(10)).await?;
+    let tags = services::tag::get_trending_tags(&pool, TRENDING_TAGS_LIMIT).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Successfully retrieved trending tags",
         tags,
@@ -62,7 +52,7 @@ pub async fn create_tag(
     Ok((
         axum::http::StatusCode::CREATED,
         Json(ApiResponse::success_with_message(
-            "Successfully created tag",
+            "Tag created successfully",
             tag,
         )),
     ))

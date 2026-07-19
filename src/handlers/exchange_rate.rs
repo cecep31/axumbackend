@@ -11,9 +11,11 @@ use axum::{
 };
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct ExchangeRateQuery {
+    #[serde(default)]
     pub from: String,
+    #[serde(default)]
     pub to: String,
 }
 

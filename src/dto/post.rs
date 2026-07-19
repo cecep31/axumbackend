@@ -8,7 +8,7 @@ pub struct CreatePostRequest {
     #[validate(length(min = 7))]
     pub title: String,
     pub photo_url: Option<String>,
-    #[validate(length(min = 7, max = 100), regex(path = *SLUG_RE))]
+    #[validate(length(min = 7))]
     pub slug: String,
     #[validate(length(min = 10))]
     pub body: String,
@@ -18,14 +18,14 @@ pub struct CreatePostRequest {
     pub tags: Vec<String>,
 }
 
+/// Mirrors echobackend's `UpdatePostRequest` (`internal/dto/post.go`), which
+/// carries no `validate` tags at all — empty-string fields are accepted and
+/// simply ignored by the update service.
 #[derive(Deserialize, Validate)]
 pub struct UpdatePostRequest {
-    #[validate(length(min = 1))]
     pub title: Option<String>,
     pub photo_url: Option<String>,
-    #[validate(length(min = 1, max = 100), regex(path = *SLUG_RE))]
     pub slug: Option<String>,
-    #[validate(length(min = 1))]
     pub body: Option<String>,
     pub published: Option<bool>,
     pub tags: Option<Vec<String>>,

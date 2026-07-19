@@ -33,7 +33,7 @@ fn parse_folder_filter(raw: Option<String>) -> Result<Option<Option<Uuid>>, AppE
         Some("null") => Ok(Some(None)),
         Some(value) => Uuid::parse_str(value)
             .map(|id| Some(Some(id)))
-            .map_err(|_| AppError::BadRequest("Invalid folder_id".to_string())),
+            .map_err(|_| AppError::NotFound("Bookmark folder not found".to_string())),
     }
 }
 

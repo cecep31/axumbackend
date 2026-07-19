@@ -1,4 +1,4 @@
-use crate::auth::AuthUser;
+use crate::auth::{AdminUser, AuthUser};
 use crate::database::DbPool;
 use crate::dto::common::{PostIdPath, UsernamePath};
 use crate::dto::post::{
@@ -21,7 +21,7 @@ pub async fn create_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     Valid(Json(req)): Valid<Json<CreatePostRequest>>,
-) -> Result<Json<ApiResponse<Post>>, AppError> {
+) -> Result<(axum::http::StatusCode, Json<ApiResponse<serde_json::Value>>), AppError> {
     let post = services::post::create_post(
         &pool,
         services::post::CreatePostInput {
@@ -36,10 +36,13 @@ pub async fn create_post(
     )
     .await?;
 
-    Ok(Json(ApiResponse::success_with_message(
-        "Successfully created post",
-        post,
-    )))
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(ApiResponse::success_with_message(
+            "Successfully created post",
+            serde_json::json!({ "id": post.id }),
+        )),
+    ))
 }
 
 fn map_post_view_error(err: services::post_view::PostViewError) -> AppError {
@@ -101,7 +104,7 @@ pub async fn get_random_posts(
     Valid(query): Valid<Query<RandomPostQuery>>,
 ) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
     let client = pool;
-    let limit = query.limit.unwrap_or(6);
+    let limit = query.limit.unwrap_or(9);
     let limit = limit.min(20);
     let posts = services::post::get_random_posts(&client, limit).await?;
     Ok(Json(ApiResponse::success_with_message(
@@ -125,13 +128,12 @@ pub async fn get_trending_posts(
 
 pub async fn get_posts_for_you(
     State(pool): State<DbPool>,
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     Valid(query): Valid<Query<PostPaginationQuery>>,
 ) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
-    let (offset, limit, search, order_by, order_direction) = post_pagination_params(&query);
+    let (offset, limit, _search, _order_by, _order_direction) = post_pagination_params(&query);
     let (posts, total) =
-        services::post::get_all_posts(&pool, offset, limit, search, order_by, order_direction)
-            .await?;
+        services::post::get_posts_for_you(&pool, auth_user.id, offset, limit).await?;
 
     Ok(Json(ApiResponse::with_meta_message(
         "Successfully retrieved posts",
@@ -512,6 +514,7 @@ pub async fn get_my_posts_likes_by_month(
 
 pub async fn get_post(
     State(pool): State<DbPool>,
+    _admin_user: AdminUser,
     Valid(Path(params)): Valid<Path<PostIdPath>>,
 ) -> Result<Json<ApiResponse<Post>>, AppError> {
     let client = pool;
@@ -527,12 +530,10 @@ pub async fn get_post(
 
 pub async fn update_post(
     State(pool): State<DbPool>,
-    auth_user: AuthUser,
+    _admin_user: AdminUser,
     Valid(Path(params)): Valid<Path<PostIdPath>>,
     Valid(Json(req)): Valid<Json<UpdatePostRequest>>,
 ) -> Result<Json<ApiResponse<Post>>, AppError> {
-    ensure_author(&pool, params.id, &auth_user).await?;
-
     match services::post::update_post(
         &pool,
         params.id,
@@ -557,11 +558,9 @@ pub async fn update_post(
 
 pub async fn delete_post(
     State(pool): State<DbPool>,
-    auth_user: AuthUser,
+    _admin_user: AdminUser,
     Valid(Path(params)): Valid<Path<PostIdPath>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    ensure_author(&pool, params.id, &auth_user).await?;
-
     match services::post::soft_delete_post(&pool, params.id).await? {
         true => Ok(Json(ApiResponse::success_with_message(
             "Successfully deleted post",

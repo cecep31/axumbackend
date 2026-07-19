@@ -42,6 +42,9 @@ fn map_chat_error(err: ChatError) -> AppError {
         ChatError::ConversationNotFound => {
             AppError::NotFound("Chat conversation not found".to_string())
         }
+        ChatError::ConversationNotOwned => {
+            AppError::Forbidden("You do not own this conversation".to_string())
+        }
         ChatError::MessageNotFound => AppError::NotFound("Chat message not found".to_string()),
     }
 }

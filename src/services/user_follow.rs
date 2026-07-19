@@ -206,6 +206,8 @@ pub async fn get_follow_stats(
     }))
 }
 
+/// Mirrors echobackend's `GetMutualFollows`, which builds entries via plain
+/// `UserToResponse` — `is_following` is never populated for this endpoint.
 pub async fn get_mutual_follows(
     db: &DatabaseConnection,
     user_id: Uuid,
@@ -232,7 +234,7 @@ pub async fn get_mutual_follows(
 
     let mut responses = Vec::with_capacity(users.len());
     for user in users {
-        responses.push(user_response(db, user, Some(user_id)).await?);
+        responses.push(user_response(db, user, None).await?);
     }
 
     Ok(responses)

@@ -54,6 +54,18 @@ pub struct LogoutRequest {
 }
 
 #[derive(Deserialize, Validate)]
+pub struct OAuthExchangeRequest {
+    #[validate(length(min = 1))]
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GithubCallbackQuery {
+    pub code: Option<String>,
+    pub state: Option<String>,
+}
+
+#[derive(Deserialize, Validate)]
 pub struct ActivityLogQuery {
     #[validate(range(min = 0, max = 10_000))]
     pub offset: Option<i64>,

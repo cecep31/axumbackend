@@ -51,7 +51,7 @@ pub async fn get_posts(
         &pool,
         date_range(&query),
         query.limit.unwrap_or(10),
-        query.tag_id,
+        query.tag_id(),
     )
     .await?;
     Ok(Json(ApiResponse::success_with_message(

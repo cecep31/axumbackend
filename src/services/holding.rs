@@ -17,6 +17,7 @@ pub enum HoldingError {
     HoldingTypeNotFound,
     InvalidDecimal(&'static str),
     DuplicateSameMonth,
+    InvalidRange,
 }
 
 impl From<DbErr> for HoldingError {
@@ -90,16 +91,13 @@ fn parse_optional_time(raw: Option<String>) -> Option<DateTime<chrono::FixedOffs
     raw.and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
 }
 
+/// Mirrors echobackend's `formatFloat` (`strconv.FormatFloat(f, 'f', -1, 64)`):
+/// full float precision, no rounding, shortest round-trip representation.
 fn format_float(value: f64) -> String {
     if value == 0.0 {
         return "0".to_string();
     }
-    let value = (value * 100.0).round() / 100.0;
-    let formatted = format!("{:.8}", value);
-    formatted
-        .trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_string()
+    value.to_string()
 }
 
 fn round2(value: f64) -> f64 {
@@ -168,7 +166,8 @@ pub async fn get_holdings(
     }
 
     let desc = !matches!(order, Some("asc"));
-    query = match sort_by.unwrap_or("created_at") {
+    let sort_field = sort_by.unwrap_or("created_at");
+    query = match sort_field {
         "updated_at" => {
             if desc {
                 query.order_by_desc(holdings::Column::UpdatedAt)
@@ -219,7 +218,15 @@ pub async fn get_holdings(
             }
         }
     };
-    query = if desc {
+    // echobackend tiebreaks the `holding_type` sort on `created_at`; every
+    // other field tiebreaks on `id`.
+    query = if sort_field == "holding_type" {
+        if desc {
+            query.order_by_desc(holdings::Column::CreatedAt)
+        } else {
+            query.order_by_asc(holdings::Column::CreatedAt)
+        }
+    } else if desc {
         query.order_by_desc(holdings::Column::Id)
     } else {
         query.order_by_asc(holdings::Column::Id)
@@ -680,6 +687,14 @@ pub async fn monthly_data(
     end_month: i32,
     end_year: i32,
 ) -> Result<Vec<HoldingMonthlyDataResponse>, HoldingError> {
+    // The loop below walks forward from (end_month, end_year) to
+    // (start_month, start_year), so End must be on or before Start
+    // chronologically. Reject inverted ranges up front — without this guard
+    // the loop never terminates.
+    if end_year > start_year || (end_year == start_year && end_month > start_month) {
+        return Err(HoldingError::InvalidRange);
+    }
+
     #[derive(FromQueryResult)]
     struct Row {
         month: i32,

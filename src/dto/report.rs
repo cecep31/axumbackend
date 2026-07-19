@@ -9,7 +9,16 @@ pub struct ReportQuery {
     pub end_date: Option<String>,
     #[validate(range(min = 1, max = 100))]
     pub limit: Option<i64>,
-    pub tag_id: Option<i32>,
+    /// Kept as a raw string and parsed leniently (mirrors echobackend's
+    /// `strconv.Atoi`, which silently ignores a malformed `tagId` instead of
+    /// rejecting the request).
+    pub tag_id: Option<String>,
+}
+
+impl ReportQuery {
+    pub fn tag_id(&self) -> Option<i32> {
+        self.tag_id.as_deref()?.parse().ok()
+    }
 }
 
 #[derive(Serialize)]

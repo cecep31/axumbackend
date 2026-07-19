@@ -168,6 +168,8 @@ pub struct MarketConfig {
 
 static JWT_CONFIG: OnceLock<JwtConfig> = OnceLock::new();
 static EMAIL_CONFIG: OnceLock<EmailConfig> = OnceLock::new();
+static FRONTEND_CONFIG: OnceLock<FrontendConfig> = OnceLock::new();
+static GITHUB_CONFIG: OnceLock<GitHubConfig> = OnceLock::new();
 static MARKET_CONFIG: OnceLock<MarketConfig> = OnceLock::new();
 
 impl JwtConfig {
@@ -326,6 +328,18 @@ impl FrontendConfig {
                 .unwrap_or_else(|_| DEFAULT_MAIN_DOMAIN.to_string()),
         }
     }
+
+    pub fn init(cfg: FrontendConfig) {
+        FRONTEND_CONFIG
+            .set(cfg)
+            .expect("FrontendConfig already initialized");
+    }
+
+    pub fn get() -> &'static FrontendConfig {
+        FRONTEND_CONFIG
+            .get()
+            .expect("FrontendConfig not initialized")
+    }
 }
 
 impl S3Config {
@@ -410,6 +424,16 @@ impl GitHubConfig {
             redirect_uri: env::var("GITHUB_REDIRECT_URI")
                 .unwrap_or_else(|_| DEFAULT_GITHUB_REDIRECT_URI.to_string()),
         }
+    }
+
+    pub fn init(cfg: GitHubConfig) {
+        GITHUB_CONFIG
+            .set(cfg)
+            .expect("GitHubConfig already initialized");
+    }
+
+    pub fn get() -> &'static GitHubConfig {
+        GITHUB_CONFIG.get().expect("GitHubConfig not initialized")
     }
 }
 

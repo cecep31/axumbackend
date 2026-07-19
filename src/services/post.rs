@@ -3,7 +3,8 @@ use crate::models::post::{Post, SitemapPost};
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult,
-    IntoActiveModel, ModelTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    IntoActiveModel, ModelTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    QueryTrait, Set,
 };
 use std::collections::HashSet;
 
@@ -167,10 +168,11 @@ pub async fn get_posts_by_username(
         return Ok((Vec::new(), 0));
     };
 
+    // echobackend's GetPostByUsername has no `published` filter — it also
+    // surfaces the user's unpublished/draft posts publicly.
     let query = user
         .clone()
         .find_related(posts::Entity)
-        .filter(posts::Column::Published.eq(true))
         .filter(posts::Column::DeletedAt.is_null());
 
     let total = query.clone().count(db).await? as i64;
@@ -193,6 +195,41 @@ pub async fn get_posts_by_created_by(
     let query = posts::Entity::find()
         .filter(posts::Column::CreatedBy.eq(user_id))
         .filter(posts::Column::DeletedAt.is_null());
+
+    let total = query.clone().count(db).await? as i64;
+    let post_models = query
+        .order_by_desc(posts::Column::CreatedAt)
+        .limit(limit.max(0) as u64)
+        .offset(offset.max(0) as u64)
+        .all(db)
+        .await?;
+
+    Ok((hydrate_posts(db, post_models, true).await?, total))
+}
+
+/// Mirrors echobackend's `GetPostsForYou`: posts authored by `user_id` or by
+/// anyone `user_id` follows, published, newest first.
+pub async fn get_posts_for_you(
+    db: &DatabaseConnection,
+    user_id: uuid::Uuid,
+    offset: i64,
+    limit: i64,
+) -> Result<(Vec<Post>, i64), DbErr> {
+    let following_ids = crate::entities::user_follows::Entity::find()
+        .select_only()
+        .column(crate::entities::user_follows::Column::FollowingId)
+        .filter(crate::entities::user_follows::Column::FollowerId.eq(user_id))
+        .filter(crate::entities::user_follows::Column::DeletedAt.is_null())
+        .into_query();
+
+    let query = posts::Entity::find()
+        .filter(posts::Column::Published.eq(true))
+        .filter(posts::Column::DeletedAt.is_null())
+        .filter(
+            posts::Column::CreatedBy
+                .eq(user_id)
+                .or(posts::Column::CreatedBy.in_subquery(following_ids)),
+        );
 
     let total = query.clone().count(db).await? as i64;
     let post_models = query
@@ -408,7 +445,7 @@ pub async fn create_post(
         created_by: Set(creator_id),
         body: Set(Some(input.body)),
         slug: Set(input.slug),
-        photo_url: Set(input.photo_url),
+        photo_url: Set(Some(input.photo_url.unwrap_or_default())),
         published: Set(Some(input.published)),
         created_at: Set(Some(now.into())),
         updated_at: Set(Some(now.into())),
@@ -470,10 +507,9 @@ pub async fn update_post(
     }
     active.updated_at = Set(Some(Utc::now().into()));
 
+    // echobackend's UpdatePost repository never touches posts_to_tags — the
+    // `tags` field on the update request is intentionally a no-op here too.
     let post = active.update(db).await?;
-    if let Some(tags) = input.tags {
-        replace_post_tags(db, post.id, &tags).await?;
-    }
 
     let user = post.find_related(users::Entity).one(db).await?;
     let tags = post.find_related(tags::Entity).all(db).await?;

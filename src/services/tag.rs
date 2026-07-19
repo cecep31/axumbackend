@@ -3,7 +3,7 @@ use crate::models::tag::{SitemapTag, Tag, TrendingTag};
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, IntoActiveModel,
-    PaginatorTrait, QueryOrder, QuerySelect, Set,
+    QueryOrder, Set,
 };
 
 pub async fn get_tag_by_id(db: &DatabaseConnection, id: i32) -> Result<Option<Tag>, DbErr> {
@@ -32,26 +32,18 @@ pub async fn get_tags_for_sitemap(
     Ok(tag_models.into_iter().map(Into::into).collect())
 }
 
-pub async fn get_all_tags(
-    db: &DatabaseConnection,
-    offset: i64,
-    limit: i64,
-) -> Result<(Vec<Tag>, i64), DbErr> {
-    let query = tags::Entity::find();
-    let total = query.clone().count(db).await? as i64;
-    let tag_models = query
+pub async fn get_all_tags(db: &DatabaseConnection) -> Result<Vec<Tag>, DbErr> {
+    let tag_models = tags::Entity::find()
         .order_by_asc(tags::Column::Name)
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
         .all(db)
         .await?;
 
-    Ok((tag_models.into_iter().map(Into::into).collect(), total))
+    Ok(tag_models.into_iter().map(Into::into).collect())
 }
 
 pub async fn create_tag(db: &DatabaseConnection, name: String) -> Result<Tag, DbErr> {
     let tag = tags::ActiveModel {
-        name: Set(name.trim().to_string()),
+        name: Set(name),
         created_at: Set(Some(Utc::now().into())),
         ..Default::default()
     }
@@ -71,7 +63,7 @@ pub async fn update_tag(
     };
 
     let mut active = tag.into_active_model();
-    active.name = Set(name.trim().to_string());
+    active.name = Set(name);
     let tag = active.update(db).await?;
 
     Ok(Some(tag.into()))
