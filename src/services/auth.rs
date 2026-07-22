@@ -143,6 +143,7 @@ fn activity_response(log: auth_activity_logs::Model) -> AuthActivityLogResponse 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn log_activity(
     db: &DatabaseConnection,
     user_id: Option<Uuid>,

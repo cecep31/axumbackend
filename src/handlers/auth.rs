@@ -471,12 +471,14 @@ pub async fn exchange_oauth_code(
 pub fn routes() -> Router<DbPool> {
     // Fixed-window auth rate limits per IP, mirroring the documented
     // echobackend limits (`docs/api/auth.md`).
-    let register_limiter = RateLimiter::new(5, Duration::from_secs(5 * 60));
-    let login_limiter = RateLimiter::new(5, Duration::from_secs(5 * 60));
-    let forgot_password_limiter = RateLimiter::new(3, Duration::from_secs(5 * 60));
-    let reset_password_limiter = RateLimiter::new(5, Duration::from_secs(5 * 60));
-    let refresh_limiter = RateLimiter::new(30, Duration::from_secs(60));
-    let oauth_exchange_limiter = RateLimiter::new(10, Duration::from_secs(60));
+    let trust_proxy =
+        std::panic::catch_unwind(|| crate::config::HttpConfig::get().trust_proxy).unwrap_or(false);
+    let register_limiter = RateLimiter::new(5, Duration::from_secs(5 * 60), trust_proxy);
+    let login_limiter = RateLimiter::new(5, Duration::from_secs(5 * 60), trust_proxy);
+    let forgot_password_limiter = RateLimiter::new(3, Duration::from_secs(5 * 60), trust_proxy);
+    let reset_password_limiter = RateLimiter::new(5, Duration::from_secs(5 * 60), trust_proxy);
+    let refresh_limiter = RateLimiter::new(30, Duration::from_secs(60), trust_proxy);
+    let oauth_exchange_limiter = RateLimiter::new(10, Duration::from_secs(60), trust_proxy);
     Router::new()
         .route(
             "/api/auth/register",

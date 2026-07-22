@@ -10,8 +10,9 @@ const YAHOO_SPARK_URL: &str = "https://query1.finance.yahoo.com/v7/finance/spark
 /// Mirrors echobackend's `exchangeRateCacheTTL` (`internal/service/exchange_rate_service.go`).
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
-static CACHE: Lazy<Mutex<HashMap<(String, String), (Instant, ExchangeRateResponse)>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+type ExchangeRateCacheMap = HashMap<(String, String), (Instant, ExchangeRateResponse)>;
+
+static CACHE: Lazy<Mutex<ExchangeRateCacheMap>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug)]
 pub enum ExchangeRateError {

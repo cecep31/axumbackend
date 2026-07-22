@@ -20,6 +20,7 @@ pub struct RateLimiter {
     inner: Arc<Mutex<HashMap<RateLimitKey, Window>>>,
     max_requests: u32,
     window: Duration,
+    trust_proxy: bool,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -34,11 +35,12 @@ struct Window {
 }
 
 impl RateLimiter {
-    pub fn new(max_requests: u32, window: Duration) -> Self {
+    pub fn new(max_requests: u32, window: Duration, trust_proxy: bool) -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             max_requests,
             window,
+            trust_proxy,
         }
     }
 
@@ -78,7 +80,7 @@ pub async fn rate_limit(
 ) -> Response {
     let key = RateLimitKey {
         path: request.uri().path().to_owned(),
-        client: client_identity(&request),
+        client: client_identity(&request, limiter.trust_proxy),
     };
 
     match limiter.check(key) {
@@ -102,7 +104,11 @@ pub async fn rate_limit(
     }
 }
 
-fn client_identity(request: &Request) -> String {
+fn client_identity(request: &Request, trust_proxy: bool) -> String {
+    if trust_proxy && let Some(ip) = forwarded_ip(request.headers()) {
+        return ip.to_string();
+    }
+
     if let Some(ConnectInfo(addr)) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
         return addr.ip().to_string();
     }
@@ -124,4 +130,36 @@ fn forwarded_ip(headers: &HeaderMap) -> Option<IpAddr> {
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.trim().parse().ok())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn test_client_identity_trust_proxy_enabled() {
+        let socket_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let mut req = Request::builder()
+            .header("x-forwarded-for", "203.0.113.195, 70.41.3.18")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(socket_addr));
+
+        assert_eq!(client_identity(&req, true), "203.0.113.195");
+    }
+
+    #[test]
+    fn test_client_identity_trust_proxy_disabled() {
+        let socket_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let mut req = Request::builder()
+            .header("x-forwarded-for", "203.0.113.195, 70.41.3.18")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(socket_addr));
+
+        assert_eq!(client_identity(&req, false), "127.0.0.1");
+    }
 }

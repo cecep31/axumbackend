@@ -181,7 +181,7 @@ fn decode_stream(response: reqwest::Response) -> impl tokio_stream::Stream<Item 
             content: String,
         }
 
-        let mut buffer = String::new();
+        let mut buffer = Vec::new();
         let mut byte_stream = response.bytes_stream();
         'read: loop {
             let Some(chunk_result) = tokio_stream::StreamExt::next(&mut byte_stream).await else {
@@ -197,10 +197,11 @@ fn decode_stream(response: reqwest::Response) -> impl tokio_stream::Stream<Item 
                 }
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].trim().to_string();
-                buffer.drain(..=pos);
+            buffer.extend_from_slice(&bytes);
+            while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+                let line_bytes: Vec<u8> = buffer.drain(..=pos).collect();
+                let line_str = String::from_utf8_lossy(&line_bytes);
+                let line = line_str.trim();
                 let Some(data) = line.strip_prefix("data: ") else {
                     continue;
                 };

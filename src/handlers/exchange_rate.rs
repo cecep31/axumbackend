@@ -2,16 +2,14 @@ use crate::auth::AuthUser;
 use crate::database::DbPool;
 use crate::dto::exchange_rate::ExchangeRateResponse;
 use crate::error::AppError;
+use crate::extract::VQuery;
 use crate::response::ApiResponse;
 use crate::services::exchange_rate::{self, ExchangeRateError};
-use axum::{
-    Json, Router,
-    extract::{Query, State},
-    routing::get,
-};
+use axum::{Json, Router, extract::State, routing::get};
 use serde::Deserialize;
+use validator::Validate;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Validate)]
 pub struct ExchangeRateQuery {
     #[serde(default)]
     pub from: String,
@@ -42,7 +40,7 @@ fn map_exchange_rate_error(err: ExchangeRateError) -> AppError {
 pub async fn get_rate(
     State(_pool): State<DbPool>,
     _auth_user: AuthUser,
-    Query(query): Query<ExchangeRateQuery>,
+    VQuery(query): VQuery<ExchangeRateQuery>,
 ) -> Result<Json<ApiResponse<ExchangeRateResponse>>, AppError> {
     let result = exchange_rate::get_rate(query.from, query.to)
         .await

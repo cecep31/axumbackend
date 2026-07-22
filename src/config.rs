@@ -172,6 +172,7 @@ static FRONTEND_CONFIG: OnceLock<FrontendConfig> = OnceLock::new();
 static GITHUB_CONFIG: OnceLock<GitHubConfig> = OnceLock::new();
 static MARKET_CONFIG: OnceLock<MarketConfig> = OnceLock::new();
 static OPENROUTER_CONFIG: OnceLock<OpenRouterConfig> = OnceLock::new();
+static HTTP_CONFIG: OnceLock<HttpConfig> = OnceLock::new();
 
 impl JwtConfig {
     fn from_env() -> Self {
@@ -314,6 +315,16 @@ impl HttpConfig {
                 &env::var("HTTP_ALLOW_ORIGINS").unwrap_or_else(|_| "*".to_string()),
             ),
         }
+    }
+
+    pub fn init(cfg: HttpConfig) {
+        HTTP_CONFIG
+            .set(cfg)
+            .expect("HttpConfig already initialized");
+    }
+
+    pub fn get() -> &'static HttpConfig {
+        HTTP_CONFIG.get().expect("HttpConfig not initialized")
     }
 }
 

@@ -30,6 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config::GitHubConfig::init(config.github.clone());
     config::MarketConfig::init(config.market.clone());
     config::OpenRouterConfig::init(config.openrouter.clone());
+    config::HttpConfig::init(config.http.clone());
 
     // Create connection pool with configuration from environment
     let pool = database::create_pool(&config.database_url, &config.db_pool)
@@ -58,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(RateLimiter::new(
             config.rate_limit.max_requests,
             config.rate_limit.window,
+            config.http.trust_proxy,
         ))
     };
 
