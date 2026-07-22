@@ -6,16 +6,24 @@ use crate::dto::chat::{
 };
 use crate::dto::common::PaginationQuery;
 use crate::error::AppError;
-use crate::models::chat::{ChatConversationResponse, ChatMessageResponse, ChatStreamResult};
+use crate::extract::{VJson, VPath, VQuery};
+use crate::models::chat::{ChatConversationResponse, ChatMessageResponse};
 use crate::response::ApiResponse;
-use crate::services::{self, chat::ChatError};
+use crate::services::chat::StreamOutcome;
+use crate::services::{self, chat::ChatError, openrouter};
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::State,
+    http::StatusCode,
+    response::{
+        IntoResponse, Response,
+        sse::{Event, Sse},
+    },
     routing::{get, post},
 };
-use axum_valid::Valid;
 use serde::Deserialize;
+use std::convert::Infallible;
+use tokio_stream::StreamExt;
 use uuid::Uuid;
 use validator::Validate;
 
@@ -52,19 +60,13 @@ fn map_chat_error(err: ChatError) -> AppError {
 pub async fn create_conversation(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Json(req)): Valid<Json<CreateChatConversationRequest>>,
-) -> Result<
-    (
-        axum::http::StatusCode,
-        Json<ApiResponse<ChatConversationResponse>>,
-    ),
-    AppError,
-> {
+    VJson(req): VJson<CreateChatConversationRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<ChatConversationResponse>>), AppError> {
     let conversation = services::chat::create_conversation(&pool, auth_user.id, req)
         .await
         .map_err(map_chat_error)?;
     Ok((
-        axum::http::StatusCode::CREATED,
+        StatusCode::CREATED,
         Json(ApiResponse::success_with_message(
             "Successfully created conversation",
             conversation,
@@ -72,36 +74,46 @@ pub async fn create_conversation(
     ))
 }
 
+/// `POST /api/chat/conversations/stream` — creates a conversation plus its
+/// first message; streams the AI response over SSE when AI is available,
+/// otherwise falls back to `201` with the user message (mirrors echobackend's
+/// `CreateConversationStream`).
 pub async fn create_conversation_stream(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Json(req)): Valid<Json<CreateChatConversationStreamRequest>>,
-) -> Result<
-    (
-        axum::http::StatusCode,
-        Json<ApiResponse<Vec<ChatStreamResult>>>,
-    ),
-    AppError,
-> {
-    let result = services::chat::create_conversation_message(&pool, auth_user.id, req)
+    VJson(req): VJson<CreateChatConversationStreamRequest>,
+) -> Result<Response, AppError> {
+    match services::chat::create_conversation_stream(&pool, auth_user.id, req)
         .await
-        .map_err(map_chat_error)?;
-    Ok((
-        axum::http::StatusCode::CREATED,
-        Json(ApiResponse::success_with_message(
-            "Message created successfully",
-            vec![result],
-        )),
-    ))
+        .map_err(map_chat_error)?
+    {
+        StreamOutcome::Fallback(user_message) => Ok((
+            StatusCode::CREATED,
+            Json(ApiResponse::success_with_message(
+                "Message created successfully",
+                vec![user_message],
+            )),
+        )
+            .into_response()),
+        StreamOutcome::Stream(preparation) => {
+            let initial_event = serde_json::json!({
+                "type": "conversation_created",
+                "data": {
+                    "conversation_id": preparation.conversation_id,
+                    "user_message": preparation.user_message,
+                },
+            });
+            Ok(ai_stream_response(pool, preparation, initial_event).into_response())
+        }
+    }
 }
 
 pub async fn get_conversations(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(query): Valid<Query<PaginationQuery>>,
+    VQuery(query): VQuery<PaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<ChatConversationResponse>>>, AppError> {
-    let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(10);
+    let (limit, offset) = query.resolve(10);
     let (conversations, total) =
         services::chat::get_user_conversations(&pool, auth_user.id, offset as u64, limit as u64)
             .await
@@ -118,7 +130,7 @@ pub async fn get_conversations(
 pub async fn get_conversation(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<ConversationPath>>,
+    VPath(params): VPath<ConversationPath>,
 ) -> Result<Json<ApiResponse<ChatConversationResponse>>, AppError> {
     let conversation = services::chat::get_conversation_by_id(&pool, params.id, auth_user.id)
         .await
@@ -132,8 +144,8 @@ pub async fn get_conversation(
 pub async fn update_conversation(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<ConversationPath>>,
-    Valid(Json(req)): Valid<Json<UpdateChatConversationRequest>>,
+    VPath(params): VPath<ConversationPath>,
+    VJson(req): VJson<UpdateChatConversationRequest>,
 ) -> Result<Json<ApiResponse<ChatConversationResponse>>, AppError> {
     let conversation = services::chat::update_conversation(&pool, params.id, auth_user.id, req)
         .await
@@ -147,7 +159,7 @@ pub async fn update_conversation(
 pub async fn delete_conversation(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<ConversationPath>>,
+    VPath(params): VPath<ConversationPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     services::chat::delete_conversation(&pool, params.id, auth_user.id)
         .await
@@ -161,20 +173,14 @@ pub async fn delete_conversation(
 pub async fn create_message(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<ConversationMessagesPath>>,
-    Valid(Json(req)): Valid<Json<CreateChatMessageRequest>>,
-) -> Result<
-    (
-        axum::http::StatusCode,
-        Json<ApiResponse<Vec<ChatMessageResponse>>>,
-    ),
-    AppError,
-> {
+    VPath(params): VPath<ConversationMessagesPath>,
+    VJson(req): VJson<CreateChatMessageRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<Vec<ChatMessageResponse>>>), AppError> {
     let messages = services::chat::create_message(&pool, auth_user.id, params.conversation_id, req)
         .await
         .map_err(map_chat_error)?;
     Ok((
-        axum::http::StatusCode::CREATED,
+        StatusCode::CREATED,
         Json(ApiResponse::success_with_message(
             "Messages created successfully",
             messages,
@@ -182,31 +188,47 @@ pub async fn create_message(
     ))
 }
 
+/// `POST /api/chat/conversations/:conversationId/messages/stream` — stores the
+/// user message and streams the AI response over SSE when available,
+/// otherwise falls back to `201` with the user message (mirrors
+/// echobackend's `CreateMessageStream`).
 pub async fn create_message_stream(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<ConversationMessagesPath>>,
-    Valid(Json(req)): Valid<Json<CreateChatMessageRequest>>,
-) -> Result<
-    (
-        axum::http::StatusCode,
-        Json<ApiResponse<Vec<ChatMessageResponse>>>,
-    ),
-    AppError,
-> {
-    create_message(
-        State(pool),
-        auth_user,
-        Valid(Path(params)),
-        Valid(Json(req)),
+    VPath(params): VPath<ConversationMessagesPath>,
+    VJson(req): VJson<CreateChatMessageRequest>,
+) -> Result<Response, AppError> {
+    match services::chat::prepare_streaming_message(
+        &pool,
+        auth_user.id,
+        params.conversation_id,
+        req,
     )
     .await
+    .map_err(map_chat_error)?
+    {
+        StreamOutcome::Fallback(user_message) => Ok((
+            StatusCode::CREATED,
+            Json(ApiResponse::success_with_message(
+                "Message created successfully",
+                vec![user_message],
+            )),
+        )
+            .into_response()),
+        StreamOutcome::Stream(preparation) => {
+            let initial_event = serde_json::json!({
+                "type": "user_message",
+                "data": preparation.user_message,
+            });
+            Ok(ai_stream_response(pool, preparation, initial_event).into_response())
+        }
+    }
 }
 
 pub async fn get_messages(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<ConversationMessagesPath>>,
+    VPath(params): VPath<ConversationMessagesPath>,
 ) -> Result<Json<ApiResponse<Vec<ChatMessageResponse>>>, AppError> {
     let messages = services::chat::get_messages(&pool, params.conversation_id, auth_user.id)
         .await
@@ -220,7 +242,7 @@ pub async fn get_messages(
 pub async fn get_message(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<MessagePath>>,
+    VPath(params): VPath<MessagePath>,
 ) -> Result<Json<ApiResponse<ChatMessageResponse>>, AppError> {
     let message = services::chat::get_message(&pool, params.message_id, auth_user.id)
         .await
@@ -234,7 +256,7 @@ pub async fn get_message(
 pub async fn delete_message(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<MessagePath>>,
+    VPath(params): VPath<MessagePath>,
 ) -> Result<Json<ApiResponse<ChatMessageResponse>>, AppError> {
     let message = services::chat::delete_message(&pool, params.message_id, auth_user.id)
         .await
@@ -243,6 +265,97 @@ pub async fn delete_message(
         "Message deleted successfully",
         message,
     )))
+}
+
+// ============================================================================
+// SSE streaming
+// ============================================================================
+
+fn sse_data_event(payload: serde_json::Value) -> Result<Event, Infallible> {
+    Ok(Event::default().data(payload.to_string()))
+}
+
+fn sse_error_event(message: &str) -> Result<Event, Infallible> {
+    sse_data_event(serde_json::json!({ "type": "error", "data": message }))
+}
+
+/// Builds the SSE response for a prepared AI stream, mirroring echobackend's
+/// `streamChatEvents`: the initial event (`conversation_created` /
+/// `user_message`), `ai_chunk` events, `ai_complete` (or `error`), and a
+/// final `data: [DONE]`.
+fn ai_stream_response(
+    pool: DbPool,
+    preparation: services::chat::StreamPreparation,
+    initial_event: serde_json::Value,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let stream = async_stream::stream! {
+        yield sse_data_event(initial_event);
+
+        match openrouter::generate_stream(
+            &preparation.context_messages,
+            preparation.model.as_deref(),
+            preparation.temperature,
+        )
+        .await
+        {
+            Err(err) => {
+                yield sse_error_event(&openrouter::stream_error_message(&err));
+            }
+            Ok(events) => {
+                tokio::pin!(events);
+                let mut content = String::new();
+                let mut usage = openrouter::OpenRouterUsage::default();
+                let mut failed: Option<String> = None;
+
+                while let Some(event) = events.next().await {
+                    match event {
+                        openrouter::StreamEvent::Chunk(chunk) => {
+                            content.push_str(&chunk);
+                            yield sse_data_event(
+                                serde_json::json!({ "type": "ai_chunk", "data": chunk }),
+                            );
+                        }
+                        openrouter::StreamEvent::Usage(value) => usage = value,
+                        openrouter::StreamEvent::Error(err) => {
+                            failed = Some(err);
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(err) = failed {
+                    yield sse_error_event(&openrouter::stream_error_message(&err));
+                } else if content.is_empty() {
+                    yield sse_error_event("OpenRouter returned an empty response");
+                } else {
+                    match services::chat::save_streaming_message(
+                        &pool,
+                        preparation.conversation_id,
+                        preparation.user_id,
+                        content,
+                        preparation.model.clone(),
+                        usage,
+                    )
+                    .await
+                    {
+                        Ok(message) => {
+                            yield sse_data_event(
+                                serde_json::json!({ "type": "ai_complete", "data": message }),
+                            );
+                        }
+                        Err(err) => {
+                            tracing::error!(error = ?err, "failed to save streamed AI message");
+                            yield sse_error_event("Failed to save AI response");
+                        }
+                    }
+                }
+            }
+        }
+
+        yield Ok(Event::default().data("[DONE]"));
+    };
+
+    Sse::new(stream)
 }
 
 pub fn routes() -> Router<DbPool> {

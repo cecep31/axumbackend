@@ -2,6 +2,7 @@ pub mod auth_activity_logs;
 pub mod bookmark_folders;
 pub mod chat_conversations;
 pub mod chat_messages;
+pub mod corporate_actions;
 pub mod holding_types;
 pub mod holdings;
 pub mod notifications;

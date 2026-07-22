@@ -1,4 +1,4 @@
-use super::user::UserResponse;
+use super::user::User;
 use chrono::{DateTime, FixedOffset, Utc};
 use serde::Serialize;
 use uuid::Uuid;
@@ -11,7 +11,7 @@ pub struct CommentResponse {
     pub parent_comment_id: Option<Uuid>,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub user: Option<UserResponse>,
+    pub user: Option<User>,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
 }
@@ -21,10 +21,7 @@ fn to_utc(value: Option<DateTime<FixedOffset>>) -> Option<DateTime<Utc>> {
 }
 
 impl CommentResponse {
-    pub fn from_entity(
-        comment: crate::entities::post_comments::Model,
-        user: Option<UserResponse>,
-    ) -> Self {
+    pub fn from_entity(comment: crate::entities::post_comments::Model, user: Option<User>) -> Self {
         Self {
             id: comment.id,
             post_id: comment.post_id,

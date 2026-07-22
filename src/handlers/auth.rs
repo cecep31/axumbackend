@@ -7,6 +7,7 @@ use crate::dto::auth::{
     RefreshTokenRequest, RegisterRequest, ResetPasswordRequest,
 };
 use crate::error::AppError;
+use crate::extract::{VJson, VQuery};
 use crate::rate_limit::{RateLimiter, rate_limit};
 use crate::response::ApiResponse;
 use crate::services::{self, auth::AuthError};
@@ -18,7 +19,6 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
-use axum_valid::Valid;
 use rand::{Rng, distributions::Alphanumeric};
 use std::time::Duration;
 
@@ -31,9 +31,7 @@ fn user_agent(headers: &HeaderMap) -> Option<String> {
 
 fn map_auth_error(message: &'static str, err: AuthError) -> AppError {
     match err {
-        AuthError::UserExists => {
-            AppError::Conflict("Email or username already exists".to_string())
-        }
+        AuthError::UserExists => AppError::Conflict("Email or username already exists".to_string()),
         AuthError::InvalidCredentials => {
             AppError::Unauthorized("Invalid identifier or password".to_string())
         }
@@ -50,7 +48,7 @@ fn map_auth_error(message: &'static str, err: AuthError) -> AppError {
 
 pub async fn register(
     State(pool): State<DbPool>,
-    Valid(Json(req)): Valid<Json<RegisterRequest>>,
+    VJson(req): VJson<RegisterRequest>,
 ) -> Result<
     (
         StatusCode,
@@ -74,7 +72,7 @@ pub async fn register(
 pub async fn login(
     State(pool): State<DbPool>,
     headers: HeaderMap,
-    Valid(Json(req)): Valid<Json<LoginRequest>>,
+    VJson(req): VJson<LoginRequest>,
 ) -> Result<Json<ApiResponse<services::auth::AuthTokenResponse>>, AppError> {
     let response =
         services::auth::login(&pool, &req.identifier, &req.password, user_agent(&headers))
@@ -90,7 +88,7 @@ pub async fn login(
 pub async fn forgot_password(
     State(pool): State<DbPool>,
     headers: HeaderMap,
-    Valid(Json(req)): Valid<Json<ForgotPasswordRequest>>,
+    VJson(req): VJson<ForgotPasswordRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     let _ = services::auth::forgot_password(&pool, &req.email, user_agent(&headers)).await;
     Ok(Json(ApiResponse::success_with_message(
@@ -102,7 +100,7 @@ pub async fn forgot_password(
 pub async fn reset_password(
     State(pool): State<DbPool>,
     headers: HeaderMap,
-    Valid(Json(req)): Valid<Json<ResetPasswordRequest>>,
+    VJson(req): VJson<ResetPasswordRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     services::auth::reset_password(&pool, &req.token, &req.password, user_agent(&headers))
         .await
@@ -125,7 +123,7 @@ pub async fn reset_password(
 pub async fn refresh_token(
     State(pool): State<DbPool>,
     headers: HeaderMap,
-    Valid(Json(req)): Valid<Json<RefreshTokenRequest>>,
+    VJson(req): VJson<RefreshTokenRequest>,
 ) -> Result<Json<ApiResponse<services::auth::AuthTokenResponse>>, AppError> {
     let response = services::auth::refresh_token(&pool, &req.refresh_token, user_agent(&headers))
         .await
@@ -141,7 +139,7 @@ pub async fn logout(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     headers: HeaderMap,
-    Valid(Json(req)): Valid<Json<LogoutRequest>>,
+    VJson(req): VJson<LogoutRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     let _ = services::auth::logout(
         &pool,
@@ -160,7 +158,7 @@ pub async fn change_password(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     headers: HeaderMap,
-    Valid(Json(req)): Valid<Json<ChangePasswordRequest>>,
+    VJson(req): VJson<ChangePasswordRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     services::auth::change_password(
         &pool,
@@ -186,8 +184,8 @@ pub async fn change_password(
 pub async fn profile(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-) -> Result<Json<ApiResponse<crate::models::user::UserResponse>>, AppError> {
-    match services::user::get_current_user(&pool, auth_user.id).await {
+) -> Result<Json<ApiResponse<services::auth::ProfileResponse>>, AppError> {
+    match services::auth::get_profile(&pool, auth_user.id).await {
         Ok(Some(user)) => Ok(Json(ApiResponse::success_with_message(
             "Profile retrieved successfully",
             user,
@@ -200,7 +198,7 @@ pub async fn profile(
 pub async fn activity_logs(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(query): Valid<Query<ActivityLogQuery>>,
+    VQuery(query): VQuery<ActivityLogQuery>,
 ) -> Result<Json<ApiResponse<Vec<services::auth::AuthActivityLogResponse>>>, AppError> {
     let limit = query.limit.unwrap_or(20);
     let offset = query.offset.unwrap_or(0);
@@ -226,7 +224,7 @@ pub async fn activity_logs(
 pub async fn recent_activity(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(query): Valid<Query<RecentActivityQuery>>,
+    VQuery(query): VQuery<RecentActivityQuery>,
 ) -> Result<Json<ApiResponse<Vec<services::auth::AuthActivityLogResponse>>>, AppError> {
     let limit = query.limit.unwrap_or(10);
     let logs = services::auth::get_recent_activity(&pool, auth_user.id, limit as u64)
@@ -242,7 +240,7 @@ pub async fn recent_activity(
 pub async fn failed_logins(
     State(pool): State<DbPool>,
     _admin_user: crate::auth::AdminUser,
-    Valid(query): Valid<Query<FailedLoginsQuery>>,
+    VQuery(query): VQuery<FailedLoginsQuery>,
 ) -> Result<Json<ApiResponse<Vec<services::auth::AuthActivityLogResponse>>>, AppError> {
     let limit = query.limit.unwrap_or(20);
     let offset = query.offset.unwrap_or(0);
@@ -455,7 +453,7 @@ pub async fn github_oauth_callback(
 
 /// `POST /api/auth/oauth/exchange` — mirrors echobackend's `ExchangeOAuthCode`.
 pub async fn exchange_oauth_code(
-    Valid(Json(req)): Valid<Json<OAuthExchangeRequest>>,
+    VJson(req): VJson<OAuthExchangeRequest>,
 ) -> Result<Json<ApiResponse<services::auth::AuthTokenResponse>>, AppError> {
     let response = services::auth::exchange_oauth_code(&req.code).map_err(|err| match err {
         AuthError::InvalidToken => {
@@ -471,9 +469,13 @@ pub async fn exchange_oauth_code(
 }
 
 pub fn routes() -> Router<DbPool> {
-    let login_limiter = RateLimiter::new(5, Duration::from_secs(60));
-    let register_limiter = RateLimiter::new(3, Duration::from_secs(60));
-    let refresh_limiter = RateLimiter::new(20, Duration::from_secs(60));
+    // Fixed-window auth rate limits per IP, mirroring the documented
+    // echobackend limits (`docs/api/auth.md`).
+    let register_limiter = RateLimiter::new(5, Duration::from_secs(5 * 60));
+    let login_limiter = RateLimiter::new(5, Duration::from_secs(5 * 60));
+    let forgot_password_limiter = RateLimiter::new(3, Duration::from_secs(5 * 60));
+    let reset_password_limiter = RateLimiter::new(5, Duration::from_secs(5 * 60));
+    let refresh_limiter = RateLimiter::new(30, Duration::from_secs(60));
     let oauth_exchange_limiter = RateLimiter::new(10, Duration::from_secs(60));
     Router::new()
         .route(
@@ -493,11 +495,17 @@ pub fn routes() -> Router<DbPool> {
         .route(
             "/api/auth/forgot-password",
             post(forgot_password).route_layer(middleware::from_fn_with_state(
-                RateLimiter::new(5, Duration::from_secs(60)),
+                forgot_password_limiter,
                 rate_limit,
             )),
         )
-        .route("/api/auth/reset-password", post(reset_password))
+        .route(
+            "/api/auth/reset-password",
+            post(reset_password).route_layer(middleware::from_fn_with_state(
+                reset_password_limiter,
+                rate_limit,
+            )),
+        )
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/profile", get(profile))
         .route("/api/auth/password", axum::routing::patch(change_password))

@@ -182,7 +182,7 @@ impl From<DbErr> for RestoreError {
 /// (`internal/repository/user_repository.go`): rejects the restore with a
 /// conflict if another user (deleted or not) already holds the same email
 /// or username.
-pub async fn restore(db: &DatabaseConnection, id: Uuid) -> Result<(), RestoreError> {
+pub async fn restore(db: &DatabaseConnection, id: Uuid) -> Result<UserResponse, RestoreError> {
     let Some(user) = users::Entity::find_by_id(id)
         .filter(users::Column::DeletedAt.is_not_null())
         .one(db)
@@ -216,7 +216,7 @@ pub async fn restore(db: &DatabaseConnection, id: Uuid) -> Result<(), RestoreErr
     let mut active = user.into_active_model();
     active.deleted_at = Set(None);
     active.updated_at = Set(Some(Utc::now().into()));
-    active.update(db).await?;
+    let restored_user = active.update(db).await?;
 
-    Ok(())
+    Ok(hydrate_user(db, restored_user, UserView::Admin).await?)
 }

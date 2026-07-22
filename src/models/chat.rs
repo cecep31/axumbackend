@@ -33,13 +33,6 @@ pub struct ChatConversationResponse {
     pub chat_messages: Option<Vec<ChatMessageResponse>>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ChatStreamResult {
-    pub user_message: ChatMessageResponse,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub conversation_id: Option<String>,
-}
-
 pub fn message_response(message: chat_messages::Model) -> ChatMessageResponse {
     ChatMessageResponse {
         id: message.id.to_string(),

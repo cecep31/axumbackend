@@ -37,15 +37,18 @@ pub struct RandomPostQuery {
     pub limit: Option<i64>,
 }
 
+/// Analytics date filters. Kept as raw strings and parsed leniently, mirroring
+/// echobackend's `MyPostsAnalyticsQuery` (invalid dates fall back to defaults).
 #[derive(Deserialize, Validate)]
 pub struct MyPostsAnalyticsQuery {
-    pub start_date: Option<chrono::NaiveDate>,
-    pub end_date: Option<chrono::NaiveDate>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
 }
 
+/// `months` is clamped leniently to `1..=24` (default `12`), mirroring
+/// echobackend's `GetMyPostsLikesByMonth`.
 #[derive(Deserialize, Validate)]
 pub struct MyPostsLikesByMonthQuery {
-    #[validate(range(min = 1, max = 24))]
     pub months: Option<i64>,
 }
 
@@ -78,6 +81,28 @@ pub struct PostPaginationQuery {
     pub order_by: Option<String>,
     #[serde(alias = "sort_order")]
     pub order_direction: Option<OrderDirection>,
+}
+
+/// Query filter for `GET /api/posts`, mirroring echobackend's `PostQueryFilter`
+/// (`docs/api/posts.md`). Unlike most endpoints, the posts list accepts
+/// `limit` values above 100. Values that echobackend parses leniently
+/// (`published`, `created_by`, dates) are kept as raw strings here and
+/// interpreted by the handler.
+#[derive(Deserialize, Validate)]
+pub struct PostsFilterQuery {
+    #[validate(range(min = 0, max = 10_000))]
+    pub offset: Option<i64>,
+    #[validate(range(min = 1, max = 10_000))]
+    pub limit: Option<i64>,
+    #[validate(length(max = 200))]
+    pub search: Option<String>,
+    pub sort_by: Option<String>,
+    pub sort_order: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub created_by: Option<String>,
+    pub published: Option<String>,
+    pub tags: Option<String>,
 }
 
 #[derive(Deserialize, Validate)]

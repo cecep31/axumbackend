@@ -2,7 +2,7 @@ use crate::entities::{post_likes, posts};
 use crate::models::post_like::{
     LikeStatusResponse, PostLikeListResponse, PostLikeResponse, PostLikeStats,
 };
-use crate::models::user::UserResponse;
+use crate::models::user::User;
 use crate::services::user_hydration;
 use chrono::Utc;
 use sea_orm::{
@@ -45,22 +45,17 @@ async fn like_exists(db: &DatabaseConnection, post_id: Uuid, user_id: Uuid) -> R
 
 fn hydrate_like(
     like: post_likes::Model,
-    users_by_id: &std::collections::HashMap<Uuid, UserResponse>,
+    users_by_id: &std::collections::HashMap<Uuid, User>,
 ) -> PostLikeResponse {
-    let user_response = users_by_id.get(&like.user_id).cloned();
-    PostLikeResponse::from_entity(like, user_response)
+    let user = users_by_id.get(&like.user_id).cloned();
+    PostLikeResponse::from_entity(like, user)
 }
 
 async fn load_like_user_map(
     db: &DatabaseConnection,
     likes: &[post_likes::Model],
-) -> Result<std::collections::HashMap<Uuid, UserResponse>, DbErr> {
-    user_hydration::load_user_response_map(
-        db,
-        likes.iter().map(|like| like.user_id),
-        crate::models::user::UserView::General,
-    )
-    .await
+) -> Result<std::collections::HashMap<Uuid, User>, DbErr> {
+    user_hydration::load_user_brief_map(db, likes.iter().map(|like| like.user_id)).await
 }
 
 pub async fn like_post(

@@ -1,14 +1,22 @@
-use crate::dto::validation::USERNAME_RE;
+use crate::dto::validation::{USERNAME_RE, parse_pagination};
 use serde::Deserialize;
 use uuid::Uuid;
 use validator::Validate;
 
+/// Lenient pagination query, mirroring echobackend's `ParsePaginationParams`:
+/// invalid or out-of-range values are silently clamped/defaulted rather than
+/// rejected with a `422`.
 #[derive(Deserialize, Validate)]
 pub struct PaginationQuery {
-    #[validate(range(min = 0, max = 10_000))]
-    pub offset: Option<i64>,
-    #[validate(range(min = 1, max = 100))]
-    pub limit: Option<i64>,
+    pub offset: Option<String>,
+    pub limit: Option<String>,
+}
+
+impl PaginationQuery {
+    /// Returns `(limit, offset)`, mirroring `ParsePaginationParams(defaultLimit)`.
+    pub fn resolve(&self, default_limit: i64) -> (i64, i64) {
+        parse_pagination(self.offset.as_deref(), self.limit.as_deref(), default_limit)
+    }
 }
 
 #[derive(Deserialize, Validate)]

@@ -4,9 +4,9 @@ use crate::dto::chat::{
 };
 use crate::entities::{chat_conversations, chat_messages};
 use crate::models::chat::{
-    ChatConversationResponse, ChatMessageResponse, ChatStreamResult, conversation_response,
-    message_response,
+    ChatConversationResponse, ChatMessageResponse, conversation_response, message_response,
 };
+use crate::services::openrouter::{self, OpenRouterMessage, OpenRouterUsage};
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, IntoActiveModel,
@@ -26,6 +26,25 @@ impl From<DbErr> for ChatError {
     fn from(err: DbErr) -> Self {
         Self::Db(err)
     }
+}
+
+/// Outcome of a streaming chat request, mirroring echobackend: either the AI
+/// fallback (only the user message was stored) or everything needed to run
+/// the SSE stream.
+pub enum StreamOutcome {
+    /// AI unavailable — respond `201` with an array holding the user message.
+    Fallback(ChatMessageResponse),
+    /// AI available — stream `ai_chunk` / `ai_complete` events via SSE.
+    Stream(StreamPreparation),
+}
+
+pub struct StreamPreparation {
+    pub user_id: Uuid,
+    pub conversation_id: Uuid,
+    pub user_message: ChatMessageResponse,
+    pub context_messages: Vec<OpenRouterMessage>,
+    pub model: Option<String>,
+    pub temperature: f64,
 }
 
 async fn owned_conversation(
@@ -59,6 +78,9 @@ fn build_conversation_title(title: Option<String>, content: &str) -> String {
         }
     }
     let normalized: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return "New conversation".to_string();
+    }
     normalized.chars().take(50).collect()
 }
 
@@ -70,6 +92,81 @@ async fn touch_conversation(
     active.updated_at = Set(Utc::now().into());
     active.update(db).await?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_message(
+    db: &DatabaseConnection,
+    conversation_id: Uuid,
+    user_id: Uuid,
+    role: String,
+    content: String,
+    model: Option<String>,
+    prompt_tokens: i32,
+    completion_tokens: i32,
+    total_tokens: i32,
+) -> Result<chat_messages::Model, ChatError> {
+    let now = Utc::now().into();
+    let message = chat_messages::ActiveModel {
+        conversation_id: Set(conversation_id),
+        user_id: Set(user_id),
+        role: Set(role),
+        content: Set(content),
+        model: Set(model),
+        prompt_tokens: Set(Some(prompt_tokens)),
+        completion_tokens: Set(Some(completion_tokens)),
+        total_tokens: Set(Some(total_tokens)),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(db)
+    .await?;
+    Ok(message)
+}
+
+/// All messages of a conversation in chronological order (the OpenRouter
+/// context window), mirroring `GetMessagesByConversationIDAsc`.
+async fn context_messages(
+    db: &DatabaseConnection,
+    conversation_id: Uuid,
+    user_id: Uuid,
+) -> Result<Vec<chat_messages::Model>, ChatError> {
+    let messages = chat_messages::Entity::find()
+        .filter(chat_messages::Column::ConversationId.eq(conversation_id))
+        .filter(chat_messages::Column::UserId.eq(user_id))
+        .order_by_asc(chat_messages::Column::CreatedAt)
+        .all(db)
+        .await?;
+    Ok(messages)
+}
+
+/// echobackend: a conversation still titled "New conversation" after the first
+/// message gets an auto-generated title from that message.
+async fn maybe_auto_title(
+    db: &DatabaseConnection,
+    conversation: &chat_conversations::Model,
+    context_len: usize,
+    content: &str,
+) -> Result<(), ChatError> {
+    if conversation.title != "New conversation" || context_len != 1 {
+        return Ok(());
+    }
+    let title = build_conversation_title(None, content);
+    let mut active = conversation.clone().into_active_model();
+    active.title = Set(title);
+    active.update(db).await?;
+    Ok(())
+}
+
+fn to_openrouter_messages(messages: &[chat_messages::Model]) -> Vec<OpenRouterMessage> {
+    messages
+        .iter()
+        .map(|message| OpenRouterMessage {
+            role: message.role.clone(),
+            content: message.content.clone(),
+        })
+        .collect()
 }
 
 pub async fn create_conversation(
@@ -179,6 +276,10 @@ pub async fn delete_conversation(
     Ok(())
 }
 
+/// Stores the user message, then (when the role is `user` and OpenRouter is
+/// configured) synchronously generates and stores the AI reply, mirroring
+/// echobackend's `CreateMessage`. AI failures are fail-open: the user message
+/// is still returned on its own.
 pub async fn create_message(
     db: &DatabaseConnection,
     user_id: Uuid,
@@ -186,40 +287,90 @@ pub async fn create_message(
     req: CreateChatMessageRequest,
 ) -> Result<Vec<ChatMessageResponse>, ChatError> {
     let conversation = owned_conversation(db, conversation_id, user_id).await?;
+    let role = normalized_role(req.role.clone());
+    let content = req.content.clone();
+    let user_message = insert_message(
+        db,
+        conversation_id,
+        user_id,
+        role.clone(),
+        content.clone(),
+        req.model.clone(),
+        0,
+        0,
+        0,
+    )
+    .await?;
+    touch_conversation(db, conversation.clone()).await?;
+    let mut responses = vec![message_response(user_message)];
+
+    if role != "user" || !openrouter::is_available(req.model.as_deref()) {
+        return Ok(responses);
+    }
+
+    let context = context_messages(db, conversation_id, user_id).await?;
+    maybe_auto_title(db, &conversation, context.len(), &content).await?;
+
+    let messages = to_openrouter_messages(&context);
+    let reply = match openrouter::generate_response(
+        &messages,
+        req.model.as_deref(),
+        openrouter::normalized_temperature(req.temperature),
+    )
+    .await
+    {
+        Ok(reply) => reply,
+        Err(err) => {
+            tracing::warn!(error = %err, "openrouter generate response failed; returning user message only");
+            return Ok(responses);
+        }
+    };
+    let Some(choice) = reply.choices.into_iter().next() else {
+        return Ok(responses);
+    };
+
+    let assistant = insert_message(
+        db,
+        conversation_id,
+        user_id,
+        normalized_role(Some(choice.message.role)),
+        choice.message.content,
+        openrouter::effective_model(req.model.as_deref()),
+        reply.usage.prompt_tokens,
+        reply.usage.completion_tokens,
+        reply.usage.total_tokens,
+    )
+    .await?;
+    touch_conversation(db, conversation).await?;
+    responses.push(message_response(assistant));
+    Ok(responses)
+}
+
+/// `POST /api/chat/conversations/stream`: creates a conversation, stores the
+/// first message, and prepares the AI stream (or the fallback), mirroring
+/// echobackend's `CreateConversationStream`.
+pub async fn create_conversation_stream(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    req: CreateChatConversationStreamRequest,
+) -> Result<StreamOutcome, ChatError> {
+    let title = build_conversation_title(req.title.clone(), &req.content);
     let now = Utc::now().into();
-    let message = chat_messages::ActiveModel {
-        conversation_id: Set(conversation_id),
+    let conversation = chat_conversations::ActiveModel {
+        title: Set(title),
         user_id: Set(user_id),
-        role: Set(normalized_role(req.role)),
-        content: Set(req.content),
-        model: Set(req.model),
-        prompt_tokens: Set(Some(0)),
-        completion_tokens: Set(Some(0)),
-        total_tokens: Set(Some(0)),
+        is_pinned: Set(false),
         created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()
     }
     .insert(db)
     .await?;
-    touch_conversation(db, conversation).await?;
-    Ok(vec![message_response(message)])
-}
 
-pub async fn create_conversation_message(
-    db: &DatabaseConnection,
-    user_id: Uuid,
-    req: CreateChatConversationStreamRequest,
-) -> Result<ChatStreamResult, ChatError> {
-    let title = build_conversation_title(req.title.clone(), &req.content);
-    let conversation =
-        create_conversation(db, user_id, CreateChatConversationRequest { title }).await?;
-    let conversation_id =
-        Uuid::parse_str(&conversation.id).map_err(|_| ChatError::ConversationNotFound)?;
-    let messages = create_message(
+    prepare_streaming_message(
         db,
         user_id,
-        conversation_id,
+        conversation.id,
         CreateChatMessageRequest {
             content: req.content,
             role: Some("user".to_string()),
@@ -227,14 +378,77 @@ pub async fn create_conversation_message(
             temperature: req.temperature,
         },
     )
+    .await
+}
+
+/// Stores the user message and decides whether the AI stream can run,
+/// mirroring echobackend's `createStreamingMessageInternal`.
+pub async fn prepare_streaming_message(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    conversation_id: Uuid,
+    req: CreateChatMessageRequest,
+) -> Result<StreamOutcome, ChatError> {
+    let conversation = owned_conversation(db, conversation_id, user_id).await?;
+    let role = normalized_role(req.role.clone());
+    let content = req.content.clone();
+    let user_message = insert_message(
+        db,
+        conversation_id,
+        user_id,
+        role.clone(),
+        content.clone(),
+        req.model.clone(),
+        0,
+        0,
+        0,
+    )
     .await?;
-    Ok(ChatStreamResult {
-        user_message: messages
-            .into_iter()
-            .next()
-            .ok_or(ChatError::MessageNotFound)?,
-        conversation_id: Some(conversation.id),
-    })
+    touch_conversation(db, conversation.clone()).await?;
+    let user_response = message_response(user_message);
+
+    if role != "user" || !openrouter::is_available(req.model.as_deref()) {
+        return Ok(StreamOutcome::Fallback(user_response));
+    }
+
+    let context = context_messages(db, conversation_id, user_id).await?;
+    maybe_auto_title(db, &conversation, context.len(), &content).await?;
+
+    Ok(StreamOutcome::Stream(StreamPreparation {
+        user_id,
+        conversation_id,
+        user_message: user_response,
+        context_messages: to_openrouter_messages(&context),
+        model: req.model,
+        temperature: openrouter::normalized_temperature(req.temperature),
+    }))
+}
+
+/// Persists the completed streamed AI message, mirroring echobackend's
+/// `SaveStreamingMessage`.
+pub async fn save_streaming_message(
+    db: &DatabaseConnection,
+    conversation_id: Uuid,
+    user_id: Uuid,
+    content: String,
+    model: Option<String>,
+    usage: OpenRouterUsage,
+) -> Result<ChatMessageResponse, ChatError> {
+    let conversation = owned_conversation(db, conversation_id, user_id).await?;
+    let message = insert_message(
+        db,
+        conversation_id,
+        user_id,
+        "assistant".to_string(),
+        content,
+        openrouter::effective_model(model.as_deref()),
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        usage.total_tokens,
+    )
+    .await?;
+    touch_conversation(db, conversation).await?;
+    Ok(message_response(message))
 }
 
 pub async fn get_messages(

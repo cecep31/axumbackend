@@ -5,16 +5,16 @@ use crate::dto::user::{
     FollowRequest, UserDeletedFilter, UserDetailQuery, UserIdPath, UserListQuery,
 };
 use crate::error::AppError;
+use crate::extract::{VJson, VPath, VQuery};
 use crate::models::user::UserResponse;
 use crate::models::user_follow::{FollowResponse, FollowStats};
 use crate::response::ApiResponse;
 use crate::services;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::State,
     routing::{delete, get, post},
 };
-use axum_valid::Valid;
 
 fn map_follow_error(err: services::user_follow::UserFollowError) -> AppError {
     match err {
@@ -37,14 +37,13 @@ fn map_follow_error(err: services::user_follow::UserFollowError) -> AppError {
 pub async fn get_users(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    Valid(query): Valid<Query<UserListQuery>>,
+    VQuery(query): VQuery<UserListQuery>,
 ) -> Result<Json<ApiResponse<Vec<UserResponse>>>, AppError> {
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(10);
-    let deleted_filter = UserDeletedFilter::parse(query.deleted.as_deref())
-        .map_err(AppError::BadRequest)?;
-    let (users, total) =
-        services::user::get_users(&pool, offset, limit, deleted_filter).await?;
+    let deleted_filter =
+        UserDeletedFilter::parse(query.deleted.as_deref()).map_err(AppError::BadRequest)?;
+    let (users, total) = services::user::get_users(&pool, offset, limit, deleted_filter).await?;
 
     Ok(Json(ApiResponse::with_meta_message(
         "Successfully retrieved users",
@@ -58,8 +57,8 @@ pub async fn get_users(
 pub async fn get_by_id(
     State(pool): State<DbPool>,
     admin_user: AdminUser,
-    Valid(Path(params)): Valid<Path<UserIdPath>>,
-    Valid(Query(query)): Valid<Query<UserDetailQuery>>,
+    VPath(params): VPath<UserIdPath>,
+    VQuery(query): VQuery<UserDetailQuery>,
 ) -> Result<Json<ApiResponse<UserResponse>>, AppError> {
     let result = if query.deleted.as_deref() == Some("true") {
         services::user::get_admin_by_id_deleted_only(&pool, params.id).await
@@ -94,7 +93,7 @@ pub async fn get_me(
 pub async fn delete_user(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    Valid(Path(params)): Valid<Path<UserIdPath>>,
+    VPath(params): VPath<UserIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     match services::user::soft_delete(&pool, params.id).await {
         Ok(true) => Ok(Json(ApiResponse::success_with_message(
@@ -109,12 +108,12 @@ pub async fn delete_user(
 pub async fn restore_user(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    Valid(Path(params)): Valid<Path<UserIdPath>>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    VPath(params): VPath<UserIdPath>,
+) -> Result<Json<ApiResponse<UserResponse>>, AppError> {
     match services::user::restore(&pool, params.id).await {
-        Ok(()) => Ok(Json(ApiResponse::success_with_message(
+        Ok(user) => Ok(Json(ApiResponse::success_with_message(
             "Successfully restored user",
-            serde_json::Value::Null,
+            user,
         ))),
         Err(services::user::RestoreError::NotFound) => {
             Err(AppError::NotFound("User not found".to_string()))
@@ -129,7 +128,7 @@ pub async fn restore_user(
 
 pub async fn get_by_username(
     State(pool): State<DbPool>,
-    Valid(Path(params)): Valid<Path<UsernamePath>>,
+    VPath(params): VPath<UsernamePath>,
 ) -> Result<Json<ApiResponse<UserResponse>>, AppError> {
     match services::user::get_by_username(&pool, &params.username).await {
         Ok(Some(user)) => Ok(Json(ApiResponse::success_with_message(
@@ -144,7 +143,7 @@ pub async fn get_by_username(
 pub async fn follow_user(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Json(req)): Valid<Json<FollowRequest>>,
+    VJson(req): VJson<FollowRequest>,
 ) -> Result<Json<ApiResponse<FollowResponse>>, AppError> {
     let response = services::user_follow::follow_user(&pool, auth_user.id, req.user_id)
         .await
@@ -159,7 +158,7 @@ pub async fn follow_user(
 pub async fn unfollow_user(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<UserIdPath>>,
+    VPath(params): VPath<UserIdPath>,
 ) -> Result<Json<ApiResponse<FollowResponse>>, AppError> {
     let response = services::user_follow::unfollow_user(&pool, auth_user.id, params.id)
         .await
@@ -174,7 +173,7 @@ pub async fn unfollow_user(
 pub async fn check_follow_status(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<UserIdPath>>,
+    VPath(params): VPath<UserIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     let is_following = services::user_follow::is_following(&pool, auth_user.id, params.id).await?;
 
@@ -186,11 +185,10 @@ pub async fn check_follow_status(
 
 pub async fn get_followers(
     State(pool): State<DbPool>,
-    Valid(Path(params)): Valid<Path<UserIdPath>>,
-    Valid(query): Valid<Query<PaginationQuery>>,
+    VPath(params): VPath<UserIdPath>,
+    VQuery(query): VQuery<PaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<UserResponse>>>, AppError> {
-    let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(10);
+    let (limit, offset) = query.resolve(10);
     let (followers, total) =
         services::user_follow::get_followers(&pool, params.id, limit, offset, None).await?;
 
@@ -205,11 +203,10 @@ pub async fn get_followers(
 
 pub async fn get_following(
     State(pool): State<DbPool>,
-    Valid(Path(params)): Valid<Path<UserIdPath>>,
-    Valid(query): Valid<Query<PaginationQuery>>,
+    VPath(params): VPath<UserIdPath>,
+    VQuery(query): VQuery<PaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<UserResponse>>>, AppError> {
-    let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(10);
+    let (limit, offset) = query.resolve(10);
     let (following, total) =
         services::user_follow::get_following(&pool, params.id, limit, offset, None).await?;
 
@@ -224,7 +221,7 @@ pub async fn get_following(
 
 pub async fn get_follow_stats(
     State(pool): State<DbPool>,
-    Valid(Path(params)): Valid<Path<UserIdPath>>,
+    VPath(params): VPath<UserIdPath>,
 ) -> Result<Json<ApiResponse<FollowStats>>, AppError> {
     match services::user_follow::get_follow_stats(&pool, params.id).await? {
         Some(stats) => Ok(Json(ApiResponse::success_with_message(
@@ -238,7 +235,7 @@ pub async fn get_follow_stats(
 pub async fn get_mutual_follows(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<UserIdPath>>,
+    VPath(params): VPath<UserIdPath>,
 ) -> Result<Json<ApiResponse<Vec<UserResponse>>>, AppError> {
     let users = services::user_follow::get_mutual_follows(&pool, auth_user.id, params.id).await?;
 

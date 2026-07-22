@@ -1,8 +1,31 @@
 use crate::entities::{profiles, users};
-use crate::models::user::{UserResponse, UserView};
+use crate::models::user::{User, UserResponse, UserView};
 use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
+
+/// Loads the brief `{id, username, image}` shape used for nested authors on
+/// comments and post likes (echobackend's `UserBrief` / `preloadUserBrief`).
+pub async fn load_user_brief_map(
+    db: &DatabaseConnection,
+    user_ids: impl IntoIterator<Item = Uuid>,
+) -> Result<HashMap<Uuid, User>, DbErr> {
+    let user_ids: HashSet<Uuid> = user_ids.into_iter().collect();
+    if user_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let users = users::Entity::find()
+        .filter(users::Column::Id.is_in(user_ids.iter().copied()))
+        .filter(users::Column::DeletedAt.is_null())
+        .all(db)
+        .await?;
+
+    Ok(users
+        .into_iter()
+        .map(|user| (user.id, User::from(user)))
+        .collect())
+}
 
 pub async fn load_user_response_map(
     db: &DatabaseConnection,

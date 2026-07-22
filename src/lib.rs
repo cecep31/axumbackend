@@ -5,6 +5,7 @@ pub mod dto;
 pub mod email;
 pub mod entities;
 pub mod error;
+pub mod extract;
 pub mod handlers;
 pub mod models;
 pub mod rate_limit;

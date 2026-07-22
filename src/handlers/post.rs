@@ -3,24 +3,25 @@ use crate::database::DbPool;
 use crate::dto::common::{PostIdPath, UsernamePath};
 use crate::dto::post::{
     CreatePostRequest, MyPostsAnalyticsQuery, MyPostsLikesByMonthQuery, PostPaginationQuery,
-    PostPath, RandomPostQuery, TagPath, UpdatePostRequest, post_pagination_params,
+    PostPath, PostsFilterQuery, RandomPostQuery, TagPath, UpdatePostRequest,
+    post_pagination_params,
 };
 use crate::error::AppError;
+use crate::extract::{VJson, VPath, VQuery};
 use crate::models::post::{Post, SitemapPost};
 use crate::response::ApiResponse;
 use crate::services;
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, State},
     routing::{get, post},
 };
-use axum_valid::Valid;
 use uuid::Uuid;
 
 pub async fn create_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Json(req)): Valid<Json<CreatePostRequest>>,
+    VJson(req): VJson<CreatePostRequest>,
 ) -> Result<(axum::http::StatusCode, Json<ApiResponse<serde_json::Value>>), AppError> {
     let post = services::post::create_post(
         &pool,
@@ -79,16 +80,74 @@ async fn ensure_author(pool: &DbPool, post_id: Uuid, auth_user: &AuthUser) -> Re
     }
 }
 
+/// Parses a `YYYY-MM-DD` query value. Returns `400` on a malformed date.
+fn parse_date_param(raw: Option<&str>, field: &str) -> Result<Option<chrono::NaiveDate>, AppError> {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some(value) => chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .map(Some)
+            .map_err(|_| {
+                AppError::BadRequest(format!("Invalid {field} format, expected YYYY-MM-DD"))
+            }),
+    }
+}
+
 pub async fn get_posts(
     State(pool): State<DbPool>,
-    Valid(query): Valid<Query<PostPaginationQuery>>,
+    VQuery(query): VQuery<PostsFilterQuery>,
 ) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
-    let client = pool;
-    let (offset, limit, search, order_by, order_direction) = post_pagination_params(&query);
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(10);
 
-    let (posts, total) =
-        services::post::get_all_posts(&client, offset, limit, search, order_by, order_direction)
-            .await?;
+    let published = match query.published.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "Invalid published value, expected true or false".to_string(),
+            ));
+        }
+    };
+    let start_date = parse_date_param(query.start_date.as_deref(), "start_date")?;
+    let end_date = parse_date_param(query.end_date.as_deref(), "end_date")?;
+    let created_by = match query.created_by.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(raw) => Some(Uuid::parse_str(raw).map_err(|_| {
+            AppError::BadRequest("Invalid created_by value, expected UUID".to_string())
+        })?),
+    };
+    let tags: Vec<String> = query
+        .tags
+        .unwrap_or_default()
+        .split(',')
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    // echobackend's `GetSortOrder`: anything other than asc/desc falls back to
+    // the default (desc), represented by `None` here.
+    let sort_order = match query.sort_order.as_deref() {
+        Some("asc") => Some(services::post::SortDirection::Asc),
+        Some("desc") => Some(services::post::SortDirection::Desc),
+        _ => None,
+    };
+
+    let (posts, total) = services::post::get_all_posts(
+        &pool,
+        services::post::PostsFilter {
+            offset,
+            limit,
+            search: query.search.as_deref(),
+            sort_by: query.sort_by.as_deref(),
+            sort_order,
+            start_date,
+            end_date,
+            created_by,
+            published,
+            tags,
+        },
+    )
+    .await?;
 
     Ok(Json(ApiResponse::with_meta_message(
         "Successfully retrieved posts",
@@ -101,7 +160,7 @@ pub async fn get_posts(
 
 pub async fn get_random_posts(
     State(pool): State<DbPool>,
-    Valid(query): Valid<Query<RandomPostQuery>>,
+    VQuery(query): VQuery<RandomPostQuery>,
 ) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
     let client = pool;
     let limit = query.limit.unwrap_or(9);
@@ -115,7 +174,7 @@ pub async fn get_random_posts(
 
 pub async fn get_trending_posts(
     State(pool): State<DbPool>,
-    Valid(query): Valid<Query<RandomPostQuery>>,
+    VQuery(query): VQuery<RandomPostQuery>,
 ) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
     let client = pool;
     let limit = query.limit.unwrap_or(10).min(100);
@@ -129,7 +188,7 @@ pub async fn get_trending_posts(
 pub async fn get_posts_for_you(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(query): Valid<Query<PostPaginationQuery>>,
+    VQuery(query): VQuery<PostPaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
     let (offset, limit, _search, _order_by, _order_direction) = post_pagination_params(&query);
     let (posts, total) =
@@ -198,8 +257,8 @@ pub async fn get_posts_for_sitemap(
 
 pub async fn get_posts_by_tag(
     State(pool): State<DbPool>,
-    Valid(Path(tag_path)): Valid<Path<TagPath>>,
-    Valid(query): Valid<Query<PostPaginationQuery>>,
+    VPath(tag_path): VPath<TagPath>,
+    VQuery(query): VQuery<PostPaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
     let client = pool;
     let (offset, limit, search, order_by, order_direction) = post_pagination_params(&query);
@@ -235,7 +294,7 @@ pub async fn record_view(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     headers: axum::http::HeaderMap,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
+    VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     let ip_address =
         header_string(&headers, "x-forwarded-for").or_else(|| header_string(&headers, "x-real-ip"));
@@ -254,8 +313,8 @@ pub async fn record_view(
 pub async fn get_post_views(
     State(pool): State<DbPool>,
     _auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
-    Valid(query): Valid<Query<PostPaginationQuery>>,
+    VPath(params): VPath<PostIdPath>,
+    VQuery(query): VQuery<PostPaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<crate::models::post_view::PostViewResponse>>>, AppError> {
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(10);
@@ -274,7 +333,7 @@ pub async fn get_post_views(
 
 pub async fn get_post_view_stats(
     State(pool): State<DbPool>,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
+    VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<crate::models::post_view::PostViewStats>>, AppError> {
     let stats = services::post_view::get_view_stats(&pool, params.id)
         .await
@@ -289,7 +348,7 @@ pub async fn get_post_view_stats(
 pub async fn check_user_viewed(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
+    VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<crate::models::post_view::ViewStatusResponse>>, AppError> {
     let status = services::post_view::has_user_viewed_post(&pool, params.id, auth_user.id)
         .await
@@ -304,7 +363,7 @@ pub async fn check_user_viewed(
 pub async fn like_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
+    VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     services::post_like::like_post(&pool, params.id, auth_user.id)
         .await
@@ -319,7 +378,7 @@ pub async fn like_post(
 pub async fn unlike_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
+    VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     services::post_like::unlike_post(&pool, params.id, auth_user.id)
         .await
@@ -333,8 +392,8 @@ pub async fn unlike_post(
 
 pub async fn get_post_likes(
     State(pool): State<DbPool>,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
-    Valid(query): Valid<Query<PostPaginationQuery>>,
+    VPath(params): VPath<PostIdPath>,
+    VQuery(query): VQuery<PostPaginationQuery>,
 ) -> Result<Json<ApiResponse<crate::models::post_like::PostLikeListResponse>>, AppError> {
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(10);
@@ -350,7 +409,7 @@ pub async fn get_post_likes(
 
 pub async fn get_post_like_stats(
     State(pool): State<DbPool>,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
+    VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<crate::models::post_like::PostLikeStats>>, AppError> {
     let stats = services::post_like::get_like_stats(&pool, params.id)
         .await
@@ -365,7 +424,7 @@ pub async fn get_post_like_stats(
 pub async fn check_user_liked(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
+    VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<crate::models::post_like::LikeStatusResponse>>, AppError> {
     let status = services::post_like::has_user_liked_post(&pool, params.id, auth_user.id)
         .await
@@ -379,8 +438,8 @@ pub async fn check_user_liked(
 
 pub async fn get_posts_by_username(
     State(pool): State<DbPool>,
-    Valid(Path(params)): Valid<Path<UsernamePath>>,
-    Valid(query): Valid<Query<PostPaginationQuery>>,
+    VPath(params): VPath<UsernamePath>,
+    VQuery(query): VQuery<PostPaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
     let client = pool;
     let (offset, limit, _, _, _) = post_pagination_params(&query);
@@ -400,7 +459,7 @@ pub async fn get_posts_by_username(
 pub async fn get_my_posts(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(query): Valid<Query<PostPaginationQuery>>,
+    VQuery(query): VQuery<PostPaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(10);
@@ -419,7 +478,7 @@ pub async fn get_my_posts(
 pub async fn get_my_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
+    VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<Post>>, AppError> {
     match services::post::get_post_by_id_for_author(&pool, params.id, auth_user.id).await? {
         Some(post) => Ok(Json(ApiResponse::success_with_message(
@@ -433,8 +492,8 @@ pub async fn get_my_post(
 pub async fn update_my_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
-    Valid(Json(req)): Valid<Json<UpdatePostRequest>>,
+    VPath(params): VPath<PostIdPath>,
+    VJson(req): VJson<UpdatePostRequest>,
 ) -> Result<Json<ApiResponse<Post>>, AppError> {
     ensure_author(&pool, params.id, &auth_user).await?;
     match services::post::update_post(
@@ -462,7 +521,7 @@ pub async fn update_my_post(
 pub async fn delete_my_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
+    VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     ensure_author(&pool, params.id, &auth_user).await?;
     match services::post::soft_delete_post(&pool, params.id).await? {
@@ -477,15 +536,22 @@ pub async fn delete_my_post(
 pub async fn get_my_posts_analytics(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(query): Valid<Query<MyPostsAnalyticsQuery>>,
+    VQuery(query): VQuery<MyPostsAnalyticsQuery>,
 ) -> Result<Json<ApiResponse<crate::models::post_view::MyPostsAnalyticsResponse>>, AppError> {
-    let analytics = services::post_view::get_my_posts_analytics(
-        &pool,
-        auth_user.id,
-        query.start_date,
-        query.end_date,
-    )
-    .await?;
+    // echobackend parses dates leniently: unparseable values fall back to the
+    // default window (last 30 days).
+    let start_date = query
+        .start_date
+        .as_deref()
+        .and_then(|value| chrono::NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d").ok());
+    let end_date = query
+        .end_date
+        .as_deref()
+        .and_then(|value| chrono::NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d").ok());
+
+    let analytics =
+        services::post_view::get_my_posts_analytics(&pool, auth_user.id, start_date, end_date)
+            .await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Successfully retrieved post analytics",
@@ -496,9 +562,8 @@ pub async fn get_my_posts_analytics(
 pub async fn get_my_posts_likes_by_month(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(query): Valid<Query<MyPostsLikesByMonthQuery>>,
-) -> Result<Json<ApiResponse<Vec<crate::models::post_view::MyPostsLikesByMonthResponse>>>, AppError>
-{
+    VQuery(query): VQuery<MyPostsLikesByMonthQuery>,
+) -> Result<Json<ApiResponse<crate::models::post_view::MyPostsLikesByMonthResponse>>, AppError> {
     let data = services::post_view::get_my_posts_likes_by_month(
         &pool,
         auth_user.id,
@@ -515,7 +580,7 @@ pub async fn get_my_posts_likes_by_month(
 pub async fn get_post(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
+    VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<Post>>, AppError> {
     let client = pool;
     match services::post::get_post_by_id(&client, params.id).await {
@@ -531,8 +596,8 @@ pub async fn get_post(
 pub async fn update_post(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
-    Valid(Json(req)): Valid<Json<UpdatePostRequest>>,
+    VPath(params): VPath<PostIdPath>,
+    VJson(req): VJson<UpdatePostRequest>,
 ) -> Result<Json<ApiResponse<Post>>, AppError> {
     match services::post::update_post(
         &pool,
@@ -559,7 +624,7 @@ pub async fn update_post(
 pub async fn delete_post(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
+    VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     match services::post::soft_delete_post(&pool, params.id).await? {
         true => Ok(Json(ApiResponse::success_with_message(
@@ -572,7 +637,7 @@ pub async fn delete_post(
 
 pub async fn get_post_by_username_and_slug(
     State(pool): State<DbPool>,
-    Valid(Path(params)): Valid<Path<PostPath>>,
+    VPath(params): VPath<PostPath>,
 ) -> Result<Json<ApiResponse<Post>>, AppError> {
     let client = pool;
     match services::post::get_post_by_username_and_slug(&client, &params.username, &params.slug)

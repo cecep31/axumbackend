@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 /// A single corporate action event (dividend or RUPS) returned by the calendar
-/// endpoint. Mirrors echobackend's `dto.CorporateActionResponse`.
+/// endpoint. Mirrors echobackend's `dto.CorporateActionResponse` (`name`,
+/// `currency` and `note` are `omitempty` strings there).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorporateActionResponse {
     pub symbol: String,
-    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// `"dividend"` | `"rups"`
     #[serde(rename = "type")]
     pub action_type: String,

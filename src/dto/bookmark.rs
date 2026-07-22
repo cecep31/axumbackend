@@ -52,9 +52,15 @@ pub struct UpdateBookmarkFolderRequest {
 
 #[derive(Deserialize, Validate)]
 pub struct BookmarkQuery {
-    #[validate(range(min = 1, max = 100))]
-    pub limit: Option<i64>,
-    #[validate(range(min = 0, max = 10_000))]
-    pub offset: Option<i64>,
+    pub limit: Option<String>,
+    pub offset: Option<String>,
     pub folder_id: Option<String>,
+}
+
+impl BookmarkQuery {
+    /// Returns `(limit, offset)`, mirroring echobackend's
+    /// `ParsePaginationParams(c, 50)`.
+    pub fn resolve(&self) -> (i64, i64) {
+        crate::dto::validation::parse_pagination(self.offset.as_deref(), self.limit.as_deref(), 50)
+    }
 }

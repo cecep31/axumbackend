@@ -3,16 +3,16 @@ use crate::database::DbPool;
 use crate::dto::comment::{CommentPath, CommentRequest};
 use crate::dto::common::PostIdPath;
 use crate::error::AppError;
+use crate::extract::{VJson, VPath};
 use crate::models::comment::CommentResponse;
 use crate::response::ApiResponse;
 use crate::services::{self, comment::CommentError};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::State,
     http::StatusCode,
     routing::{get, put},
 };
-use axum_valid::Valid;
 
 fn map_comment_error(err: CommentError) -> AppError {
     match err {
@@ -26,8 +26,8 @@ fn map_comment_error(err: CommentError) -> AppError {
 pub async fn create_comment(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
-    Valid(Json(req)): Valid<Json<CommentRequest>>,
+    VPath(params): VPath<PostIdPath>,
+    VJson(req): VJson<CommentRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<CommentResponse>>), AppError> {
     let comment = services::comment::create_comment(&pool, params.id, req.text, auth_user.id)
         .await
@@ -44,7 +44,7 @@ pub async fn create_comment(
 
 pub async fn get_comments_by_post_id(
     State(pool): State<DbPool>,
-    Valid(Path(params)): Valid<Path<PostIdPath>>,
+    VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<Vec<CommentResponse>>>, AppError> {
     let comments = services::comment::get_comments_by_post_id(&pool, params.id)
         .await
@@ -59,8 +59,8 @@ pub async fn get_comments_by_post_id(
 pub async fn update_comment(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<CommentPath>>,
-    Valid(Json(req)): Valid<Json<CommentRequest>>,
+    VPath(params): VPath<CommentPath>,
+    VJson(req): VJson<CommentRequest>,
 ) -> Result<Json<ApiResponse<CommentResponse>>, AppError> {
     let comment = services::comment::update_comment(
         &pool,
@@ -81,7 +81,7 @@ pub async fn update_comment(
 pub async fn delete_comment(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<CommentPath>>,
+    VPath(params): VPath<CommentPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     services::comment::delete_comment(&pool, params.id, params.comment_id, auth_user.id)
         .await

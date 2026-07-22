@@ -1,10 +1,12 @@
 use crate::entities::{posts, posts_to_tags, tags, users};
 use crate::models::post::{Post, SitemapPost};
 use chrono::Utc;
+use sea_orm::sea_query::Expr;
+use sea_orm::sea_query::extension::postgres::PgExpr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult,
-    IntoActiveModel, ModelTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
-    QueryTrait, Set,
+    IntoActiveModel, JoinType, ModelTrait, Order, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, QueryTrait, RelationTrait, Set,
 };
 use std::collections::HashSet;
 
@@ -103,30 +105,80 @@ async fn hydrate_posts(
     Ok(hydrated)
 }
 
+/// Full filter for `GET /api/posts`, mirroring echobackend's `PostQueryFilter`
+/// (`internal/dto/post.go` + `repository.GetPostsFiltered`).
+pub struct PostsFilter<'a> {
+    pub offset: i64,
+    pub limit: i64,
+    pub search: Option<&'a str>,
+    pub sort_by: Option<&'a str>,
+    pub sort_order: Option<SortDirection>,
+    pub start_date: Option<chrono::NaiveDate>,
+    pub end_date: Option<chrono::NaiveDate>,
+    pub created_by: Option<uuid::Uuid>,
+    pub published: Option<bool>,
+    pub tags: Vec<String>,
+}
+
 pub async fn get_all_posts(
     db: &DatabaseConnection,
-    offset: i64,
-    limit: i64,
-    search: Option<&str>,
-    order_by: Option<&str>,
-    order_direction: Option<SortDirection>,
+    filter: PostsFilter<'_>,
 ) -> Result<(Vec<Post>, i64), DbErr> {
+    // echobackend's `activePostUserJoin`: posts by soft-deleted users are hidden.
     let mut query = posts::Entity::find()
-        .filter(posts::Column::Published.eq(true))
-        .filter(posts::Column::DeletedAt.is_null());
+        .join(JoinType::InnerJoin, posts::Relation::Users.def())
+        .filter(posts::Column::DeletedAt.is_null())
+        .filter(users::Column::DeletedAt.is_null());
 
-    if let Some(search) = search.filter(|s| !s.trim().is_empty()) {
-        query = query.filter(posts::Column::Title.contains(search));
+    if let Some(search) = filter.search.map(str::trim).filter(|s| !s.is_empty()) {
+        // echobackend: `posts.title ILIKE '%search%' AND posts.published = true`.
+        query = query
+            .filter(Expr::col(posts::Column::Title).ilike(format!("%{search}%")))
+            .filter(posts::Column::Published.eq(true));
+    } else {
+        query = query.filter(posts::Column::Published.eq(true));
+        if let Some(published) = filter.published {
+            // echobackend applies `published` on top of the default
+            // `published = true` filter, so `published=false` yields an empty
+            // page; preserved here for parity.
+            query = query.filter(posts::Column::Published.eq(published));
+        }
+    }
+
+    if let Some(start_date) = filter.start_date {
+        let start = start_date
+            .and_hms_opt(0, 0, 0)
+            .expect("valid start of day")
+            .and_utc();
+        query = query.filter(posts::Column::CreatedAt.gte(start));
+    }
+    if let Some(end_date) = filter.end_date {
+        // echobackend compares `created_at <= 'end_date'` directly, i.e.
+        // midnight at the start of `end_date`.
+        let end = end_date
+            .and_hms_opt(0, 0, 0)
+            .expect("valid start of day")
+            .and_utc();
+        query = query.filter(posts::Column::CreatedAt.lte(end));
+    }
+    if let Some(created_by) = filter.created_by {
+        query = query.filter(posts::Column::CreatedBy.eq(created_by));
+    }
+    if !filter.tags.is_empty() {
+        query = query
+            .join(JoinType::InnerJoin, posts::Relation::PostsToTags.def())
+            .join(JoinType::InnerJoin, posts_to_tags::Relation::Tags.def())
+            .filter(tags::Column::Name.is_in(filter.tags.iter().cloned()));
     }
 
     let total = query.clone().count(db).await? as i64;
     let post_models = query
         .order_by(
-            validate_order_field(order_by),
-            get_order_dir(order_direction),
+            validate_order_field(filter.sort_by),
+            get_order_dir(filter.sort_order),
         )
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
+        .limit(filter.limit.max(0) as u64)
+        .offset(filter.offset.max(0) as u64)
         .all(db)
         .await?;
 

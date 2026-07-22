@@ -1,6 +1,6 @@
 use crate::entities::{post_comments, posts};
 use crate::models::comment::CommentResponse;
-use crate::models::user::UserResponse;
+use crate::models::user::User;
 use crate::services::user_hydration;
 use chrono::Utc;
 use sea_orm::{
@@ -33,22 +33,17 @@ async fn post_exists(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbE
 
 fn hydrate_comment(
     comment: post_comments::Model,
-    users_by_id: &std::collections::HashMap<Uuid, UserResponse>,
+    users_by_id: &std::collections::HashMap<Uuid, User>,
 ) -> CommentResponse {
-    let user_response = users_by_id.get(&comment.created_by).cloned();
-    CommentResponse::from_entity(comment, user_response)
+    let user = users_by_id.get(&comment.created_by).cloned();
+    CommentResponse::from_entity(comment, user)
 }
 
 async fn load_comment_user_map(
     db: &DatabaseConnection,
     comments: &[post_comments::Model],
-) -> Result<std::collections::HashMap<Uuid, UserResponse>, DbErr> {
-    user_hydration::load_user_response_map(
-        db,
-        comments.iter().map(|comment| comment.created_by),
-        crate::models::user::UserView::General,
-    )
-    .await
+) -> Result<std::collections::HashMap<Uuid, User>, DbErr> {
+    user_hydration::load_user_brief_map(db, comments.iter().map(|comment| comment.created_by)).await
 }
 
 pub async fn create_comment(

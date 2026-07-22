@@ -1,4 +1,4 @@
-use crate::entities::{posts, tags};
+use crate::entities::tags;
 use crate::models::tag::{SitemapTag, Tag, TrendingTag};
 use chrono::Utc;
 use sea_orm::{
@@ -15,21 +15,36 @@ pub async fn get_tags_for_sitemap(
     db: &DatabaseConnection,
     limit: i64,
 ) -> Result<Vec<SitemapTag>, DbErr> {
-    let tag_models = tags::Entity::find()
-        .find_with_related(posts::Entity)
-        .all(db)
-        .await?
-        .into_iter()
-        .filter(|(_, posts)| {
-            posts
-                .iter()
-                .any(|post| post.published.unwrap_or(false) && post.deleted_at.is_none())
-        })
-        .map(|(tag, _)| tag)
-        .take(limit.max(0) as usize)
-        .collect::<Vec<_>>();
+    #[derive(FromQueryResult)]
+    struct Row {
+        name: String,
+        created_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    }
 
-    Ok(tag_models.into_iter().map(Into::into).collect())
+    let rows: Vec<Row> = Row::find_by_statement(sea_orm::Statement::from_sql_and_values(
+        sea_orm::DbBackend::Postgres,
+        r#"
+        SELECT t.name, t.created_at
+        FROM tags t
+        INNER JOIN posts_to_tags ptt ON ptt.tag_id = t.id
+        INNER JOIN posts p ON p.id = ptt.post_id
+        WHERE p.published = true
+        GROUP BY t.id, t.name, t.created_at
+        ORDER BY t.name ASC
+        LIMIT $1
+        "#,
+        vec![limit.max(0).into()],
+    ))
+    .all(db)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| SitemapTag {
+            name: row.name,
+            created_at: row.created_at.map(|dt| dt.with_timezone(&Utc)),
+        })
+        .collect())
 }
 
 pub async fn get_all_tags(db: &DatabaseConnection) -> Result<Vec<Tag>, DbErr> {
@@ -94,13 +109,15 @@ pub async fn get_trending_tags(
                t.name,
                COALESCE(SUM(p.view_count), 0)::bigint AS total_views,
                COALESCE(SUM(p.like_count), 0)::bigint AS total_likes,
-               (COALESCE(SUM(p.like_count), 0) * 2 + COALESCE(SUM(p.view_count), 0))::bigint AS trending_score
+               COALESCE(SUM(p.like_count * 2 + p.bookmark_count * 2 + p.view_count), 0)::bigint AS trending_score,
+               COUNT(ptt.post_id)::bigint AS post_count
         FROM tags t
         INNER JOIN posts_to_tags ptt ON ptt.tag_id = t.id
         INNER JOIN posts p ON p.id = ptt.post_id
+        INNER JOIN users u ON u.id = p.created_by AND u.deleted_at IS NULL
         WHERE p.published = true AND p.deleted_at IS NULL
         GROUP BY t.id, t.name
-        ORDER BY trending_score DESC, total_likes DESC, total_views DESC, t.name ASC
+        ORDER BY trending_score DESC, post_count DESC, t.name ASC
         LIMIT $1
         "#,
         vec![limit.max(0).into()],

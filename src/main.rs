@@ -29,6 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config::FrontendConfig::init(config.frontend.clone());
     config::GitHubConfig::init(config.github.clone());
     config::MarketConfig::init(config.market.clone());
+    config::OpenRouterConfig::init(config.openrouter.clone());
 
     // Create connection pool with configuration from environment
     let pool = database::create_pool(&config.database_url, &config.db_pool)

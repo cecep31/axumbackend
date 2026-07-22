@@ -1,4 +1,4 @@
-use super::user::UserResponse;
+use super::user::User;
 use chrono::{DateTime, FixedOffset, Utc};
 use serde::Serialize;
 use uuid::Uuid;
@@ -9,7 +9,7 @@ pub struct PostLikeResponse {
     pub post_id: Uuid,
     pub user_id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub user: Option<UserResponse>,
+    pub user: Option<User>,
     pub created_at: Option<DateTime<Utc>>,
 }
 
@@ -39,10 +39,7 @@ fn to_utc(value: Option<DateTime<FixedOffset>>) -> Option<DateTime<Utc>> {
 }
 
 impl PostLikeResponse {
-    pub fn from_entity(
-        like: crate::entities::post_likes::Model,
-        user: Option<crate::models::user::UserResponse>,
-    ) -> Self {
+    pub fn from_entity(like: crate::entities::post_likes::Model, user: Option<User>) -> Self {
         Self {
             id: like.id,
             post_id: like.post_id,

@@ -41,7 +41,10 @@ fn cache_get(from: &str, to: &str) -> Option<ExchangeRateResponse> {
 
 fn cache_set(from: &str, to: &str, response: ExchangeRateResponse) {
     let mut cache = CACHE.lock().unwrap();
-    cache.insert((from.to_string(), to.to_string()), (Instant::now(), response));
+    cache.insert(
+        (from.to_string(), to.to_string()),
+        (Instant::now(), response),
+    );
 }
 
 pub async fn get_rate(from: String, to: String) -> Result<ExchangeRateResponse, ExchangeRateError> {

@@ -5,15 +5,15 @@ use crate::dto::bookmark::{
     ToggleBookmarkRequest, UpdateBookmarkFolderRequest, UpdateBookmarkRequest,
 };
 use crate::error::AppError;
+use crate::extract::{VJson, VPath, VQuery};
 use crate::models::bookmark::{BookmarkFolderResponse, BookmarkResponse, ToggleBookmarkResponse};
 use crate::response::ApiResponse;
 use crate::services::{self, bookmark::BookmarkError};
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::State,
     routing::{get, patch, post},
 };
-use axum_valid::Valid;
 use uuid::Uuid;
 
 fn map_bookmark_error(err: BookmarkError) -> AppError {
@@ -40,8 +40,8 @@ fn parse_folder_filter(raw: Option<String>) -> Result<Option<Option<Uuid>>, AppE
 pub async fn toggle_bookmark(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<BookmarkPath>>,
-    Valid(Json(req)): Valid<Json<ToggleBookmarkRequest>>,
+    VPath(params): VPath<BookmarkPath>,
+    VJson(req): VJson<ToggleBookmarkRequest>,
 ) -> Result<Json<ApiResponse<ToggleBookmarkResponse>>, AppError> {
     let result = services::bookmark::toggle_bookmark(
         &pool,
@@ -63,10 +63,9 @@ pub async fn toggle_bookmark(
 pub async fn get_bookmarks(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(query): Valid<Query<BookmarkQuery>>,
+    VQuery(query): VQuery<BookmarkQuery>,
 ) -> Result<Json<ApiResponse<Vec<BookmarkResponse>>>, AppError> {
-    let limit = query.limit.unwrap_or(50);
-    let offset = query.offset.unwrap_or(0);
+    let (limit, offset) = query.resolve();
     let folder_filter = parse_folder_filter(query.folder_id.clone())?;
     let (bookmarks, total) = services::bookmark::get_bookmarks_by_user(
         &pool,
@@ -90,8 +89,8 @@ pub async fn get_bookmarks(
 pub async fn update_bookmark(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<BookmarkPath>>,
-    Valid(Json(req)): Valid<Json<UpdateBookmarkRequest>>,
+    VPath(params): VPath<BookmarkPath>,
+    VJson(req): VJson<UpdateBookmarkRequest>,
 ) -> Result<Json<ApiResponse<BookmarkResponse>>, AppError> {
     let bookmark =
         services::bookmark::update_bookmark(&pool, params.id, auth_user.id, req.name, req.notes)
@@ -107,8 +106,8 @@ pub async fn update_bookmark(
 pub async fn move_bookmark(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<BookmarkPath>>,
-    Valid(Json(req)): Valid<Json<MoveBookmarkRequest>>,
+    VPath(params): VPath<BookmarkPath>,
+    VJson(req): VJson<MoveBookmarkRequest>,
 ) -> Result<Json<ApiResponse<BookmarkResponse>>, AppError> {
     let bookmark = services::bookmark::move_bookmark(&pool, params.id, auth_user.id, req.folder_id)
         .await
@@ -123,7 +122,7 @@ pub async fn move_bookmark(
 pub async fn create_folder(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Json(req)): Valid<Json<CreateBookmarkFolderRequest>>,
+    VJson(req): VJson<CreateBookmarkFolderRequest>,
 ) -> Result<
     (
         axum::http::StatusCode,
@@ -159,8 +158,8 @@ pub async fn get_folders(
 pub async fn update_folder(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<FolderIdPath>>,
-    Valid(Json(req)): Valid<Json<UpdateBookmarkFolderRequest>>,
+    VPath(params): VPath<FolderIdPath>,
+    VJson(req): VJson<UpdateBookmarkFolderRequest>,
 ) -> Result<Json<ApiResponse<BookmarkFolderResponse>>, AppError> {
     let folder = services::bookmark::update_folder(
         &pool,
@@ -180,7 +179,7 @@ pub async fn update_folder(
 pub async fn delete_folder(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<FolderIdPath>>,
+    VPath(params): VPath<FolderIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     services::bookmark::delete_folder(&pool, params.folder_id, auth_user.id)
         .await

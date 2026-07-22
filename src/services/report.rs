@@ -164,8 +164,8 @@ async fn user_growth_trend(
     // echobackend computes `start`/`end` independently: `start` defaults to
     // `now - 30 days` regardless of whether `end_date` was supplied.
     let end = parse_date(range.end_date).unwrap_or_else(|| Utc::now().date_naive());
-    let start =
-        parse_date(range.start_date).unwrap_or_else(|| Utc::now().date_naive() - Duration::days(30));
+    let start = parse_date(range.start_date)
+        .unwrap_or_else(|| Utc::now().date_naive() - Duration::days(30));
     let rows = DayCount::find_by_statement(Statement::from_string(
         DbBackend::Postgres,
         format!(

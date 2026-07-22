@@ -171,6 +171,7 @@ static EMAIL_CONFIG: OnceLock<EmailConfig> = OnceLock::new();
 static FRONTEND_CONFIG: OnceLock<FrontendConfig> = OnceLock::new();
 static GITHUB_CONFIG: OnceLock<GitHubConfig> = OnceLock::new();
 static MARKET_CONFIG: OnceLock<MarketConfig> = OnceLock::new();
+static OPENROUTER_CONFIG: OnceLock<OpenRouterConfig> = OnceLock::new();
 
 impl JwtConfig {
     fn from_env() -> Self {
@@ -413,6 +414,18 @@ impl OpenRouterConfig {
                 DEFAULT_OPENROUTER_TIMEOUT_SECS,
             )),
         }
+    }
+
+    pub fn init(cfg: OpenRouterConfig) {
+        OPENROUTER_CONFIG
+            .set(cfg)
+            .expect("OpenRouterConfig already initialized");
+    }
+
+    pub fn get() -> &'static OpenRouterConfig {
+        OPENROUTER_CONFIG
+            .get()
+            .expect("OpenRouterConfig not initialized")
     }
 }
 

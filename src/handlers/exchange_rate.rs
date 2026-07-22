@@ -25,7 +25,10 @@ fn map_exchange_rate_error(err: ExchangeRateError) -> AppError {
             AppError::BadRequest("Invalid currency pair".to_string())
         }
         ExchangeRateError::NotFound(from, to) => {
-            AppError::NotFound(format!("Exchange rate not found for {from}/{to}"))
+            // Mirrors echobackend: a missing pair is a plain service error, not
+            // `ErrInvalidCurrencyPair`, so it falls through to a generic 500
+            // rather than a 404.
+            AppError::InternalServerError(format!("Exchange rate not found for {from}/{to}"))
         }
         ExchangeRateError::Request(err) => {
             AppError::InternalServerError(format!("Failed to request exchange rate: {err}"))

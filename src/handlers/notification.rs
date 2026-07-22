@@ -2,25 +2,26 @@ use crate::auth::AuthUser;
 use crate::database::DbPool;
 use crate::dto::notification::{NotificationPath, NotificationQuery};
 use crate::error::AppError;
+use crate::extract::{VPath, VQuery};
 use crate::models::notification::{MarkAllReadResponse, NotificationResponse, UnreadCountResponse};
 use crate::response::ApiResponse;
 use crate::services;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::State,
     routing::{get, patch},
 };
-use axum_valid::Valid;
 
 pub async fn get_notifications(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(query): Valid<Query<NotificationQuery>>,
+    VQuery(query): VQuery<NotificationQuery>,
 ) -> Result<Json<ApiResponse<Vec<NotificationResponse>>>, AppError> {
-    let limit = query.limit.unwrap_or(20);
-    let offset = query.offset.unwrap_or(0);
+    let (limit, offset) = query.resolve();
+    // echobackend: `unread` filters only when it is exactly `"true"`.
+    let unread = query.unread.as_deref() == Some("true");
     let (notifications, total) =
-        services::notification::get_notifications(&pool, auth_user.id, query.unread, limit, offset)
+        services::notification::get_notifications(&pool, auth_user.id, unread, limit, offset)
             .await?;
 
     Ok(Json(ApiResponse::with_meta_message(
@@ -46,7 +47,7 @@ pub async fn get_unread_count(
 pub async fn mark_as_read(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<NotificationPath>>,
+    VPath(params): VPath<NotificationPath>,
 ) -> Result<Json<ApiResponse<NotificationResponse>>, AppError> {
     match services::notification::mark_as_read(&pool, params.id, auth_user.id).await? {
         Some(notification) => Ok(Json(ApiResponse::success_with_message(

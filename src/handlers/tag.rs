@@ -2,15 +2,11 @@ use crate::auth::{AdminUser, AuthUser};
 use crate::database::DbPool;
 use crate::dto::tag::{CreateTagRequest, TagIdPath, UpdateTagRequest};
 use crate::error::AppError;
+use crate::extract::{VJson, VPath};
 use crate::models::tag::{SitemapTag, Tag, TrendingTag};
 use crate::response::ApiResponse;
 use crate::services;
-use axum::{
-    Json, Router,
-    extract::{Path, State},
-    routing::get,
-};
-use axum_valid::Valid;
+use axum::{Json, Router, extract::State, routing::get};
 
 const TRENDING_TAGS_LIMIT: i64 = 5;
 
@@ -46,7 +42,7 @@ pub async fn get_trending_tags(
 pub async fn create_tag(
     State(pool): State<DbPool>,
     _auth_user: AuthUser,
-    Valid(Json(req)): Valid<Json<CreateTagRequest>>,
+    VJson(req): VJson<CreateTagRequest>,
 ) -> Result<(axum::http::StatusCode, Json<ApiResponse<Tag>>), AppError> {
     let tag = services::tag::create_tag(&pool, req.name).await?;
     Ok((
@@ -60,7 +56,7 @@ pub async fn create_tag(
 
 pub async fn get_tag_by_id(
     State(pool): State<DbPool>,
-    Valid(Path(params)): Valid<Path<TagIdPath>>,
+    VPath(params): VPath<TagIdPath>,
 ) -> Result<Json<ApiResponse<Tag>>, AppError> {
     let client = pool;
     match services::tag::get_tag_by_id(&client, params.id).await {
@@ -76,8 +72,8 @@ pub async fn get_tag_by_id(
 pub async fn update_tag(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    Valid(Path(params)): Valid<Path<TagIdPath>>,
-    Valid(Json(req)): Valid<Json<UpdateTagRequest>>,
+    VPath(params): VPath<TagIdPath>,
+    VJson(req): VJson<UpdateTagRequest>,
 ) -> Result<Json<ApiResponse<Tag>>, AppError> {
     match services::tag::update_tag(&pool, params.id, req.name).await? {
         Some(tag) => Ok(Json(ApiResponse::success_with_message(
@@ -91,7 +87,7 @@ pub async fn update_tag(
 pub async fn delete_tag(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    Valid(Path(params)): Valid<Path<TagIdPath>>,
+    VPath(params): VPath<TagIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     match services::tag::delete_tag(&pool, params.id).await? {
         true => Ok(Json(ApiResponse::success_with_message(

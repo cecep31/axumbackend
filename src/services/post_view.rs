@@ -1,16 +1,15 @@
 use crate::entities::{post_views, posts};
 use crate::models::post_view::{
-    MyPostsAnalyticsResponse, MyPostsLikesByMonthResponse, PostViewResponse, PostViewStats,
+    MyPostPerformance, MyPostsAnalyticsResponse, MyPostsAnalyticsSummary, MyPostsLikesByMonthPoint,
+    MyPostsLikesByMonthResponse, MyPostsViewTrendPoint, PostViewResponse, PostViewStats,
     ViewStatusResponse,
 };
-use crate::models::user::UserResponse;
-use crate::services::user_hydration;
-use chrono::Utc;
+use chrono::{Datelike, NaiveDate, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait,
+    FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, Statement,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -45,28 +44,6 @@ async fn has_user_viewed(
         .one(db)
         .await?
         .is_some())
-}
-
-fn hydrate_view(
-    view: post_views::Model,
-    users_by_id: &std::collections::HashMap<Uuid, UserResponse>,
-) -> PostViewResponse {
-    let user_response = view
-        .user_id
-        .and_then(|user_id| users_by_id.get(&user_id).cloned());
-    PostViewResponse::from_entity(view, user_response)
-}
-
-async fn load_view_user_map(
-    db: &DatabaseConnection,
-    views: &[post_views::Model],
-) -> Result<std::collections::HashMap<Uuid, UserResponse>, DbErr> {
-    user_hydration::load_user_response_map(
-        db,
-        views.iter().filter_map(|view| view.user_id),
-        crate::models::user::UserView::General,
-    )
-    .await
 }
 
 pub async fn record_view(
@@ -118,17 +95,14 @@ pub async fn get_views_by_post_id(
         .filter(post_views::Column::DeletedAt.is_null());
 
     let total = query.clone().count(db).await? as i64;
-    let view_models = query
+    let views = query
         .order_by_desc(post_views::Column::CreatedAt)
         .limit(limit.max(0) as u64)
         .offset(offset.max(0) as u64)
         .all(db)
-        .await?;
-
-    let users_by_id = load_view_user_map(db, &view_models).await?;
-    let views = view_models
+        .await?
         .into_iter()
-        .map(|view| hydrate_view(view, &users_by_id))
+        .map(PostViewResponse::from_entity)
         .collect();
 
     Ok((views, total))
@@ -180,84 +154,227 @@ pub async fn has_user_viewed_post(
     })
 }
 
+/// Mirrors echobackend's `postViewService.GetMyPostsAnalytics`:
+/// `{summary, view_trend, top_posts}` over a date window (default: the last
+/// 30 days, swapped when reversed).
 pub async fn get_my_posts_analytics(
     db: &DatabaseConnection,
     user_id: Uuid,
-    start_date: Option<chrono::NaiveDate>,
-    end_date: Option<chrono::NaiveDate>,
+    start_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
 ) -> Result<MyPostsAnalyticsResponse, DbErr> {
-    let mut query = posts::Entity::find()
-        .filter(posts::Column::CreatedBy.eq(user_id))
-        .filter(posts::Column::DeletedAt.is_null());
-
-    if let Some(start_date) = start_date {
-        let start = start_date
-            .and_hms_opt(0, 0, 0)
-            .expect("valid start of day")
-            .and_utc();
-        query = query.filter(posts::Column::CreatedAt.gte(start));
-    }
-    if let Some(end_date) = end_date {
-        let end = end_date
-            .and_hms_opt(23, 59, 59)
-            .expect("valid end of day")
-            .and_utc();
-        query = query.filter(posts::Column::CreatedAt.lte(end));
+    let today = Utc::now().date_naive();
+    let mut start = start_date.unwrap_or_else(|| today - chrono::Duration::days(30));
+    let mut end = end_date.unwrap_or(today);
+    if start > end {
+        std::mem::swap(&mut start, &mut end);
     }
 
-    let post_models = query.all(db).await?;
-    Ok(MyPostsAnalyticsResponse {
-        total_posts: post_models.len() as i64,
-        total_views: post_models
-            .iter()
-            .map(|post| post.view_count.unwrap_or(0))
-            .sum(),
-        total_likes: post_models
-            .iter()
-            .map(|post| post.like_count.unwrap_or(0))
-            .sum(),
-        total_bookmarks: post_models
-            .iter()
-            .map(|post| post.bookmark_count.unwrap_or(0))
-            .sum(),
-    })
-}
-
-pub async fn get_my_posts_likes_by_month(
-    db: &DatabaseConnection,
-    user_id: Uuid,
-    months: i64,
-) -> Result<Vec<MyPostsLikesByMonthResponse>, DbErr> {
     #[derive(FromQueryResult)]
-    struct Row {
-        month: String,
+    struct SummaryRow {
+        total_posts: i64,
+        published_posts: i64,
+        total_views: i64,
         total_likes: i64,
     }
 
-    let rows: Vec<Row> = Row::find_by_statement(sea_orm::Statement::from_sql_and_values(
-        sea_orm::DbBackend::Postgres,
+    // Mirrors echobackend's unscoped `Table("posts")` query (soft-deleted
+    // posts included).
+    let summary_row = SummaryRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
-        SELECT to_char(date_trunc('month', pl.created_at), 'YYYY-MM') AS month,
-               COUNT(*)::bigint AS total_likes
-        FROM post_likes pl
-        INNER JOIN posts p ON p.id = pl.post_id
-        WHERE p.created_by = $1
-          AND p.deleted_at IS NULL
-          AND pl.deleted_at IS NULL
-          AND pl.created_at >= date_trunc('month', now()) - (($2::int - 1) * interval '1 month')
-        GROUP BY 1
-        ORDER BY 1
+        SELECT COUNT(*)::bigint AS total_posts,
+               COUNT(*) FILTER (WHERE published = true)::bigint AS published_posts,
+               COALESCE(SUM(view_count), 0)::bigint AS total_views,
+               COALESCE(SUM(like_count), 0)::bigint AS total_likes
+        FROM posts
+        WHERE created_by = $1
         "#,
-        vec![user_id.into(), months.into()],
+        vec![user_id.into()],
+    ))
+    .one(db)
+    .await?
+    .unwrap_or(SummaryRow {
+        total_posts: 0,
+        published_posts: 0,
+        total_views: 0,
+        total_likes: 0,
+    });
+
+    #[derive(FromQueryResult)]
+    struct TopPostRow {
+        id: Uuid,
+        title: String,
+        slug: String,
+        view_count: Option<i64>,
+        like_count: Option<i64>,
+    }
+
+    let top_rows = TopPostRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"
+        SELECT id, title, slug, view_count, like_count
+        FROM posts
+        WHERE created_by = $1
+        ORDER BY view_count DESC, like_count DESC, created_at DESC
+        LIMIT 5
+        "#,
+        vec![user_id.into()],
     ))
     .all(db)
     .await?;
 
-    Ok(rows
+    #[derive(FromQueryResult)]
+    struct TrendRow {
+        date: String,
+        count: i64,
+    }
+
+    let trend_rows = TrendRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"
+        SELECT to_char(DATE(pv.created_at), 'YYYY-MM-DD') AS date,
+               COUNT(*)::bigint AS count
+        FROM post_views pv
+        INNER JOIN posts p ON p.id = pv.post_id AND p.deleted_at IS NULL
+        WHERE p.created_by = $1
+          AND pv.deleted_at IS NULL
+          AND DATE(pv.created_at) >= $2
+          AND DATE(pv.created_at) <= $3
+        GROUP BY DATE(pv.created_at)
+        ORDER BY DATE(pv.created_at) ASC
+        "#,
+        vec![user_id.into(), start.into(), end.into()],
+    ))
+    .all(db)
+    .await?;
+
+    #[derive(FromQueryResult)]
+    struct CountRow {
+        count: i64,
+    }
+
+    let before_row = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"
+        SELECT COUNT(*)::bigint AS count
+        FROM post_views pv
+        INNER JOIN posts p ON p.id = pv.post_id AND p.deleted_at IS NULL
+        WHERE p.created_by = $1
+          AND pv.deleted_at IS NULL
+          AND DATE(pv.created_at) < $2
+        "#,
+        vec![user_id.into(), start.into()],
+    ))
+    .one(db)
+    .await?;
+
+    let views_by_date: HashMap<String, i64> = trend_rows
         .into_iter()
-        .map(|row| MyPostsLikesByMonthResponse {
-            month: row.month,
-            total_likes: row.total_likes,
-        })
-        .collect())
+        .map(|row| (row.date, row.count))
+        .collect();
+
+    let mut cumulative = before_row.map(|row| row.count).unwrap_or(0);
+    let mut view_trend = Vec::new();
+    let mut day = start;
+    while day <= end {
+        let date = day.format("%Y-%m-%d").to_string();
+        let views = views_by_date.get(&date).copied().unwrap_or(0);
+        cumulative += views;
+        view_trend.push(MyPostsViewTrendPoint {
+            date,
+            views,
+            cumulative_views: cumulative,
+        });
+        day += chrono::Duration::days(1);
+    }
+
+    Ok(MyPostsAnalyticsResponse {
+        summary: MyPostsAnalyticsSummary {
+            total_posts: summary_row.total_posts,
+            published_posts: summary_row.published_posts,
+            total_views: summary_row.total_views,
+            total_likes: summary_row.total_likes,
+        },
+        view_trend,
+        top_posts: top_rows
+            .into_iter()
+            .map(|row| MyPostPerformance {
+                id: row.id,
+                title: row.title,
+                slug: row.slug,
+                view_count: row.view_count.unwrap_or(0),
+                like_count: row.like_count.unwrap_or(0),
+            })
+            .collect(),
+    })
+}
+
+/// Mirrors echobackend's `postViewService.GetMyPostsLikesByMonth`: a
+/// zero-filled monthly series with the running `months` window and `total`.
+pub async fn get_my_posts_likes_by_month(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    months: i64,
+) -> Result<MyPostsLikesByMonthResponse, DbErr> {
+    // echobackend clamps leniently: anything outside 1..=24 falls back to 12.
+    let months = if (1..=24).contains(&months) {
+        months
+    } else {
+        12
+    };
+
+    let now = Utc::now().date_naive();
+    let end_month = now.with_day(1).expect("day 1 is always valid");
+    let start_month = shift_months(end_month, -(months as i32 - 1));
+    let end_exclusive = shift_months(end_month, 1);
+
+    #[derive(FromQueryResult)]
+    struct Row {
+        month: String,
+        count: i64,
+    }
+
+    let rows: Vec<Row> = Row::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"
+        SELECT to_char(date_trunc('month', pl.created_at), 'YYYY-MM') AS month,
+               COUNT(*)::bigint AS count
+        FROM post_likes pl
+        INNER JOIN posts p ON p.id = pl.post_id AND p.deleted_at IS NULL
+        WHERE p.created_by = $1
+          AND pl.created_at >= $2
+          AND pl.created_at < $3
+        GROUP BY date_trunc('month', pl.created_at)
+        ORDER BY date_trunc('month', pl.created_at) ASC
+        "#,
+        vec![user_id.into(), start_month.into(), end_exclusive.into()],
+    ))
+    .all(db)
+    .await?;
+
+    let likes_by_month: HashMap<String, i64> =
+        rows.into_iter().map(|row| (row.month, row.count)).collect();
+
+    let mut total = 0;
+    let mut series = Vec::with_capacity(months as usize);
+    for i in 0..months as i32 {
+        let month = shift_months(start_month, i).format("%Y-%m").to_string();
+        let likes = likes_by_month.get(&month).copied().unwrap_or(0);
+        total += likes;
+        series.push(MyPostsLikesByMonthPoint { month, likes });
+    }
+
+    Ok(MyPostsLikesByMonthResponse {
+        months,
+        series,
+        total,
+    })
+}
+
+/// Shifts a first-of-month date by `delta` calendar months.
+fn shift_months(first_of_month: NaiveDate, delta: i32) -> NaiveDate {
+    let total = first_of_month.year() * 12 + (first_of_month.month() as i32 - 1) + delta;
+    NaiveDate::from_ymd_opt(total.div_euclid(12), (total.rem_euclid(12) + 1) as u32, 1)
+        .expect("a valid month always exists")
 }

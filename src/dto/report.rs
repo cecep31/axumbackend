@@ -7,8 +7,10 @@ use validator::Validate;
 pub struct ReportQuery {
     pub start_date: Option<String>,
     pub end_date: Option<String>,
-    #[validate(range(min = 1, max = 100))]
-    pub limit: Option<i64>,
+    /// Kept as a raw string and parsed leniently (mirrors echobackend's
+    /// `strconv.Atoi`, which silently falls back to the default instead of
+    /// rejecting the request for a non-numeric/out-of-range `limit`).
+    pub limit: Option<String>,
     /// Kept as a raw string and parsed leniently (mirrors echobackend's
     /// `strconv.Atoi`, which silently ignores a malformed `tagId` instead of
     /// rejecting the request).
@@ -18,6 +20,23 @@ pub struct ReportQuery {
 impl ReportQuery {
     pub fn tag_id(&self) -> Option<i32> {
         self.tag_id.as_deref()?.parse().ok()
+    }
+
+    /// Mirrors echobackend's inline `limit` parsing in `GetUsers`/`GetPosts`:
+    /// non-numeric or `<= 0` falls back to `10`; clamped to a max of `100`.
+    pub fn limit(&self) -> i64 {
+        let mut limit = self
+            .limit
+            .as_deref()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        if limit <= 0 {
+            limit = 10;
+        }
+        if limit > 100 {
+            limit = 100;
+        }
+        limit
     }
 }
 

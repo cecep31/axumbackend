@@ -5,6 +5,7 @@ use crate::dto::holding::{
     HoldingQuery, MonthlyQuery, SummaryQuery, TrendsQuery, UpdateHoldingRequest,
 };
 use crate::error::AppError;
+use crate::extract::{VJson, VPath, VQuery};
 use crate::models::corporate_action::CorporateActionCalendarResponse;
 use crate::models::holding::{
     DuplicateResultItem, HoldingMonthComparisonResponse, HoldingMonthlyDataResponse,
@@ -15,11 +16,10 @@ use crate::response::ApiResponse;
 use crate::services::{self, holding::HoldingError};
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::State,
     routing::{get, post},
 };
-use axum_valid::Valid;
-use chrono::{Datelike, NaiveDate, Utc};
+use chrono::{Datelike, Utc};
 
 fn map_holding_error(err: HoldingError) -> AppError {
     match err {
@@ -48,14 +48,14 @@ fn parse_years(raw: Option<String>) -> Vec<i32> {
 pub async fn get_holdings(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(query): Valid<Query<HoldingQuery>>,
+    VQuery(query): VQuery<HoldingQuery>,
 ) -> Result<Json<ApiResponse<Vec<HoldingResponse>>>, AppError> {
     let (current_month, current_year) = services::holding::default_current_month_year();
     let holdings = services::holding::get_holdings(
         &pool,
         auth_user.id,
-        Some(query.month.unwrap_or(current_month)),
-        Some(query.year.unwrap_or(current_year)),
+        Some(query.month().unwrap_or(current_month)),
+        Some(query.year().unwrap_or(current_year)),
         query.sort_by.as_deref(),
         query.order.as_deref(),
     )
@@ -71,7 +71,7 @@ pub async fn get_holdings(
 pub async fn get_holding_by_id(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<HoldingPath>>,
+    VPath(params): VPath<HoldingPath>,
 ) -> Result<Json<ApiResponse<HoldingResponse>>, AppError> {
     let holding = services::holding::get_holding_by_id(&pool, params.id, auth_user.id)
         .await
@@ -85,8 +85,14 @@ pub async fn get_holding_by_id(
 pub async fn create_holding(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Json(req)): Valid<Json<CreateHoldingRequest>>,
-) -> Result<(axum::http::StatusCode, Json<ApiResponse<HoldingResponse>>), AppError> {
+    VJson(req): VJson<CreateHoldingRequest>,
+) -> Result<
+    (
+        axum::http::StatusCode,
+        Json<ApiResponse<Vec<HoldingResponse>>>,
+    ),
+    AppError,
+> {
     let holding = services::holding::create_holding(
         &pool,
         auth_user.id,
@@ -114,7 +120,7 @@ pub async fn create_holding(
         axum::http::StatusCode::CREATED,
         Json(ApiResponse::success_with_message(
             "Holding created successfully",
-            holding,
+            vec![holding],
         )),
     ))
 }
@@ -122,9 +128,12 @@ pub async fn create_holding(
 pub async fn update_holding(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<HoldingPath>>,
-    Valid(Json(req)): Valid<Json<UpdateHoldingRequest>>,
-) -> Result<Json<ApiResponse<HoldingResponse>>, AppError> {
+    VPath(params): VPath<HoldingPath>,
+    // Uses the plain (unvalidated) JSON extractor: echobackend's UpdateHolding
+    // handler binds the body but never calls `c.Validate(req)`, so any value
+    // (including out-of-range month/year or short currency codes) is accepted.
+    Json(req): Json<UpdateHoldingRequest>,
+) -> Result<Json<ApiResponse<Vec<HoldingResponse>>>, AppError> {
     let holding = services::holding::update_holding(
         &pool,
         params.id,
@@ -151,14 +160,14 @@ pub async fn update_holding(
 
     Ok(Json(ApiResponse::success_with_message(
         "Holding updated successfully",
-        holding,
+        vec![holding],
     )))
 }
 
 pub async fn delete_holding(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Path(params)): Valid<Path<HoldingPath>>,
+    VPath(params): VPath<HoldingPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     services::holding::delete_holding(&pool, params.id, auth_user.id)
         .await
@@ -185,9 +194,9 @@ pub async fn get_holding_types(
 pub async fn get_summary(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(query): Valid<Query<SummaryQuery>>,
+    VQuery(query): VQuery<SummaryQuery>,
 ) -> Result<Json<ApiResponse<HoldingSummaryResponse>>, AppError> {
-    let summary = services::holding::summary(&pool, auth_user.id, query.month, query.year)
+    let summary = services::holding::summary(&pool, auth_user.id, query.month(), query.year())
         .await
         .map_err(map_holding_error)?;
     Ok(Json(ApiResponse::success_with_message(
@@ -199,7 +208,7 @@ pub async fn get_summary(
 pub async fn get_trends(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(query): Valid<Query<TrendsQuery>>,
+    VQuery(query): VQuery<TrendsQuery>,
 ) -> Result<Json<ApiResponse<Vec<HoldingTrendResponse>>>, AppError> {
     let trends = services::holding::trends(&pool, auth_user.id, parse_years(query.years.clone()))
         .await
@@ -213,16 +222,16 @@ pub async fn get_trends(
 pub async fn compare_months(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(query): Valid<Query<CompareQuery>>,
+    VQuery(query): VQuery<CompareQuery>,
 ) -> Result<Json<ApiResponse<HoldingMonthComparisonResponse>>, AppError> {
     let (current_month, current_year) = services::holding::default_current_month_year();
-    let to_month = query.to_month.unwrap_or(current_month);
-    let to_year = query.to_year.unwrap_or(current_year);
+    let to_month = query.to_month().unwrap_or(current_month);
+    let to_year = query.to_year().unwrap_or(current_year);
 
     // Mirrors echobackend's CompareMonths query parsing: only derive From via
     // prevMonth(To) when *both* fromMonth and fromYear are omitted; if only
     // one is missing, it's filled from To's own value.
-    let (from_month, from_year) = match (query.from_month, query.from_year) {
+    let (from_month, from_year) = match (query.from_month(), query.from_year()) {
         (None, None) => services::holding::prev_month(to_month, to_year),
         (None, Some(from_year)) => (to_month, from_year),
         (Some(from_month), None) => (from_month, to_year),
@@ -248,16 +257,16 @@ pub async fn compare_months(
 pub async fn get_monthly_data(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(query): Valid<Query<MonthlyQuery>>,
+    VQuery(query): VQuery<MonthlyQuery>,
 ) -> Result<Json<ApiResponse<Vec<HoldingMonthlyDataResponse>>>, AppError> {
     let (current_month, current_year) = services::holding::default_current_month_year();
-    let start_month = query.start_month.unwrap_or(current_month);
-    let start_year = query.start_year.unwrap_or(current_year);
+    let start_month = query.start_month().unwrap_or(current_month);
+    let start_year = query.start_year().unwrap_or(current_year);
 
     // Mirrors echobackend's parseMonthlyQuery: only derive End via
     // prevNMonths(Start, 11) when *both* endMonth and endYear are omitted;
     // if only one is missing, it's filled from Start's own value.
-    let (mut end_month, mut end_year) = match (query.end_month, query.end_year) {
+    let (mut end_month, mut end_year) = match (query.end_month(), query.end_year()) {
         (None, None) => services::holding::prev_n_months(start_month, start_year, 11),
         (None, Some(end_year)) => (start_month, end_year),
         (Some(end_month), None) => (end_month, start_year),
@@ -304,7 +313,7 @@ pub async fn sync_prices(
 pub async fn duplicate_holdings(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    Valid(Json(req)): Valid<Json<DuplicateHoldingRequest>>,
+    VJson(req): VJson<DuplicateHoldingRequest>,
 ) -> Result<
     (
         axum::http::StatusCode,
@@ -336,25 +345,15 @@ pub async fn duplicate_holdings(
 /// `GET /api/holdings/calendar` — corporate-actions calendar (dividends + RUPS)
 /// for the authenticated user. Mirrors echobackend's `CorporateActionHandler.GetCalendar`.
 pub async fn get_calendar(
+    State(pool): State<DbPool>,
     _auth_user: AuthUser,
-    Valid(Query(query)): Valid<Query<CalendarQuery>>,
+    VQuery(query): VQuery<CalendarQuery>,
 ) -> Result<Json<ApiResponse<CorporateActionCalendarResponse>>, AppError> {
     let now = Utc::now();
-    let from = query
-        .from
-        .as_deref()
-        .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
-        .unwrap_or_else(|| {
-            NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
-                .expect("first day of current month is always valid")
-        });
-    let to = query
-        .to
-        .as_deref()
-        .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
-        .unwrap_or_else(|| services::corporate_action::add_months(now.date_naive(), 3));
+    let month = query.month.unwrap_or_else(|| now.month() as i32);
+    let year = query.year.unwrap_or_else(|| now.year());
 
-    let result = services::corporate_action::get_calendar(from, to).await;
+    let result = services::corporate_action::get_calendar(&pool, year, month).await;
     Ok(Json(ApiResponse::success_with_message(
         "Corporate actions calendar fetched successfully",
         result,

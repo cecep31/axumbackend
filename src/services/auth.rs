@@ -49,6 +49,22 @@ pub struct AuthActivityLogResponse {
     pub created_at: chrono::DateTime<Utc>,
 }
 
+/// Flat profile subset returned by `GET /api/auth/profile`, mirroring
+/// echobackend's `AuthHandler.GetProfile` map shape (no `name`, no nested
+/// `profile`, no timestamps).
+#[derive(Serialize)]
+pub struct ProfileResponse {
+    pub id: Uuid,
+    pub email: String,
+    pub username: Option<String>,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub image: Option<String>,
+    pub is_super_admin: Option<bool>,
+    pub followers_count: i64,
+    pub following_count: i64,
+}
+
 #[derive(Debug)]
 pub enum AuthError {
     Db(DbErr),
@@ -152,6 +168,30 @@ pub async fn log_activity(
     if let Err(err) = log.insert(db).await {
         tracing::warn!(?err, activity_type, "failed to log auth activity");
     }
+}
+
+/// Returns the flat profile subset for `GET /api/auth/profile`
+/// (echobackend `AuthHandler.GetProfile`).
+pub async fn get_profile(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+) -> Result<Option<ProfileResponse>, DbErr> {
+    let user = users::Entity::find_by_id(user_id)
+        .filter(users::Column::DeletedAt.is_null())
+        .one(db)
+        .await?;
+
+    Ok(user.map(|user| ProfileResponse {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        image: user.image,
+        is_super_admin: user.is_super_admin,
+        followers_count: user.followers_count.unwrap_or_default(),
+        following_count: user.following_count.unwrap_or_default(),
+    }))
 }
 
 async fn create_token_and_session(

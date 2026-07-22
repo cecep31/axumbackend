@@ -30,15 +30,23 @@ pub struct AuthUser {
     pub is_super_admin: bool,
 }
 
+/// Builds the auth-middleware error envelope documented in the API reference:
+/// 401 responses use `error: "Unauthorized access"`, 403 responses use
+/// `error: "Access forbidden"`, with a more specific human-readable `message`.
 fn auth_error(status: StatusCode, message: impl Into<String>) -> Response {
     let message = message.into();
+    let error = if status == StatusCode::FORBIDDEN {
+        "Access forbidden"
+    } else {
+        "Unauthorized access"
+    };
     (
         status,
         Json(ApiResponse::<serde_json::Value> {
             success: false,
-            message: message.clone(),
+            message,
             data: None,
-            error: Some(message),
+            error: Some(error.to_string()),
             errors: None,
             meta: None,
         }),
@@ -56,19 +64,22 @@ where
         let Some(header) = parts.headers.get(axum::http::header::AUTHORIZATION) else {
             return Err(auth_error(
                 StatusCode::UNAUTHORIZED,
-                "missing authorization header",
+                "Missing authorization header",
             ));
         };
 
         let Ok(header) = header.to_str() else {
             return Err(auth_error(
                 StatusCode::UNAUTHORIZED,
-                "invalid authorization header",
+                "Invalid authorization header",
             ));
         };
 
         let Some(token) = header.strip_prefix("Bearer ") else {
-            return Err(auth_error(StatusCode::UNAUTHORIZED, "invalid bearer token"));
+            return Err(auth_error(
+                StatusCode::UNAUTHORIZED,
+                "Invalid authorization header",
+            ));
         };
 
         let token = decode::<Claims>(
@@ -76,7 +87,7 @@ where
             &DecodingKey::from_secret(JwtConfig::get().secret.as_bytes()),
             &Validation::default(),
         )
-        .map_err(|_| auth_error(StatusCode::UNAUTHORIZED, "invalid or expired token"))?;
+        .map_err(|_| auth_error(StatusCode::UNAUTHORIZED, "Invalid or expired token"))?;
 
         Ok(AuthUser {
             id: token.claims.user_id,
@@ -100,7 +111,7 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let auth_user = AuthUser::from_request_parts(parts, state).await?;
         if !auth_user.is_super_admin {
-            return Err(auth_error(StatusCode::FORBIDDEN, "admin access required"));
+            return Err(auth_error(StatusCode::FORBIDDEN, "Insufficient privileges"));
         }
         Ok(AdminUser(auth_user))
     }

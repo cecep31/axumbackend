@@ -2,20 +2,16 @@ use crate::auth::AdminUser;
 use crate::database::DbPool;
 use crate::dto::report::{OverviewReport, ReportQuery, date_range};
 use crate::error::AppError;
+use crate::extract::VQuery;
 use crate::models::report::{EngagementMetricsResponse, PostReportResponse, UserReportResponse};
 use crate::response::ApiResponse;
 use crate::services;
-use axum::{
-    Json, Router,
-    extract::{Query, State},
-    routing::get,
-};
-use axum_valid::Valid;
+use axum::{Json, Router, extract::State, routing::get};
 
 pub async fn get_overview(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    Valid(query): Valid<Query<ReportQuery>>,
+    VQuery(query): VQuery<ReportQuery>,
 ) -> Result<Json<ApiResponse<OverviewReport>>, AppError> {
     let overview = services::report::overview(&pool).await?;
     let engagement = services::report::engagement(&pool, date_range(&query)).await?;
@@ -32,10 +28,9 @@ pub async fn get_overview(
 pub async fn get_users(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    Valid(query): Valid<Query<ReportQuery>>,
+    VQuery(query): VQuery<ReportQuery>,
 ) -> Result<Json<ApiResponse<UserReportResponse>>, AppError> {
-    let report =
-        services::report::user_report(&pool, date_range(&query), query.limit.unwrap_or(10)).await?;
+    let report = services::report::user_report(&pool, date_range(&query), query.limit()).await?;
     Ok(Json(ApiResponse::success_with_message(
         "User report fetched successfully",
         report,
@@ -45,15 +40,11 @@ pub async fn get_users(
 pub async fn get_posts(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    Valid(query): Valid<Query<ReportQuery>>,
+    VQuery(query): VQuery<ReportQuery>,
 ) -> Result<Json<ApiResponse<PostReportResponse>>, AppError> {
-    let report = services::report::post_report(
-        &pool,
-        date_range(&query),
-        query.limit.unwrap_or(10),
-        query.tag_id(),
-    )
-    .await?;
+    let report =
+        services::report::post_report(&pool, date_range(&query), query.limit(), query.tag_id())
+            .await?;
     Ok(Json(ApiResponse::success_with_message(
         "Post report fetched successfully",
         report,
@@ -63,7 +54,7 @@ pub async fn get_posts(
 pub async fn get_engagement(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    Valid(query): Valid<Query<ReportQuery>>,
+    VQuery(query): VQuery<ReportQuery>,
 ) -> Result<Json<ApiResponse<EngagementMetricsResponse>>, AppError> {
     let report = services::report::engagement(&pool, date_range(&query)).await?;
     Ok(Json(ApiResponse::success_with_message(
