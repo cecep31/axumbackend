@@ -4,7 +4,7 @@ use chrono::Utc;
 use sea_orm::sea_query::Expr;
 use sea_orm::sea_query::extension::postgres::PgExpr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, ExprTrait, FromQueryResult,
     IntoActiveModel, JoinType, ModelTrait, Order, PaginatorTrait, QueryFilter, QueryOrder,
     QuerySelect, QueryTrait, RelationTrait, Set,
 };
@@ -177,8 +177,8 @@ pub async fn get_all_posts(
             validate_order_field(filter.sort_by),
             get_order_dir(filter.sort_order),
         )
-        .limit(filter.limit.max(0) as u64)
-        .offset(filter.offset.max(0) as u64)
+        .limit(Ord::max(filter.limit, 0) as u64)
+        .offset(Ord::max(filter.offset, 0) as u64)
         .all(db)
         .await?;
 
@@ -230,8 +230,8 @@ pub async fn get_posts_by_username(
     let total = query.clone().count(db).await? as i64;
     let post_models = query
         .order_by_desc(posts::Column::CreatedAt)
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
+        .limit(Ord::max(limit, 0) as u64)
+        .offset(Ord::max(offset, 0) as u64)
         .all(db)
         .await?;
 
@@ -251,8 +251,8 @@ pub async fn get_posts_by_created_by(
     let total = query.clone().count(db).await? as i64;
     let post_models = query
         .order_by_desc(posts::Column::CreatedAt)
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
+        .limit(Ord::max(limit, 0) as u64)
+        .offset(Ord::max(offset, 0) as u64)
         .all(db)
         .await?;
 
@@ -286,8 +286,8 @@ pub async fn get_posts_for_you(
     let total = query.clone().count(db).await? as i64;
     let post_models = query
         .order_by_desc(posts::Column::CreatedAt)
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
+        .limit(Ord::max(limit, 0) as u64)
+        .offset(Ord::max(offset, 0) as u64)
         .all(db)
         .await?;
 
@@ -320,7 +320,7 @@ pub async fn get_random_posts(db: &DatabaseConnection, limit: i64) -> Result<Vec
         .filter(posts::Column::Published.eq(true))
         .filter(posts::Column::DeletedAt.is_null())
         .order_by(sea_orm::sea_query::Expr::cust("RANDOM()"), Order::Asc)
-        .limit(limit.max(0) as u64)
+        .limit(Ord::max(limit, 0) as u64)
         .all(db)
         .await?;
 
@@ -335,7 +335,7 @@ pub async fn get_trending_posts(db: &DatabaseConnection, limit: i64) -> Result<V
             sea_orm::sea_query::Expr::cust("like_count * 2 + bookmark_count * 2 + view_count"),
             Order::Desc,
         )
-        .limit(limit.max(0) as u64)
+        .limit(Ord::max(limit, 0) as u64)
         .all(db)
         .await?;
 
@@ -350,7 +350,7 @@ pub async fn get_posts_for_sitemap(
         .filter(posts::Column::Published.eq(true))
         .filter(posts::Column::DeletedAt.is_null())
         .order_by_desc(posts::Column::CreatedAt)
-        .limit(limit.max(0) as u64)
+        .limit(Ord::max(limit, 0) as u64)
         .all(db)
         .await?;
 
@@ -613,8 +613,8 @@ pub async fn get_posts_by_tag(
             validate_order_field(order_by),
             get_order_dir(order_direction),
         )
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
+        .limit(Ord::max(limit, 0) as u64)
+        .offset(Ord::max(offset, 0) as u64)
         .all(db)
         .await?;
 

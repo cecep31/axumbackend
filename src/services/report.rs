@@ -23,7 +23,7 @@ fn round2(value: f64) -> f64 {
 
 async fn scalar_i64(db: &DatabaseConnection, sql: &str) -> Result<i64, DbErr> {
     let Some(row) = db
-        .query_one(Statement::from_string(DbBackend::Postgres, sql.to_string()))
+        .query_one_raw(Statement::from_string(DbBackend::Postgres, sql.to_string()))
         .await?
     else {
         return Ok(0);

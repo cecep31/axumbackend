@@ -20,7 +20,7 @@ Recommended order: `cargo fmt && cargo clippy && cargo test`
 
 ## Architecture
 
-**Stack**: Axum 0.8 + SeaORM 1.1 + Tokio + PostgreSQL. Edition 2024.
+**Stack**: Axum 0.8 + SeaORM 2.0 + Tokio + PostgreSQL. Edition 2024.
 
 **Layered flow**: `handlers/` (HTTP, extraction, validation) → `services/` (business logic, DB queries via SeaORM) → `entities/` (SeaORM entity definitions) / `models/` (app-level DTOs and response types).
 

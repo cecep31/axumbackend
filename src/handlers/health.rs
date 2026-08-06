@@ -19,7 +19,7 @@ pub async fn root() -> Json<serde_json::Value> {
 
 pub async fn health(State(pool): State<DbPool>) -> (StatusCode, Json<HealthResponse>) {
     match pool
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             "SELECT 1".to_string(),
         ))
