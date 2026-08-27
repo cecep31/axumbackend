@@ -65,7 +65,7 @@ pub async fn record_view(
 
     let now = Utc::now();
     post_views::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(Uuid::now_v7()),
         post_id: Set(post_id),
         user_id: Set(user_id),
         ip_address: Set(ip_address.filter(|value| !value.trim().is_empty())),

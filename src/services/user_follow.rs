@@ -63,7 +63,7 @@ pub async fn follow_user(
     }
 
     user_follows::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(Uuid::now_v7()),
         follower_id: Set(follower_id),
         following_id: Set(following_id),
         created_at: Set(Some(Utc::now().into())),

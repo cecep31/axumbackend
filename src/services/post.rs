@@ -492,7 +492,7 @@ pub async fn create_post(
 ) -> Result<Post, DbErr> {
     let now = Utc::now();
     let post = posts::ActiveModel {
-        id: Set(uuid::Uuid::new_v4()),
+        id: Set(uuid::Uuid::now_v7()),
         title: Set(input.title),
         created_by: Set(creator_id),
         body: Set(Some(input.body)),

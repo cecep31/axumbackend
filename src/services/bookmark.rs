@@ -113,7 +113,7 @@ pub async fn toggle_bookmark(
 
     let now = Utc::now();
     let bookmark = post_bookmarks::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(Uuid::now_v7()),
         post_id: Set(post_id),
         user_id: Set(user_id),
         folder_id: Set(folder_id),
@@ -219,7 +219,7 @@ pub async fn create_folder(
 ) -> Result<BookmarkFolderResponse, BookmarkError> {
     let now = Utc::now();
     let folder = bookmark_folders::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(Uuid::now_v7()),
         user_id: Set(user_id),
         name: Set(name),
         description: Set(description),

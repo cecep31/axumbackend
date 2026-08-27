@@ -72,7 +72,7 @@ pub async fn like_post(
 
     let now = Utc::now();
     post_likes::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(Uuid::now_v7()),
         post_id: Set(post_id),
         user_id: Set(user_id),
         created_at: Set(Some(now.into())),

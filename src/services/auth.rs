@@ -155,7 +155,7 @@ pub async fn log_activity(
     metadata: Option<serde_json::Value>,
 ) {
     let log = auth_activity_logs::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(Uuid::now_v7()),
         user_id: Set(user_id),
         activity_type: Set(activity_type.to_string()),
         ip_address: Set(ip_address),
@@ -258,7 +258,7 @@ pub async fn register(
 
     let hashed = hash(password, DEFAULT_COST)?;
     let user = users::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(Uuid::now_v7()),
         email: Set(email),
         username: Set(Some(username)),
         password: Set(Some(hashed)),
@@ -483,7 +483,7 @@ pub async fn forgot_password(
 
     let reset_token = generate_prefixed_token("pr");
     let token = password_reset_tokens::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(Uuid::now_v7()),
         user_id: Set(user.id),
         token: Set(reset_token.clone()),
         created_at: Set(Utc::now().into()),
@@ -875,7 +875,7 @@ pub async fn sign_in_with_github(
                 .unwrap_or_else(|| format!("{}@github.placeholder", github_user.id));
 
             let new_user = users::ActiveModel {
-                id: Set(Uuid::new_v4()),
+                id: Set(Uuid::now_v7()),
                 email: Set(email),
                 username: Set(Some(github_user.login.clone())),
                 github_id: Set(Some(github_user.id)),

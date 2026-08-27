@@ -58,7 +58,7 @@ pub async fn create_comment(
 
     let now = Utc::now();
     let comment = post_comments::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(Uuid::now_v7()),
         post_id: Set(post_id),
         text: Set(text),
         created_by: Set(created_by),
