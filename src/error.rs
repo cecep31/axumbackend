@@ -1,62 +1,77 @@
+use crate::response::ApiResponse;
 use axum::{
     Json,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use deadpool_postgres::PoolError;
-use serde_json::json;
+use sea_orm::DbErr;
 
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum AppError {
-    Database(tokio_postgres::Error),
-    Pool(PoolError),
+    Database(DbErr),
     NotFound(String),
     BadRequest(String),
+    Unauthorized(String),
+    Forbidden(String),
+    Conflict(String),
+    /// Validation failure (`422`) carrying structured field errors, mirroring
+    /// echobackend's `response.FromValidateError` envelope.
+    UnprocessableEntity {
+        error: String,
+        errors: Vec<crate::extract::FieldError>,
+    },
     InternalServerError(String),
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, error_message) = match self {
+        let (status, error_message, errors) = match self {
             AppError::Database(e) => {
-                // Log the full error for debugging
                 tracing::error!("Database error: {:?}", e);
-                // Include more details in the response for debugging
-                let error_msg = if e.to_string().is_empty() {
-                    format!("Database error: {:?}", e)
-                } else {
-                    format!("Database error: {}", e)
-                };
-                (StatusCode::INTERNAL_SERVER_ERROR, error_msg)
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                    None,
+                )
             }
-            AppError::Pool(e) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("Connection pool error: {}", e),
+
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg, None),
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg, None),
+            AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg, None),
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg, None),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg, None),
+            AppError::UnprocessableEntity { error, errors } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Validation failed".to_string(),
+                Some((error, errors)),
             ),
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-            AppError::InternalServerError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
+            AppError::InternalServerError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg, None),
         };
 
-        let body = Json(json!({
-            "success": false,
-            "error": error_message,
-            "data": serde_json::Value::Null
-        }));
+        let (error_field, errors_field) = match errors {
+            Some((error, errors)) => (
+                error,
+                Some(serde_json::to_value(errors).unwrap_or_default()),
+            ),
+            None => (error_message.clone(), None),
+        };
+
+        let body = Json(ApiResponse::<serde_json::Value> {
+            success: false,
+            message: error_message,
+            data: None,
+            error: Some(error_field),
+            errors: errors_field,
+            meta: None,
+        });
 
         (status, body).into_response()
     }
 }
 
-impl From<tokio_postgres::Error> for AppError {
-    fn from(err: tokio_postgres::Error) -> Self {
+impl From<DbErr> for AppError {
+    fn from(err: DbErr) -> Self {
         AppError::Database(err)
-    }
-}
-
-impl From<PoolError> for AppError {
-    fn from(err: PoolError) -> Self {
-        AppError::Pool(err)
     }
 }

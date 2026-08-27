@@ -1,11 +1,5 @@
-mod config;
-mod database;
-mod error;
-mod handlers;
-mod models;
-mod response;
-mod services;
-
+use axumbackend::{config, database, handlers, rate_limit::RateLimiter};
+use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -30,27 +24,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = config::Config::from_env();
+    config::JwtConfig::init(config.jwt.clone());
+    config::EmailConfig::init(config.email.clone());
+    config::FrontendConfig::init(config.frontend.clone());
+    config::GitHubConfig::init(config.github.clone());
+    config::MarketConfig::init(config.market.clone());
+    config::OpenRouterConfig::init(config.openrouter.clone());
+    config::HttpConfig::init(config.http.clone());
 
     // Create connection pool with configuration from environment
-    let pool = database::create_pool(&config.database_url, &config.db_pool).map_err(|e| {
-        format!(
-            "Failed to create database pool: {}. Check DATABASE_URL format",
-            e
-        )
-    })?;
+    let pool = database::create_pool(&config.database_url, &config.db_pool)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to create database connection: {}. Check DATABASE_URL format",
+                e
+            )
+        })?;
     tracing::info!(
         "Database connection pool created (max_size: {}, timeout: {:?})",
         config.db_pool.max_size,
         config.db_pool.connection_timeout
     );
 
-    let app = handlers::create_router().with_state(pool);
+    let limiter = if config.rate_limit.max_requests == 0 {
+        tracing::info!("Rate limiter disabled");
+        None
+    } else {
+        tracing::info!(
+            "Rate limiter enabled (max_requests: {}, window: {:?})",
+            config.rate_limit.max_requests,
+            config.rate_limit.window
+        );
+        Some(RateLimiter::new(
+            config.rate_limit.max_requests,
+            config.rate_limit.window,
+            config.http.trust_proxy,
+        ))
+    };
+
+    let app = handlers::create_router(limiter).with_state(pool);
 
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|e| format!("Failed to bind to {}: {}", addr, e))?;
     tracing::info!("Server listening on {}", addr);
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

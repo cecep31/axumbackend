@@ -1,32 +1,19 @@
 use crate::config::PoolConfig;
-use deadpool_postgres::{Config, CreatePoolError, Pool, Runtime};
-use tokio_postgres::NoTls;
+use sea_orm::{ConnectOptions, Database, DatabaseConnection, DbErr};
 
-/// Type alias for the database connection pool
-pub type DbPool = Pool;
+/// Shared database connection managed by SeaORM / SQLx internally.
+pub type DbPool = DatabaseConnection;
 
-/// Create a connection pool from the database URL and pool configuration
-///
-/// # Pool Configuration
-/// - `max_size`: Maximum number of connections in the pool
-/// - `connection_timeout`: Timeout for acquiring/creating/recycling connections
-///   The recycle timeout ensures connections are tested and refreshed when reused.
-///
-/// # Errors
-/// Returns `CreatePoolError` if pool creation fails (e.g., invalid URL format)
-pub fn create_pool(database_url: &str, pool_config: &PoolConfig) -> Result<Pool, CreatePoolError> {
-    let mut cfg = Config::new();
-    cfg.url = Some(database_url.to_string());
+/// Create a SeaORM database connection from the database URL and pool configuration.
+pub async fn create_pool(
+    database_url: &str,
+    pool_config: &PoolConfig,
+) -> Result<DatabaseConnection, DbErr> {
+    let mut options = ConnectOptions::new(database_url.to_string());
+    options
+        .max_connections(pool_config.max_size as u32)
+        .connect_timeout(pool_config.connection_timeout)
+        .acquire_timeout(pool_config.connection_timeout);
 
-    cfg.pool = Some(deadpool_postgres::PoolConfig {
-        max_size: pool_config.max_size,
-        timeouts: deadpool::managed::Timeouts {
-            wait: Some(pool_config.connection_timeout),
-            create: Some(pool_config.connection_timeout),
-            recycle: Some(pool_config.connection_timeout),
-        },
-        queue_mode: Default::default(),
-    });
-
-    cfg.create_pool(Some(Runtime::Tokio1), NoTls)
+    Database::connect(options).await
 }

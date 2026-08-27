@@ -1,0 +1,498 @@
+use crate::dto::chat::{
+    CreateChatConversationRequest, CreateChatConversationStreamRequest, CreateChatMessageRequest,
+    UpdateChatConversationRequest,
+};
+use crate::entities::{chat_conversations, chat_messages};
+use crate::models::chat::{
+    ChatConversationResponse, ChatMessageResponse, conversation_response, message_response,
+};
+use crate::services::openrouter::{self, OpenRouterMessage, OpenRouterUsage};
+use chrono::Utc;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, IntoActiveModel,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+};
+use uuid::Uuid;
+
+#[derive(Debug)]
+pub enum ChatError {
+    Db(DbErr),
+    ConversationNotFound,
+    ConversationNotOwned,
+    MessageNotFound,
+}
+
+impl From<DbErr> for ChatError {
+    fn from(err: DbErr) -> Self {
+        Self::Db(err)
+    }
+}
+
+/// Outcome of a streaming chat request, mirroring echobackend: either the AI
+/// fallback (only the user message was stored) or everything needed to run
+/// the SSE stream.
+pub enum StreamOutcome {
+    /// AI unavailable — respond `201` with an array holding the user message.
+    Fallback(ChatMessageResponse),
+    /// AI available — stream `ai_chunk` / `ai_complete` events via SSE.
+    Stream(StreamPreparation),
+}
+
+pub struct StreamPreparation {
+    pub user_id: Uuid,
+    pub conversation_id: Uuid,
+    pub user_message: ChatMessageResponse,
+    pub context_messages: Vec<OpenRouterMessage>,
+    pub model: Option<String>,
+    pub temperature: f64,
+}
+
+async fn owned_conversation(
+    db: &DatabaseConnection,
+    id: Uuid,
+    user_id: Uuid,
+) -> Result<chat_conversations::Model, ChatError> {
+    let conversation = chat_conversations::Entity::find_by_id(id)
+        .filter(chat_conversations::Column::DeletedAt.is_null())
+        .one(db)
+        .await?
+        .ok_or(ChatError::ConversationNotFound)?;
+    if conversation.user_id != user_id {
+        return Err(ChatError::ConversationNotOwned);
+    }
+    Ok(conversation)
+}
+
+fn normalized_role(role: Option<String>) -> String {
+    match role.as_deref().map(str::trim) {
+        Some(trimmed) if !trimmed.is_empty() => trimmed.to_string(),
+        _ => "user".to_string(),
+    }
+}
+
+fn build_conversation_title(title: Option<String>, content: &str) -> String {
+    if let Some(title) = title {
+        let trimmed = title.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let normalized: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return "New conversation".to_string();
+    }
+    normalized.chars().take(50).collect()
+}
+
+async fn touch_conversation(
+    db: &DatabaseConnection,
+    conversation: chat_conversations::Model,
+) -> Result<(), ChatError> {
+    let mut active = conversation.into_active_model();
+    active.updated_at = Set(Utc::now().into());
+    active.update(db).await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_message(
+    db: &DatabaseConnection,
+    conversation_id: Uuid,
+    user_id: Uuid,
+    role: String,
+    content: String,
+    model: Option<String>,
+    prompt_tokens: i32,
+    completion_tokens: i32,
+    total_tokens: i32,
+) -> Result<chat_messages::Model, ChatError> {
+    let now = Utc::now().into();
+    let message = chat_messages::ActiveModel {
+        conversation_id: Set(conversation_id),
+        user_id: Set(user_id),
+        role: Set(role),
+        content: Set(content),
+        model: Set(model),
+        prompt_tokens: Set(Some(prompt_tokens)),
+        completion_tokens: Set(Some(completion_tokens)),
+        total_tokens: Set(Some(total_tokens)),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(db)
+    .await?;
+    Ok(message)
+}
+
+/// All messages of a conversation in chronological order (the OpenRouter
+/// context window), mirroring `GetMessagesByConversationIDAsc`.
+async fn context_messages(
+    db: &DatabaseConnection,
+    conversation_id: Uuid,
+    user_id: Uuid,
+) -> Result<Vec<chat_messages::Model>, ChatError> {
+    let messages = chat_messages::Entity::find()
+        .filter(chat_messages::Column::ConversationId.eq(conversation_id))
+        .filter(chat_messages::Column::UserId.eq(user_id))
+        .order_by_asc(chat_messages::Column::CreatedAt)
+        .all(db)
+        .await?;
+    Ok(messages)
+}
+
+/// echobackend: a conversation still titled "New conversation" after the first
+/// message gets an auto-generated title from that message.
+async fn maybe_auto_title(
+    db: &DatabaseConnection,
+    conversation: &chat_conversations::Model,
+    context_len: usize,
+    content: &str,
+) -> Result<(), ChatError> {
+    if conversation.title != "New conversation" || context_len != 1 {
+        return Ok(());
+    }
+    let title = build_conversation_title(None, content);
+    let mut active = conversation.clone().into_active_model();
+    active.title = Set(title);
+    active.update(db).await?;
+    Ok(())
+}
+
+fn to_openrouter_messages(messages: &[chat_messages::Model]) -> Vec<OpenRouterMessage> {
+    messages
+        .iter()
+        .map(|message| OpenRouterMessage {
+            role: message.role.clone(),
+            content: message.content.clone(),
+        })
+        .collect()
+}
+
+pub async fn create_conversation(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    req: CreateChatConversationRequest,
+) -> Result<ChatConversationResponse, ChatError> {
+    let now = Utc::now().into();
+    let conversation = chat_conversations::ActiveModel {
+        title: Set(req.title),
+        user_id: Set(user_id),
+        is_pinned: Set(false),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(db)
+    .await?;
+
+    Ok(conversation_response(conversation, None, 0))
+}
+
+pub async fn get_user_conversations(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    offset: u64,
+    limit: u64,
+) -> Result<(Vec<ChatConversationResponse>, i64), ChatError> {
+    let base = chat_conversations::Entity::find()
+        .filter(chat_conversations::Column::UserId.eq(user_id))
+        .filter(chat_conversations::Column::DeletedAt.is_null());
+    let total = base.clone().count(db).await? as i64;
+    let conversations = base
+        .order_by_desc(chat_conversations::Column::UpdatedAt)
+        .offset(offset)
+        .limit(limit)
+        .all(db)
+        .await?;
+
+    let mut out = Vec::with_capacity(conversations.len());
+    for conversation in conversations {
+        let count = chat_messages::Entity::find()
+            .filter(chat_messages::Column::ConversationId.eq(conversation.id))
+            .count(db)
+            .await? as usize;
+        out.push(conversation_response(conversation, None, count));
+    }
+    Ok((out, total))
+}
+
+pub async fn get_conversation_by_id(
+    db: &DatabaseConnection,
+    id: Uuid,
+    user_id: Uuid,
+) -> Result<ChatConversationResponse, ChatError> {
+    let conversation = owned_conversation(db, id, user_id).await?;
+    let messages = chat_messages::Entity::find()
+        .filter(chat_messages::Column::ConversationId.eq(id))
+        .order_by_asc(chat_messages::Column::CreatedAt)
+        .all(db)
+        .await?;
+    let count = messages.len();
+    Ok(conversation_response(conversation, Some(messages), count))
+}
+
+pub async fn update_conversation(
+    db: &DatabaseConnection,
+    id: Uuid,
+    user_id: Uuid,
+    req: UpdateChatConversationRequest,
+) -> Result<ChatConversationResponse, ChatError> {
+    let conversation = owned_conversation(db, id, user_id).await?;
+    let mut active = conversation.into_active_model();
+    if let Some(title) = req.title
+        && !title.trim().is_empty()
+    {
+        active.title = Set(title);
+    }
+    if let Some(is_pinned) = req.is_pinned {
+        active.is_pinned = Set(is_pinned);
+        active.pinned_at = Set(if is_pinned {
+            Some(Utc::now().into())
+        } else {
+            None
+        });
+    }
+    active.updated_at = Set(Utc::now().into());
+    let updated = active.update(db).await?;
+    let count = chat_messages::Entity::find()
+        .filter(chat_messages::Column::ConversationId.eq(updated.id))
+        .count(db)
+        .await? as usize;
+    Ok(conversation_response(updated, None, count))
+}
+
+pub async fn delete_conversation(
+    db: &DatabaseConnection,
+    id: Uuid,
+    user_id: Uuid,
+) -> Result<(), ChatError> {
+    let conversation = owned_conversation(db, id, user_id).await?;
+    let now = Utc::now().into();
+    let mut active = conversation.into_active_model();
+    active.deleted_at = Set(Some(now));
+    active.updated_at = Set(now);
+    active.update(db).await?;
+    Ok(())
+}
+
+/// Stores the user message, then (when the role is `user` and OpenRouter is
+/// configured) synchronously generates and stores the AI reply, mirroring
+/// echobackend's `CreateMessage`. AI failures are fail-open: the user message
+/// is still returned on its own.
+pub async fn create_message(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    conversation_id: Uuid,
+    req: CreateChatMessageRequest,
+) -> Result<Vec<ChatMessageResponse>, ChatError> {
+    let conversation = owned_conversation(db, conversation_id, user_id).await?;
+    let role = normalized_role(req.role.clone());
+    let content = req.content.clone();
+    let user_message = insert_message(
+        db,
+        conversation_id,
+        user_id,
+        role.clone(),
+        content.clone(),
+        req.model.clone(),
+        0,
+        0,
+        0,
+    )
+    .await?;
+    touch_conversation(db, conversation.clone()).await?;
+    let mut responses = vec![message_response(user_message)];
+
+    if role != "user" || !openrouter::is_available(req.model.as_deref()) {
+        return Ok(responses);
+    }
+
+    let context = context_messages(db, conversation_id, user_id).await?;
+    maybe_auto_title(db, &conversation, context.len(), &content).await?;
+
+    let messages = to_openrouter_messages(&context);
+    let reply = match openrouter::generate_response(
+        &messages,
+        req.model.as_deref(),
+        openrouter::normalized_temperature(req.temperature),
+    )
+    .await
+    {
+        Ok(reply) => reply,
+        Err(err) => {
+            tracing::warn!(error = %err, "openrouter generate response failed; returning user message only");
+            return Ok(responses);
+        }
+    };
+    let Some(choice) = reply.choices.into_iter().next() else {
+        return Ok(responses);
+    };
+
+    let assistant = insert_message(
+        db,
+        conversation_id,
+        user_id,
+        normalized_role(Some(choice.message.role)),
+        choice.message.content,
+        openrouter::effective_model(req.model.as_deref()),
+        reply.usage.prompt_tokens,
+        reply.usage.completion_tokens,
+        reply.usage.total_tokens,
+    )
+    .await?;
+    touch_conversation(db, conversation).await?;
+    responses.push(message_response(assistant));
+    Ok(responses)
+}
+
+/// `POST /api/chat/conversations/stream`: creates a conversation, stores the
+/// first message, and prepares the AI stream (or the fallback), mirroring
+/// echobackend's `CreateConversationStream`.
+pub async fn create_conversation_stream(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    req: CreateChatConversationStreamRequest,
+) -> Result<StreamOutcome, ChatError> {
+    let title = build_conversation_title(req.title.clone(), &req.content);
+    let now = Utc::now().into();
+    let conversation = chat_conversations::ActiveModel {
+        title: Set(title),
+        user_id: Set(user_id),
+        is_pinned: Set(false),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(db)
+    .await?;
+
+    prepare_streaming_message(
+        db,
+        user_id,
+        conversation.id,
+        CreateChatMessageRequest {
+            content: req.content,
+            role: Some("user".to_string()),
+            model: req.model,
+            temperature: req.temperature,
+        },
+    )
+    .await
+}
+
+/// Stores the user message and decides whether the AI stream can run,
+/// mirroring echobackend's `createStreamingMessageInternal`.
+pub async fn prepare_streaming_message(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    conversation_id: Uuid,
+    req: CreateChatMessageRequest,
+) -> Result<StreamOutcome, ChatError> {
+    let conversation = owned_conversation(db, conversation_id, user_id).await?;
+    let role = normalized_role(req.role.clone());
+    let content = req.content.clone();
+    let user_message = insert_message(
+        db,
+        conversation_id,
+        user_id,
+        role.clone(),
+        content.clone(),
+        req.model.clone(),
+        0,
+        0,
+        0,
+    )
+    .await?;
+    touch_conversation(db, conversation.clone()).await?;
+    let user_response = message_response(user_message);
+
+    if role != "user" || !openrouter::is_available(req.model.as_deref()) {
+        return Ok(StreamOutcome::Fallback(user_response));
+    }
+
+    let context = context_messages(db, conversation_id, user_id).await?;
+    maybe_auto_title(db, &conversation, context.len(), &content).await?;
+
+    Ok(StreamOutcome::Stream(StreamPreparation {
+        user_id,
+        conversation_id,
+        user_message: user_response,
+        context_messages: to_openrouter_messages(&context),
+        model: req.model,
+        temperature: openrouter::normalized_temperature(req.temperature),
+    }))
+}
+
+/// Persists the completed streamed AI message, mirroring echobackend's
+/// `SaveStreamingMessage`.
+pub async fn save_streaming_message(
+    db: &DatabaseConnection,
+    conversation_id: Uuid,
+    user_id: Uuid,
+    content: String,
+    model: Option<String>,
+    usage: OpenRouterUsage,
+) -> Result<ChatMessageResponse, ChatError> {
+    let conversation = owned_conversation(db, conversation_id, user_id).await?;
+    let message = insert_message(
+        db,
+        conversation_id,
+        user_id,
+        "assistant".to_string(),
+        content,
+        openrouter::effective_model(model.as_deref()),
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        usage.total_tokens,
+    )
+    .await?;
+    touch_conversation(db, conversation).await?;
+    Ok(message_response(message))
+}
+
+pub async fn get_messages(
+    db: &DatabaseConnection,
+    conversation_id: Uuid,
+    user_id: Uuid,
+) -> Result<Vec<ChatMessageResponse>, ChatError> {
+    owned_conversation(db, conversation_id, user_id).await?;
+    let messages = chat_messages::Entity::find()
+        .filter(chat_messages::Column::ConversationId.eq(conversation_id))
+        .order_by_desc(chat_messages::Column::CreatedAt)
+        .all(db)
+        .await?;
+    Ok(messages.into_iter().map(message_response).collect())
+}
+
+pub async fn get_message(
+    db: &DatabaseConnection,
+    message_id: Uuid,
+    user_id: Uuid,
+) -> Result<ChatMessageResponse, ChatError> {
+    let message = chat_messages::Entity::find_by_id(message_id)
+        .filter(chat_messages::Column::UserId.eq(user_id))
+        .one(db)
+        .await?
+        .ok_or(ChatError::MessageNotFound)?;
+    owned_conversation(db, message.conversation_id, user_id).await?;
+    Ok(message_response(message))
+}
+
+pub async fn delete_message(
+    db: &DatabaseConnection,
+    message_id: Uuid,
+    user_id: Uuid,
+) -> Result<ChatMessageResponse, ChatError> {
+    let message = chat_messages::Entity::find_by_id(message_id)
+        .filter(chat_messages::Column::UserId.eq(user_id))
+        .one(db)
+        .await?
+        .ok_or(ChatError::MessageNotFound)?;
+    let conversation = owned_conversation(db, message.conversation_id, user_id).await?;
+    chat_messages::Entity::delete_by_id(message_id)
+        .exec(db)
+        .await?;
+    touch_conversation(db, conversation).await?;
+    Ok(message_response(message))
+}

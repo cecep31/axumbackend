@@ -1,9 +1,7 @@
 use super::tag::Tag;
 use super::user::User;
-use chrono::{DateTime, Utc};
-use serde::Deserialize;
-use serde::Serialize;
-use tokio_postgres::Row;
+use chrono::{DateTime, FixedOffset, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Deserialize, Clone, Copy)]
@@ -14,86 +12,87 @@ pub enum OrderDirection {
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct SitemapPost {
+    pub username: Option<String>,
+    pub slug: String,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct Post {
     pub id: Uuid,
     pub title: String,
     pub body: Option<String>,
+    #[serde(skip_serializing)]
     pub created_by: Uuid,
     pub slug: String,
     pub photo_url: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<DateTime<Utc>>,
     pub published: bool,
+    pub published_at: Option<DateTime<Utc>>,
     pub view_count: i64,
     pub like_count: i64,
     pub bookmark_count: i64,
-    pub user: User,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<User>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<Tag>,
 }
 
-impl From<&Row> for Post {
-    fn from(row: &Row) -> Self {
-        // Substring body to 200 characters max
-        let body: Option<String> = row.get(2);
-        let body = body.map(|b| {
-            if b.chars().count() > 200 {
-                let truncated_body: String = b.chars().take(200).collect();
-                format!("{}...", truncated_body)
+fn to_utc(value: Option<DateTime<FixedOffset>>) -> Option<DateTime<Utc>> {
+    value.map(|dt| dt.with_timezone(&Utc))
+}
+
+impl Post {
+    pub fn from_entity(
+        post: crate::entities::posts::Model,
+        user: Option<crate::entities::users::Model>,
+        tags: Vec<crate::entities::tags::Model>,
+        truncate_body: bool,
+    ) -> Self {
+        let body = post.body.map(|body| {
+            if truncate_body && body.chars().count() > 250 {
+                format!("{} ...", body.chars().take(250).collect::<String>())
             } else {
-                b
+                body
             }
         });
 
         Self {
-            id: row.get(0),
-            title: row.get(1),
+            id: post.id,
+            title: post.title,
             body,
-            created_by: row.get(3),
-            slug: row.get(4),
-            photo_url: row.get(5),
-            created_at: row.get(6),
-            updated_at: row.get(7),
-            deleted_at: row.get(8),
-            published: row.get(9),
-            view_count: row.get(10),
-            like_count: row.get(11),
-            bookmark_count: row.get(12),
-            user: User {
-                id: row.get(13),
-                username: row.get(14),
-                image: row.get(15),
-            },
-            tags: Vec::new(),
+            created_by: post.created_by,
+            slug: post.slug,
+            photo_url: post.photo_url,
+            created_at: to_utc(post.created_at),
+            updated_at: to_utc(post.updated_at),
+            deleted_at: to_utc(post.deleted_at),
+            published: post.published.unwrap_or(true),
+            published_at: to_utc(post.published_at),
+            view_count: post.view_count.unwrap_or_default(),
+            like_count: post.like_count.unwrap_or_default(),
+            bookmark_count: post.bookmark_count.unwrap_or_default(),
+            user: user.map(Into::into),
+            tags: tags.into_iter().map(Into::into).collect(),
         }
     }
 }
 
-impl Post {
-    /// Create a Post from a Row without truncating the body
-    pub fn from_full(row: &Row) -> Self {
-        let body: Option<String> = row.get(2);
-
+impl SitemapPost {
+    pub fn from_entities(
+        post: crate::entities::posts::Model,
+        user: crate::entities::users::Model,
+    ) -> Self {
         Self {
-            id: row.get(0),
-            title: row.get(1),
-            body,
-            created_by: row.get(3),
-            slug: row.get(4),
-            photo_url: row.get(5),
-            created_at: row.get(6),
-            updated_at: row.get(7),
-            deleted_at: row.get(8),
-            published: row.get(9),
-            view_count: row.get(10),
-            like_count: row.get(11),
-            bookmark_count: row.get(12),
-            user: User {
-                id: row.get(13),
-                username: row.get(14),
-                image: row.get(15),
-            },
-            tags: Vec::new(),
+            username: user.username,
+            slug: post.slug,
+            created_at: to_utc(post.created_at),
+            updated_at: to_utc(post.updated_at),
         }
     }
 }
