@@ -5,7 +5,7 @@ use crate::entities::{auth_activity_logs, password_reset_tokens, sessions, users
 use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{EncodingKey, Header, encode};
-use rand::{Rng, distributions::Alphanumeric};
+use rand::distr::{Alphanumeric, SampleString};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, ExprTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect, Set,
@@ -104,20 +104,12 @@ impl From<bcrypt::BcryptError> for AuthError {
 }
 
 fn generate_refresh_token() -> String {
-    let random: String = rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(86)
-        .map(char::from)
-        .collect();
+    let random = Alphanumeric.sample_string(&mut rand::rng(), 86);
     format!("pl_{}", random)
 }
 
 fn generate_prefixed_token(prefix: &str) -> String {
-    let random: String = rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(64)
-        .map(char::from)
-        .collect();
+    let random = Alphanumeric.sample_string(&mut rand::rng(), 64);
     format!("{}_{}", prefix, random)
 }
 

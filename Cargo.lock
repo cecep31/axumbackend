@@ -340,7 +340,7 @@ dependencies = [
  "dotenvy",
  "jsonwebtoken",
  "once_cell",
- "rand 0.8.8",
+ "rand 0.10.2",
  "regex",
  "reqwest",
  "sea-orm",

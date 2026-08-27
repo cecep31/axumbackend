@@ -19,7 +19,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
-use rand::{Rng, distributions::Alphanumeric};
+use rand::distr::{Alphanumeric, SampleString};
 use std::time::Duration;
 
 fn user_agent(headers: &HeaderMap) -> Option<String> {
@@ -268,11 +268,7 @@ const GITHUB_OAUTH_STATE_COOKIE_PATH: &str = "/api/auth/oauth/github";
 const GITHUB_OAUTH_STATE_COOKIE_MAX_AGE_SECS: u64 = 600;
 
 fn generate_oauth_state() -> String {
-    rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(48)
-        .map(char::from)
-        .collect()
+    Alphanumeric.sample_string(&mut rand::rng(), 48)
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
