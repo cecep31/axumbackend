@@ -39,6 +39,7 @@ const DEFAULT_GITHUB_REDIRECT_URI: &str = "http://localhost:8080/api/auth/oauth/
 const DEFAULT_SMTP_PORT: u16 = 587;
 const DEFAULT_SMTP_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_SMTP_TASK_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 // ============================================================================
 // Configuration Structures
@@ -105,6 +106,7 @@ pub struct RateLimitConfig {
 pub struct HttpConfig {
     pub trust_proxy: bool,
     pub allow_origins: Vec<String>,
+    pub request_timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -314,6 +316,10 @@ impl HttpConfig {
             allow_origins: parse_origins(
                 &env::var("HTTP_ALLOW_ORIGINS").unwrap_or_else(|_| "*".to_string()),
             ),
+            request_timeout: Duration::from_secs(parse_u64_alias(
+                &["HTTP_REQUEST_TIMEOUT_SECS", "REQUEST_TIMEOUT_SECS"],
+                DEFAULT_HTTP_REQUEST_TIMEOUT_SECS,
+            )),
         }
     }
 

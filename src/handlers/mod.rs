@@ -11,17 +11,19 @@ mod report;
 mod tag;
 mod user;
 
-use crate::{database::DbPool, rate_limit};
+use crate::{config::HttpConfig, database::DbPool, rate_limit};
 use axum::{Router, middleware};
 use tower_http::cors::CorsLayer;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<DbPool> {
-    let router = Router::new()
+    let http_config = HttpConfig::get();
+
+    let api_routes = Router::new()
         .merge(health::routes())
         .merge(auth::routes())
         .merge(bookmark::routes())
-        .merge(chat::routes())
         .merge(comment::routes())
         .merge(exchange_rate::routes())
         .merge(holding::routes())
@@ -30,6 +32,11 @@ pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<DbPool>
         .merge(report::routes())
         .merge(tag::routes())
         .merge(user::routes())
+        .layer(TimeoutLayer::new(http_config.request_timeout));
+
+    let router = Router::new()
+        .merge(api_routes)
+        .merge(chat::routes())
         // TraceLayer should be added early to trace all requests
         // It provides good defaults: logs method, uri, status, latency automatically
         .layer(TraceLayer::new_for_http())

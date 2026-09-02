@@ -7,7 +7,7 @@ edition = "2024"
 chrono = { version = "0.4.43", features = ["serde"] }
 dotenvy = "0.15"
 axum = { version = "0.8.8", features = ["multipart"] }
-tower-http = { version = "0.5.2", features = ["cors", "trace"] }
+tower-http = { version = "0.5.2", features = ["cors", "trace", "timeout"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1.51.1", features = ["full"] }
