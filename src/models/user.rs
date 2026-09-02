@@ -114,7 +114,7 @@ impl UserResponse {
         Self::from_entity_with_view(user, profile, is_following, UserView::General)
     }
 
-    /// Build a user response, exposing fields according to `view`.
+    /// Build a user response, exposing fields according to `view` knuckles.
     ///
     /// - [`UserView::General`] — public view: no email / super-admin / last-login / deletion.
     /// - [`UserView::Current`] — the user viewing themselves: email + super-admin.
@@ -155,5 +155,73 @@ impl UserResponse {
             deleted_at,
             last_logged_at,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_full_name() {
+        assert_eq!(
+            full_name(&Some("John".into()), &Some("Doe".into())),
+            "John Doe"
+        );
+        assert_eq!(full_name(&Some("John".into()), &None), "John");
+        assert_eq!(full_name(&None, &Some("Doe".into())), "Doe");
+        assert_eq!(full_name(&None, &None), "");
+    }
+
+    #[test]
+    fn test_user_response_privacy_views() {
+        let user_id = Uuid::now_v7();
+        let user_model = crate::entities::users::Model {
+            id: user_id,
+            created_at: None,
+            updated_at: None,
+            deleted_at: None,
+            first_name: Some("Alice".into()),
+            last_name: Some("Smith".into()),
+            email: "alice@example.com".into(),
+            password: None,
+            image: None,
+            is_super_admin: Some(true),
+            username: Some("alicesmith".into()),
+            github_id: None,
+            last_logged_at: None,
+            followers_count: Some(10),
+            following_count: Some(5),
+        };
+
+        // General view: email and super_admin hidden
+        let general = UserResponse::from_entity_with_view(
+            user_model.clone(),
+            None,
+            Some(true),
+            UserView::General,
+        );
+        assert_eq!(general.name, "Alice Smith");
+        assert_eq!(general.email, None);
+        assert_eq!(general.is_super_admin, None);
+        assert_eq!(general.is_following, Some(true));
+
+        // Current view: email and super_admin shown, is_following is None
+        let current = UserResponse::from_entity_with_view(
+            user_model.clone(),
+            None,
+            Some(true),
+            UserView::Current,
+        );
+        assert_eq!(current.email, Some("alice@example.com".into()));
+        assert_eq!(current.is_super_admin, Some(true));
+        assert_eq!(current.is_following, None);
+
+        // Admin view: email, super_admin, and is_following shown
+        let admin =
+            UserResponse::from_entity_with_view(user_model, None, Some(true), UserView::Admin);
+        assert_eq!(admin.email, Some("alice@example.com".into()));
+        assert_eq!(admin.is_super_admin, Some(true));
+        assert_eq!(admin.is_following, Some(true));
     }
 }

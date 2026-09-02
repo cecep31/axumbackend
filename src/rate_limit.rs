@@ -136,8 +136,9 @@ fn forwarded_ip(headers: &HeaderMap) -> Option<IpAddr> {
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::http::Request;
+    use axum::http::{HeaderValue, Request};
     use std::net::SocketAddr;
+    use std::thread;
 
     #[test]
     fn test_client_identity_trust_proxy_enabled() {
@@ -161,5 +162,86 @@ mod tests {
         req.extensions_mut().insert(ConnectInfo(socket_addr));
 
         assert_eq!(client_identity(&req, false), "127.0.0.1");
+    }
+
+    #[test]
+    fn test_forwarded_ip_x_real_ip_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.22"));
+
+        assert_eq!(
+            forwarded_ip(&headers),
+            Some("198.51.100.22".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_forwarded_ip_invalid_and_empty() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("not-an-ip"));
+        assert_eq!(forwarded_ip(&headers), None);
+
+        let empty_headers = HeaderMap::new();
+        assert_eq!(forwarded_ip(&empty_headers), None);
+    }
+
+    #[test]
+    fn test_rate_limiter_check_and_block() {
+        let limiter = RateLimiter::new(2, Duration::from_secs(60), false);
+        let key = RateLimitKey {
+            path: "/api/posts".into(),
+            client: "192.168.1.1".into(),
+        };
+
+        // First request: ok
+        assert!(limiter.check(key.clone()).is_ok());
+        // Second request: ok
+        assert!(limiter.check(key.clone()).is_ok());
+        // Third request: blocked
+        let res = limiter.check(key.clone());
+        assert!(res.is_err());
+        let retry_after = res.unwrap_err();
+        assert!(retry_after >= 1 && retry_after <= 60);
+    }
+
+    #[test]
+    fn test_rate_limiter_independent_keys() {
+        let limiter = RateLimiter::new(1, Duration::from_secs(60), false);
+        let key1 = RateLimitKey {
+            path: "/api/posts".into(),
+            client: "192.168.1.1".into(),
+        };
+        let key2 = RateLimitKey {
+            path: "/api/comments".into(),
+            client: "192.168.1.1".into(),
+        };
+        let key3 = RateLimitKey {
+            path: "/api/posts".into(),
+            client: "192.168.1.2".into(),
+        };
+
+        assert!(limiter.check(key1.clone()).is_ok());
+        assert!(limiter.check(key1.clone()).is_err());
+
+        // Other path or other client are still allowed
+        assert!(limiter.check(key2).is_ok());
+        assert!(limiter.check(key3).is_ok());
+    }
+
+    #[test]
+    fn test_rate_limiter_window_expiry() {
+        let limiter = RateLimiter::new(1, Duration::from_millis(50), false);
+        let key = RateLimitKey {
+            path: "/api/ping".into(),
+            client: "127.0.0.1".into(),
+        };
+
+        assert!(limiter.check(key.clone()).is_ok());
+        assert!(limiter.check(key.clone()).is_err());
+
+        thread::sleep(Duration::from_millis(60));
+
+        // Should be allowed again after window expires
+        assert!(limiter.check(key).is_ok());
     }
 }

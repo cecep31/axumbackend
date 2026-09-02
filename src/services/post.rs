@@ -623,7 +623,7 @@ pub async fn get_posts_by_tag(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_tag_names;
+    use super::*;
 
     #[test]
     fn normalize_tag_names_trims_filters_empty_and_deduplicates() {
@@ -639,5 +639,24 @@ mod tests {
         let normalized = normalize_tag_names(&input);
 
         assert_eq!(normalized, vec!["rust", "axum", "sea-orm"]);
+    }
+
+    #[test]
+    fn test_validate_order_field_mappings() {
+        assert!(matches!(validate_order_field(Some("id")), posts::Column::Id));
+        assert!(matches!(validate_order_field(Some("title")), posts::Column::Title));
+        assert!(matches!(validate_order_field(Some("updated_at")), posts::Column::UpdatedAt));
+        assert!(matches!(validate_order_field(Some("view_count")), posts::Column::ViewCount));
+        assert!(matches!(validate_order_field(Some("like_count")), posts::Column::LikeCount));
+        assert!(matches!(validate_order_field(Some("bookmark_count")), posts::Column::BookmarkCount));
+        assert!(matches!(validate_order_field(Some("unknown")), posts::Column::CreatedAt));
+        assert!(matches!(validate_order_field(None), posts::Column::CreatedAt));
+    }
+
+    #[test]
+    fn test_get_order_dir() {
+        assert_eq!(get_order_dir(Some(SortDirection::Asc)), Order::Asc);
+        assert_eq!(get_order_dir(Some(SortDirection::Desc)), Order::Desc);
+        assert_eq!(get_order_dir(None), Order::Desc);
     }
 }

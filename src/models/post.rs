@@ -96,3 +96,84 @@ impl SitemapPost {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_post_model(body: Option<String>) -> crate::entities::posts::Model {
+        crate::entities::posts::Model {
+            id: Uuid::now_v7(),
+            created_at: None,
+            updated_at: None,
+            deleted_at: None,
+            title: "Post Title".into(),
+            created_by: Uuid::now_v7(),
+            body,
+            slug: "post-title".into(),
+            photo_url: None,
+            published: Some(true),
+            published_at: None,
+            view_count: Some(5),
+            like_count: Some(2),
+            bookmark_count: Some(1),
+        }
+    }
+
+    #[test]
+    fn test_post_from_entity_truncates_long_body() {
+        let long_body = "a".repeat(300);
+        let model = sample_post_model(Some(long_body));
+        let post = Post::from_entity(model, None, vec![], true);
+
+        let body = post.body.unwrap();
+        assert_eq!(body.len(), 254); // 250 chars + " ..."
+        assert!(body.ends_with(" ..."));
+    }
+
+    #[test]
+    fn test_post_from_entity_no_truncate_when_flag_false() {
+        let long_body = "a".repeat(300);
+        let model = sample_post_model(Some(long_body));
+        let post = Post::from_entity(model, None, vec![], false);
+
+        let body = post.body.unwrap();
+        assert_eq!(body.len(), 300);
+        assert!(!body.ends_with(" ..."));
+    }
+
+    #[test]
+    fn test_post_from_entity_short_body_not_truncated() {
+        let short_body = "Short content";
+        let model = sample_post_model(Some(short_body.into()));
+        let post = Post::from_entity(model, None, vec![], true);
+
+        assert_eq!(post.body.unwrap(), "Short content");
+    }
+
+    #[test]
+    fn test_sitemap_post_from_entities() {
+        let post_model = sample_post_model(None);
+        let user_model = crate::entities::users::Model {
+            id: Uuid::now_v7(),
+            created_at: None,
+            updated_at: None,
+            deleted_at: None,
+            first_name: None,
+            last_name: None,
+            email: "author@example.com".into(),
+            password: None,
+            image: None,
+            is_super_admin: None,
+            username: Some("blogauthor".into()),
+            github_id: None,
+            last_logged_at: None,
+            followers_count: None,
+            following_count: None,
+        };
+
+        let sitemap = SitemapPost::from_entities(post_model, user_model);
+        assert_eq!(sitemap.username, Some("blogauthor".into()));
+        assert_eq!(sitemap.slug, "post-title");
+    }
+}

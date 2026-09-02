@@ -4,7 +4,7 @@
 //! JSON envelope as echobackend:
 //! - body/query/path parse failures -> `400` (`success: false`)
 //! - validation failures -> `422` with `errors: [{field, message, tag}]`,
-//!   mirroring echobackend's `response.FromValidateError`.
+//!   mirroring echobackend's `response.FromValidateError` envelope.
 
 use crate::error::AppError;
 use axum::{
@@ -12,12 +12,12 @@ use axum::{
     extract::{FromRequest, FromRequestParts, Path, Query, Request},
     http::request::Parts,
 };
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::Validate;
 
 /// A single field validation failure, mirroring echobackend's
 /// `validator.ValidationError` (`{field, message, value?, tag?}`).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct FieldError {
     pub field: String,
     pub message: String,
@@ -201,5 +201,88 @@ fn readable_field_name(field: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => spaced,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::borrow::Cow;
+    use validator::{ValidationError, ValidationErrors};
+
+    #[test]
+    fn test_readable_field_name() {
+        assert_eq!(readable_field_name("user_id"), "User id");
+        assert_eq!(readable_field_name("first_name"), "First name");
+        assert_eq!(readable_field_name("email"), "Email");
+        assert_eq!(readable_field_name(""), "");
+    }
+
+    #[test]
+    fn test_to_field_error_required() {
+        let err = ValidationError::new("required");
+        let field_err = to_field_error("title", &err);
+        assert_eq!(field_err.field, "title");
+        assert_eq!(field_err.message, "Title is required");
+        assert_eq!(field_err.tag, Some("required".into()));
+    }
+
+    #[test]
+    fn test_to_field_error_email() {
+        let err = ValidationError::new("email");
+        let field_err = to_field_error("email", &err);
+        assert_eq!(field_err.field, "email");
+        assert_eq!(field_err.message, "Email must be a valid email address");
+        assert_eq!(field_err.tag, Some("email".into()));
+    }
+
+    #[test]
+    fn test_to_field_error_length() {
+        let mut err = ValidationError::new("length");
+        err.add_param(Cow::Borrowed("min"), &8u64);
+        err.add_param(Cow::Borrowed("value"), &"short");
+        let field_err = to_field_error("password", &err);
+        assert_eq!(
+            field_err.message,
+            "Password must be at least 8 characters long"
+        );
+        assert_eq!(field_err.tag, Some("min".into()));
+
+        let mut err2 = ValidationError::new("length");
+        err2.add_param(Cow::Borrowed("max"), &5u64);
+        err2.add_param(Cow::Borrowed("value"), &"toolongstring");
+        let field_err2 = to_field_error("username", &err2);
+        assert_eq!(field_err2.message, "Username must not exceed 5 characters");
+        assert_eq!(field_err2.tag, Some("max".into()));
+    }
+
+    #[test]
+    fn test_to_field_error_range() {
+        let mut err = ValidationError::new("range");
+        err.add_param(Cow::Borrowed("min"), &1u64);
+        let field_err = to_field_error("month", &err);
+        assert_eq!(field_err.message, "Month must be at least 1");
+        assert_eq!(field_err.tag, Some("min".into()));
+
+        let mut err2 = ValidationError::new("range");
+        err2.add_param(Cow::Borrowed("max"), &12u64);
+        let field_err2 = to_field_error("month", &err2);
+        assert_eq!(field_err2.message, "Month must not exceed 12");
+        assert_eq!(field_err2.tag, Some("max".into()));
+    }
+
+    #[test]
+    fn test_validation_error_pipeline() {
+        let mut errors = ValidationErrors::new();
+        errors.add("email", ValidationError::new("email"));
+        let app_err = validation_error(errors);
+        match app_err {
+            AppError::UnprocessableEntity { error, errors } => {
+                assert_eq!(error, "Email must be a valid email address");
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0].field, "email");
+            }
+            _ => panic!("Expected UnprocessableEntity"),
+        }
     }
 }

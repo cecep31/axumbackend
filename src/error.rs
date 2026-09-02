@@ -75,3 +75,64 @@ impl From<DbErr> for AppError {
         AppError::Database(err)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extract::FieldError;
+
+    #[test]
+    fn test_app_error_status_codes() {
+        assert_eq!(
+            AppError::NotFound("Not found".into()).into_response().status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppError::BadRequest("Bad input".into()).into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::Unauthorized("Invalid token".into()).into_response().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            AppError::Forbidden("Denied".into()).into_response().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            AppError::Conflict("Duplicate key".into()).into_response().status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            AppError::InternalServerError("Oops".into()).into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            AppError::Database(DbErr::Custom("db error".into())).into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            AppError::UnprocessableEntity {
+                error: "Invalid input".into(),
+                errors: vec![FieldError {
+                    field: "username".into(),
+                    message: "Username is required".into(),
+                    tag: Some("required".into()),
+                }],
+            }
+            .into_response()
+            .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[test]
+    fn test_from_db_err() {
+        let db_err = DbErr::RecordNotFound("not found".into());
+        let app_err = AppError::from(db_err);
+        match app_err {
+            AppError::Database(DbErr::RecordNotFound(_)) => {}
+            _ => panic!("Expected AppError::Database"),
+        }
+    }
+}

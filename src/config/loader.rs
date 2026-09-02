@@ -347,3 +347,56 @@ impl MarketConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_origins_wildcard_and_empty() {
+        assert_eq!(parse_origins("*"), vec!["*".to_string()]);
+        assert_eq!(parse_origins(""), vec!["*".to_string()]);
+        assert_eq!(parse_origins("   "), vec!["*".to_string()]);
+        assert_eq!(parse_origins(",,"), vec!["*".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_origins_multiple_domains() {
+        let origins =
+            parse_origins("http://localhost:3000, https://example.com , https://app.example.com");
+        assert_eq!(
+            origins,
+            vec![
+                "http://localhost:3000".to_string(),
+                "https://example.com".to_string(),
+                "https://app.example.com".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_numeric_defaults() {
+        let non_existent = "TEST_NON_EXISTENT_VAR_XYZ_987";
+        assert_eq!(parse_u16(non_existent, 8080), 8080);
+        assert_eq!(parse_u32(non_existent, 100), 100);
+        assert_eq!(parse_u64(non_existent, 5000), 5000);
+        assert_eq!(parse_usize(non_existent, 20), 20);
+        assert_eq!(parse_i64(non_existent, -42), -42);
+    }
+
+    #[test]
+    fn test_parse_bool_fallback() {
+        let non_existent = "TEST_NON_EXISTENT_VAR_XYZ_987";
+        assert!(parse_bool(non_existent, true));
+        assert!(!parse_bool(non_existent, false));
+    }
+
+    #[test]
+    fn test_env_string_alias_fallback() {
+        let res = env_string_alias(
+            &["TEST_NON_EXISTENT_1", "TEST_NON_EXISTENT_2"],
+            "default_val",
+        );
+        assert_eq!(res, "default_val");
+    }
+}

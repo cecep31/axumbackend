@@ -177,3 +177,131 @@ pub struct CalendarQuery {
     /// Four-digit year. Defaults to the current year.
     pub year: Option<i32>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_holding_request_valid() {
+        let req = CreateHoldingRequest {
+            name: "Apple Inc.".into(),
+            symbol: Some("AAPL".into()),
+            platform: "Interactive Brokers".into(),
+            holding_type_id: 1,
+            currency: "USD".into(),
+            invested_amount: "1500.00".into(),
+            current_value: "1800.00".into(),
+            units: Some("10".into()),
+            avg_buy_price: Some("150.00".into()),
+            current_price: Some("180.00".into()),
+            last_updated: None,
+            notes: None,
+            month: 9,
+            year: 2024,
+        };
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_create_holding_request_invalid_currency() {
+        let req = CreateHoldingRequest {
+            name: "Apple".into(),
+            symbol: None,
+            platform: "Broker".into(),
+            holding_type_id: 1,
+            currency: "US".into(), // length != 3
+            invested_amount: "100".into(),
+            current_value: "100".into(),
+            units: None,
+            avg_buy_price: None,
+            current_price: None,
+            last_updated: None,
+            notes: None,
+            month: 5,
+            year: 2024,
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_create_holding_request_invalid_month_year() {
+        let req_month = CreateHoldingRequest {
+            name: "Apple".into(),
+            symbol: None,
+            platform: "Broker".into(),
+            holding_type_id: 1,
+            currency: "USD".into(),
+            invested_amount: "100".into(),
+            current_value: "100".into(),
+            units: None,
+            avg_buy_price: None,
+            current_price: None,
+            last_updated: None,
+            notes: None,
+            month: 13, // > 12
+            year: 2024,
+        };
+        assert!(req_month.validate().is_err());
+
+        let req_year = CreateHoldingRequest {
+            name: "Apple".into(),
+            symbol: None,
+            platform: "Broker".into(),
+            holding_type_id: 1,
+            currency: "USD".into(),
+            invested_amount: "100".into(),
+            current_value: "100".into(),
+            units: None,
+            avg_buy_price: None,
+            current_price: None,
+            last_updated: None,
+            notes: None,
+            month: 5,
+            year: 1999, // < 2000
+        };
+        assert!(req_year.validate().is_err());
+    }
+
+    #[test]
+    fn test_duplicate_holding_request_validation() {
+        let valid = DuplicateHoldingRequest {
+            from_month: 1,
+            from_year: 2023,
+            to_month: 2,
+            to_year: 2023,
+            overwrite: false,
+        };
+        assert!(valid.validate().is_ok());
+
+        let invalid = DuplicateHoldingRequest {
+            from_month: 0, // < 1
+            from_year: 2023,
+            to_month: 13,  // > 12
+            to_year: 2200, // > 2100
+            overwrite: false,
+        };
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn test_holding_query_parsers() {
+        let query = HoldingQuery {
+            month: Some("07".into()),
+            year: Some("2024".into()),
+            sort_by: None,
+            order: None,
+        };
+        assert_eq!(query.month(), Some(7));
+        assert_eq!(query.year(), Some(2024));
+
+        let query_invalid = HoldingQuery {
+            month: Some("99".into()),
+            year: Some("not-a-year".into()),
+            sort_by: None,
+            order: None,
+        };
+        assert_eq!(query_invalid.month(), None);
+        assert_eq!(query_invalid.year(), None);
+    }
+}

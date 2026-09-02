@@ -90,3 +90,114 @@ pub struct FailedLoginsQuery {
     #[validate(range(min = 1, max = 8760))]
     pub since_hours: Option<i64>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_register_request_valid() {
+        let req = RegisterRequest {
+            email: "user@example.com".into(),
+            username: "johndoe".into(),
+            password: "supersecret123".into(),
+        };
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_register_request_invalid_email() {
+        let req = RegisterRequest {
+            email: "not-an-email".into(),
+            username: "johndoe".into(),
+            password: "supersecret123".into(),
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_register_request_short_username() {
+        let req = RegisterRequest {
+            email: "user@example.com".into(),
+            username: "ab".into(),
+            password: "supersecret123".into(),
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_register_request_short_password() {
+        let req = RegisterRequest {
+            email: "user@example.com".into(),
+            username: "johndoe".into(),
+            password: "short".into(),
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_login_request_valid_and_invalid() {
+        let valid = LoginRequest {
+            identifier: "admin".into(),
+            password: "password123".into(),
+        };
+        assert!(valid.validate().is_ok());
+
+        let empty_identifier = LoginRequest {
+            identifier: "".into(),
+            password: "password123".into(),
+        };
+        assert!(empty_identifier.validate().is_err());
+
+        let short_password = LoginRequest {
+            identifier: "admin".into(),
+            password: "123".into(),
+        };
+        assert!(short_password.validate().is_err());
+    }
+
+    #[test]
+    fn test_reset_password_request_validation() {
+        let valid = ResetPasswordRequest {
+            token: "reset-token-123".into(),
+            password: "new-secure-password".into(),
+        };
+        assert!(valid.validate().is_ok());
+
+        let empty_token = ResetPasswordRequest {
+            token: "".into(),
+            password: "new-secure-password".into(),
+        };
+        assert!(empty_token.validate().is_err());
+
+        let short_pwd = ResetPasswordRequest {
+            token: "reset-token-123".into(),
+            password: "123".into(),
+        };
+        assert!(short_pwd.validate().is_err());
+    }
+
+    #[test]
+    fn test_activity_log_query_validation() {
+        let valid = ActivityLogQuery {
+            offset: Some(10),
+            limit: Some(25),
+            activity_type: Some("LOGIN".into()),
+        };
+        assert!(valid.validate().is_ok());
+
+        let limit_too_high = ActivityLogQuery {
+            offset: Some(0),
+            limit: Some(101),
+            activity_type: None,
+        };
+        assert!(limit_too_high.validate().is_err());
+
+        let offset_negative = ActivityLogQuery {
+            offset: Some(-1),
+            limit: Some(10),
+            activity_type: None,
+        };
+        assert!(offset_negative.validate().is_err());
+    }
+}

@@ -242,3 +242,67 @@ impl HoldingResponse {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_holding(
+        invested: Decimal,
+        current: Decimal,
+        gain_amount: Option<Decimal>,
+        gain_percent: Option<Decimal>,
+    ) -> crate::entities::holdings::Model {
+        crate::entities::holdings::Model {
+            id: 1,
+            user_id: Uuid::now_v7(),
+            name: "Apple".into(),
+            symbol: Some("AAPL".into()),
+            platform: "Broker".into(),
+            holding_type_id: 1,
+            currency: "USD".into(),
+            invested_amount: invested,
+            current_value: current,
+            gain_amount,
+            gain_percent,
+            units: None,
+            avg_buy_price: None,
+            current_price: None,
+            last_updated: None,
+            notes: None,
+            created_at: Utc::now().fixed_offset(),
+            updated_at: Utc::now().fixed_offset(),
+            month: 1,
+            year: 2024,
+        }
+    }
+
+    #[test]
+    fn test_holding_response_automatic_gain_calculation() {
+        let model = sample_holding(Decimal::new(100, 0), Decimal::new(150, 0), None, None);
+        let res = HoldingResponse::from_entity(model, None);
+        assert_eq!(res.gain_amount, "50");
+        assert_eq!(res.gain_percent, "50.00");
+    }
+
+    #[test]
+    fn test_holding_response_zero_invested_gain_percent() {
+        let model = sample_holding(Decimal::ZERO, Decimal::new(100, 0), None, None);
+        let res = HoldingResponse::from_entity(model, None);
+        assert_eq!(res.gain_amount, "100");
+        assert_eq!(res.gain_percent, "0");
+    }
+
+    #[test]
+    fn test_holding_response_explicit_gain_preserved() {
+        let model = sample_holding(
+            Decimal::new(100, 0),
+            Decimal::new(150, 0),
+            Some(Decimal::new(45, 0)),
+            Some(Decimal::new(45, 0)),
+        );
+        let res = HoldingResponse::from_entity(model, None);
+        assert_eq!(res.gain_amount, "45");
+        assert_eq!(res.gain_percent, "45");
+    }
+}
