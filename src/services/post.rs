@@ -643,14 +643,38 @@ mod tests {
 
     #[test]
     fn test_validate_order_field_mappings() {
-        assert!(matches!(validate_order_field(Some("id")), posts::Column::Id));
-        assert!(matches!(validate_order_field(Some("title")), posts::Column::Title));
-        assert!(matches!(validate_order_field(Some("updated_at")), posts::Column::UpdatedAt));
-        assert!(matches!(validate_order_field(Some("view_count")), posts::Column::ViewCount));
-        assert!(matches!(validate_order_field(Some("like_count")), posts::Column::LikeCount));
-        assert!(matches!(validate_order_field(Some("bookmark_count")), posts::Column::BookmarkCount));
-        assert!(matches!(validate_order_field(Some("unknown")), posts::Column::CreatedAt));
-        assert!(matches!(validate_order_field(None), posts::Column::CreatedAt));
+        assert!(matches!(
+            validate_order_field(Some("id")),
+            posts::Column::Id
+        ));
+        assert!(matches!(
+            validate_order_field(Some("title")),
+            posts::Column::Title
+        ));
+        assert!(matches!(
+            validate_order_field(Some("updated_at")),
+            posts::Column::UpdatedAt
+        ));
+        assert!(matches!(
+            validate_order_field(Some("view_count")),
+            posts::Column::ViewCount
+        ));
+        assert!(matches!(
+            validate_order_field(Some("like_count")),
+            posts::Column::LikeCount
+        ));
+        assert!(matches!(
+            validate_order_field(Some("bookmark_count")),
+            posts::Column::BookmarkCount
+        ));
+        assert!(matches!(
+            validate_order_field(Some("unknown")),
+            posts::Column::CreatedAt
+        ));
+        assert!(matches!(
+            validate_order_field(None),
+            posts::Column::CreatedAt
+        ));
     }
 
     #[test]

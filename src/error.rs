@@ -84,31 +84,45 @@ mod tests {
     #[test]
     fn test_app_error_status_codes() {
         assert_eq!(
-            AppError::NotFound("Not found".into()).into_response().status(),
+            AppError::NotFound("Not found".into())
+                .into_response()
+                .status(),
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            AppError::BadRequest("Bad input".into()).into_response().status(),
+            AppError::BadRequest("Bad input".into())
+                .into_response()
+                .status(),
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            AppError::Unauthorized("Invalid token".into()).into_response().status(),
+            AppError::Unauthorized("Invalid token".into())
+                .into_response()
+                .status(),
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            AppError::Forbidden("Denied".into()).into_response().status(),
+            AppError::Forbidden("Denied".into())
+                .into_response()
+                .status(),
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            AppError::Conflict("Duplicate key".into()).into_response().status(),
+            AppError::Conflict("Duplicate key".into())
+                .into_response()
+                .status(),
             StatusCode::CONFLICT
         );
         assert_eq!(
-            AppError::InternalServerError("Oops".into()).into_response().status(),
+            AppError::InternalServerError("Oops".into())
+                .into_response()
+                .status(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_eq!(
-            AppError::Database(DbErr::Custom("db error".into())).into_response().status(),
+            AppError::Database(DbErr::Custom("db error".into()))
+                .into_response()
+                .status(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_eq!(

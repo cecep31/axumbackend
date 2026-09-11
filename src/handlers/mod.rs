@@ -12,7 +12,7 @@ mod tag;
 mod user;
 
 use crate::{config::HttpConfig, database::DbPool, rate_limit};
-use axum::{Router, middleware};
+use axum::{Router, http::StatusCode, middleware};
 use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -32,7 +32,10 @@ pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<DbPool>
         .merge(report::routes())
         .merge(tag::routes())
         .merge(user::routes())
-        .layer(TimeoutLayer::new(http_config.request_timeout));
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            http_config.request_timeout,
+        ));
 
     let router = Router::new()
         .merge(api_routes)

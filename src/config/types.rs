@@ -33,7 +33,8 @@ pub const DEFAULT_OPENROUTER_DEFAULT_MODEL: &str = "openrouter/free";
 pub const DEFAULT_OPENROUTER_HTTP_REFERER: &str = "https://pilput.net";
 pub const DEFAULT_OPENROUTER_TITLE: &str = "pilput";
 pub const DEFAULT_OPENROUTER_TIMEOUT_SECS: u64 = 90;
-pub const DEFAULT_GITHUB_REDIRECT_URI: &str = "http://localhost:8080/api/auth/oauth/github/callback";
+pub const DEFAULT_GITHUB_REDIRECT_URI: &str =
+    "http://localhost:8080/api/auth/oauth/github/callback";
 pub const DEFAULT_SMTP_PORT: u16 = 587;
 pub const DEFAULT_SMTP_TIMEOUT_SECS: u64 = 10;
 pub const DEFAULT_SMTP_TASK_TIMEOUT_SECS: u64 = 30;
