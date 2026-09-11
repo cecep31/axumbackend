@@ -41,7 +41,7 @@ Recommended order: `cargo fmt && cargo clippy && cargo test`
 
 ## Docker
 
-Multi-stage Debian build (`rust:1-trixie` → `debian:trixie-slim`). Pushes to `cecep31/axumbackend` on Docker Hub via CI (`.github/workflows/docker-build.yml`). Only triggers on `main` branch pushes and version tags.
+Multi-stage Debian build using `cargo-chef` for dependency caching (`rust:1.98-trixie` → `debian:trixie-slim`). Rust version is pinned for reproducibility. Dependencies build in a cached layer; source changes don't invalidate dependency cache. Production image runs as non-root user with healthcheck on `/health` (curl). Pushes to `cecep31/axumbackend` on Docker Hub via CI (`.github/workflows/docker-build.yml`). Only triggers on `main` branch pushes and version tags.
 
 ## Known Gotchas
 
