@@ -7,7 +7,6 @@ pub struct Model {
     pub id: Uuid,
     pub created_at: Option<DateTimeWithTimeZone>,
     pub updated_at: Option<DateTimeWithTimeZone>,
-    pub deleted_at: Option<DateTimeWithTimeZone>,
     pub title: String,
     pub created_by: Uuid,
     pub body: Option<String>,

@@ -2,9 +2,10 @@ use crate::auth::AuthUser;
 use crate::config::FrontendConfig;
 use crate::database::DbPool;
 use crate::dto::auth::{
-    ActivityLogQuery, ChangePasswordRequest, FailedLoginsQuery, ForgotPasswordRequest,
-    GithubCallbackQuery, LoginRequest, LogoutRequest, OAuthExchangeRequest, RecentActivityQuery,
-    RefreshTokenRequest, RegisterRequest, ResetPasswordRequest,
+    ActivityLogQuery, ChangePasswordRequest, CheckUsernameRequest, FailedLoginsQuery,
+    ForgotPasswordRequest, GithubCallbackQuery, LoginRequest, LogoutRequest, OAuthExchangeRequest,
+    RecentActivityQuery, RefreshTokenRequest, RegisterRequest, ResetPasswordRequest,
+    UpdateProfileRequest,
 };
 use crate::error::AppError;
 use crate::extract::{VJson, VQuery};
@@ -464,6 +465,58 @@ pub async fn exchange_oauth_code(
     )))
 }
 
+/// `POST /api/auth/check-username` — mirrors echobackend's `AuthHandler.CheckUsername`.
+pub async fn check_username(
+    State(pool): State<DbPool>,
+    VJson(req): VJson<CheckUsernameRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    let exists = services::auth::check_username_exists(&pool, &req.username)
+        .await
+        .map_err(|err| map_auth_error("Failed to check username", err))?;
+
+    Ok(Json(ApiResponse::success_with_message(
+        "Username availability checked",
+        serde_json::json!({ "exists": exists }),
+    )))
+}
+
+/// `PUT /api/auth/profile` — mirrors echobackend's `AuthHandler.UpdateProfile`.
+pub async fn update_profile(
+    State(pool): State<DbPool>,
+    auth_user: AuthUser,
+    VJson(req): VJson<UpdateProfileRequest>,
+) -> Result<Json<ApiResponse<services::auth::ProfileResponse>>, AppError> {
+    let profile = services::auth::update_profile(
+        &pool,
+        auth_user.id,
+        req.username,
+        req.first_name,
+        req.last_name,
+    )
+    .await
+    .map_err(|err| map_auth_error("Failed to update profile", err))?;
+
+    Ok(Json(ApiResponse::success_with_message(
+        "Profile updated successfully",
+        profile,
+    )))
+}
+
+/// `DELETE /api/auth/account` — mirrors echobackend's `AuthHandler.DeleteAccount`.
+pub async fn delete_account(
+    State(pool): State<DbPool>,
+    auth_user: AuthUser,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    services::auth::delete_account(&pool, auth_user.id)
+        .await
+        .map_err(|err| map_auth_error("Failed to delete account", err))?;
+
+    Ok(Json(ApiResponse::success_with_message(
+        "Account deleted successfully",
+        serde_json::Value::Null,
+    )))
+}
+
 pub fn routes() -> Router<DbPool> {
     // Fixed-window auth rate limits per IP, mirroring the documented
     // echobackend limits (`docs/api/auth.md`).
@@ -475,6 +528,7 @@ pub fn routes() -> Router<DbPool> {
     let reset_password_limiter = RateLimiter::new(5, Duration::from_secs(5 * 60), trust_proxy);
     let refresh_limiter = RateLimiter::new(30, Duration::from_secs(60), trust_proxy);
     let oauth_exchange_limiter = RateLimiter::new(10, Duration::from_secs(60), trust_proxy);
+    let check_username_limiter = RateLimiter::new(20, Duration::from_secs(5 * 60), trust_proxy);
     Router::new()
         .route(
             "/api/auth/register",
@@ -504,8 +558,16 @@ pub fn routes() -> Router<DbPool> {
                 rate_limit,
             )),
         )
+        .route(
+            "/api/auth/check-username",
+            post(check_username).route_layer(middleware::from_fn_with_state(
+                check_username_limiter,
+                rate_limit,
+            )),
+        )
         .route("/api/auth/logout", post(logout))
-        .route("/api/auth/profile", get(profile))
+        .route("/api/auth/profile", get(profile).put(update_profile))
+        .route("/api/auth/account", axum::routing::delete(delete_account))
         .route("/api/auth/password", axum::routing::patch(change_password))
         .route("/api/auth/activity-logs", get(activity_logs))
         .route("/api/auth/activity-logs/recent", get(recent_activity))

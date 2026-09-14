@@ -25,7 +25,6 @@ impl From<DbErr> for CommentError {
 
 async fn post_exists(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbErr> {
     Ok(posts::Entity::find_by_id(post_id)
-        .filter(posts::Column::DeletedAt.is_null())
         .one(db)
         .await?
         .is_some())

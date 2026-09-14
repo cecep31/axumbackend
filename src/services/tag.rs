@@ -115,7 +115,7 @@ pub async fn get_trending_tags(
         INNER JOIN posts_to_tags ptt ON ptt.tag_id = t.id
         INNER JOIN posts p ON p.id = ptt.post_id
         INNER JOIN users u ON u.id = p.created_by AND u.deleted_at IS NULL
-        WHERE p.published = true AND p.deleted_at IS NULL
+        WHERE p.published = true
         GROUP BY t.id, t.name
         ORDER BY trending_score DESC, post_count DESC, t.name ASC
         LIMIT $1

@@ -2,9 +2,13 @@ use crate::auth::Claims;
 use crate::config::{GitHubConfig, JwtConfig};
 use crate::email;
 use crate::entities::{auth_activity_logs, password_reset_tokens, sessions, users};
-use bcrypt::{DEFAULT_COST, hash, verify};
+use argon2::{
+    Argon2, Params,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{EncodingKey, Header, encode};
+use rand::Rng;
 use rand::distr::{Alphanumeric, SampleString};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, ExprTrait,
@@ -74,7 +78,7 @@ pub enum AuthError {
     TokenExpired,
     TokenUsed,
     Token(jsonwebtoken::errors::Error),
-    Hash(bcrypt::BcryptError),
+    Hash(String),
     Request(reqwest::Error),
     OAuth(String),
 }
@@ -99,7 +103,7 @@ impl From<jsonwebtoken::errors::Error> for AuthError {
 
 impl From<bcrypt::BcryptError> for AuthError {
     fn from(err: bcrypt::BcryptError) -> Self {
-        Self::Hash(err)
+        Self::Hash(err.to_string())
     }
 }
 
@@ -111,6 +115,47 @@ fn generate_refresh_token() -> String {
 fn generate_prefixed_token(prefix: &str) -> String {
     let random = Alphanumeric.sample_string(&mut rand::rng(), 64);
     format!("{}_{}", prefix, random)
+}
+
+/// Hashes a password using Argon2id with OWASP-aligned parameters
+/// (memory: 64MB, time: 1 iteration, threads: 4, key_len: 32 bytes),
+/// matching echobackend's `pkg/password.Hash`.
+pub fn hash_password(password: &str) -> Result<String, AuthError> {
+    let mut salt_bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut salt_bytes);
+    let salt = SaltString::encode_b64(&salt_bytes)
+        .map_err(|e| AuthError::Hash(e.to_string()))?;
+    let params = Params::new(64 * 1024, 1, 4, Some(32))
+        .map_err(|e| AuthError::Hash(e.to_string()))?;
+    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let hash = argon2
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|e| AuthError::Hash(e.to_string()))?;
+    Ok(hash.to_string())
+}
+
+/// Verifies whether `password` matches `hashed`.
+/// Supports both Argon2id ($argon2id$) and legacy bcrypt ($2a$, $2b$, $2y$).
+/// Returns `(is_valid, needs_rehash)`.
+pub fn verify_password(hashed: &str, password: &str) -> (bool, bool) {
+    if hashed.starts_with("$argon2id$") {
+        if let Ok(parsed_hash) = PasswordHash::new(hashed) {
+            let argon2 = Argon2::default();
+            let valid = argon2
+                .verify_password(password.as_bytes(), &parsed_hash)
+                .is_ok();
+            return (valid, false);
+        }
+        return (false, false);
+    }
+
+    if hashed.starts_with("$2a$") || hashed.starts_with("$2b$") || hashed.starts_with("$2y$") {
+        if let Ok(valid) = bcrypt::verify(password, hashed) {
+            return (valid, valid);
+        }
+    }
+
+    (false, false)
 }
 
 fn make_user_brief(user: &users::Model) -> UserBrief {
@@ -248,7 +293,7 @@ pub async fn register(
         return Err(AuthError::UserExists);
     }
 
-    let hashed = hash(password, DEFAULT_COST)?;
+    let hashed = hash_password(&password)?;
     let user = users::ActiveModel {
         id: Set(Uuid::now_v7()),
         email: Set(email),
@@ -326,7 +371,8 @@ pub async fn login(
         return Err(AuthError::InvalidCredentials);
     };
 
-    if !verify(password, hashed_password)? {
+    let (is_valid, needs_rehash) = verify_password(hashed_password, password);
+    if !is_valid {
         log_activity(
             db,
             Some(user.id),
@@ -344,6 +390,11 @@ pub async fn login(
     let response = create_token_and_session(db, &user, user_agent.clone()).await?;
     let mut active: users::ActiveModel = user.clone().into();
     active.last_logged_at = Set(Some(Utc::now().into()));
+    if needs_rehash {
+        if let Ok(new_hash) = hash_password(password) {
+            active.password = Set(Some(new_hash));
+        }
+    }
     let _ = active.update(db).await;
     log_activity(
         db,
@@ -359,7 +410,7 @@ pub async fn login(
     Ok(response)
 }
 
-pub async fn check_username_availability(
+pub async fn check_username_exists(
     db: &DatabaseConnection,
     username: &str,
 ) -> Result<bool, AuthError> {
@@ -370,7 +421,84 @@ pub async fn check_username_availability(
         .await?
         .is_some();
 
+    Ok(exists)
+}
+
+pub async fn check_username_availability(
+    db: &DatabaseConnection,
+    username: &str,
+) -> Result<bool, AuthError> {
+    let exists = check_username_exists(db, username).await?;
     Ok(!exists)
+}
+
+pub async fn update_profile(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    username: String,
+    first_name: Option<String>,
+    last_name: Option<String>,
+) -> Result<ProfileResponse, AuthError> {
+    let user = users::Entity::find_by_id(user_id)
+        .filter(users::Column::DeletedAt.is_null())
+        .one(db)
+        .await?
+        .ok_or(AuthError::InvalidToken)?;
+
+    // Check username uniqueness if changed
+    if user.username.as_deref() != Some(&username) {
+        let existing = users::Entity::find()
+            .filter(users::Column::Username.eq(&username))
+            .filter(users::Column::Id.ne(user_id))
+            .filter(users::Column::DeletedAt.is_null())
+            .one(db)
+            .await?;
+        if existing.is_some() {
+            return Err(AuthError::UserExists);
+        }
+    }
+
+    let mut active: users::ActiveModel = user.clone().into();
+    active.username = Set(Some(username.clone()));
+    active.first_name = Set(first_name.clone());
+    active.last_name = Set(last_name.clone());
+    active.updated_at = Set(Some(Utc::now().into()));
+    let updated = active.update(db).await?;
+
+    Ok(ProfileResponse {
+        id: updated.id,
+        email: updated.email,
+        username: updated.username,
+        first_name: updated.first_name,
+        last_name: updated.last_name,
+        image: updated.image,
+        is_super_admin: updated.is_super_admin,
+        followers_count: updated.followers_count.unwrap_or_default(),
+        following_count: updated.following_count.unwrap_or_default(),
+    })
+}
+
+pub async fn delete_account(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+) -> Result<(), AuthError> {
+    let user = users::Entity::find_by_id(user_id)
+        .filter(users::Column::DeletedAt.is_null())
+        .one(db)
+        .await?
+        .ok_or(AuthError::InvalidToken)?;
+
+    let mut active: users::ActiveModel = user.into();
+    active.deleted_at = Set(Some(Utc::now().into()));
+    active.updated_at = Set(Some(Utc::now().into()));
+    active.update(db).await?;
+
+    let _ = sessions::Entity::delete_many()
+        .filter(sessions::Column::UserId.eq(user_id))
+        .exec(db)
+        .await;
+
+    Ok(())
 }
 
 pub async fn check_email_availability(
@@ -566,7 +694,7 @@ pub async fn reset_password(
         .await?
         .ok_or(AuthError::InvalidToken)?;
 
-    let hashed = hash(password, DEFAULT_COST)?;
+    let hashed = hash_password(password)?;
     let mut active_user: users::ActiveModel = user.clone().into();
     active_user.password = Set(Some(hashed));
     active_user.updated_at = Set(Some(Utc::now().into()));
@@ -612,7 +740,8 @@ pub async fn change_password(
         return Err(AuthError::InvalidCredentials);
     };
 
-    if !verify(current_password, hashed_password)? {
+    let (is_valid, _) = verify_password(hashed_password, current_password);
+    if !is_valid {
         log_activity(
             db,
             Some(user.id),
@@ -627,7 +756,7 @@ pub async fn change_password(
         return Err(AuthError::InvalidCredentials);
     }
 
-    let hashed = hash(new_password, DEFAULT_COST)?;
+    let hashed = hash_password(new_password)?;
     let mut active_user: users::ActiveModel = user.clone().into();
     active_user.password = Set(Some(hashed));
     active_user.updated_at = Set(Some(Utc::now().into()));
@@ -968,4 +1097,59 @@ pub fn exchange_oauth_code(code: &str) -> Result<AuthTokenResponse, AuthError> {
         .remove(code)
         .map(|entry| entry.response)
         .ok_or(AuthError::InvalidToken)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_argon2id_hash_and_verify() {
+        let password = "SecretPassword123!";
+        let hashed = hash_password(password).expect("hashing should succeed");
+        assert!(hashed.starts_with("$argon2id$"));
+
+        let (valid, needs_rehash) = verify_password(&hashed, password);
+        assert!(valid);
+        assert!(!needs_rehash);
+
+        let (invalid, _) = verify_password(&hashed, "WrongPassword");
+        assert!(!invalid);
+    }
+
+    #[test]
+    fn test_legacy_bcrypt_verify_and_rehash_flag() {
+        let password = "LegacyBcryptPassword123!";
+        let bcrypt_hash = bcrypt::hash(password, 4).expect("bcrypt hash should succeed");
+        assert!(bcrypt_hash.starts_with("$2"));
+
+        let (valid, needs_rehash) = verify_password(&bcrypt_hash, password);
+        assert!(valid);
+        assert!(needs_rehash);
+
+        let (invalid, _) = verify_password(&bcrypt_hash, "WrongPassword");
+        assert!(!invalid);
+    }
+
+    #[test]
+    fn test_oauth_exchange_roundtrip() {
+        let token_resp = AuthTokenResponse {
+            access_token: "access-123".into(),
+            refresh_token: "pl_test".into(),
+            user: UserBrief {
+                id: Uuid::now_v7(),
+                email: "test@example.com".into(),
+                username: Some("testuser".into()),
+            },
+        };
+        let code = create_oauth_exchange_code(token_resp);
+        assert!(code.starts_with("oc_"));
+
+        let redeemed = exchange_oauth_code(&code).expect("should exchange successfully");
+        assert_eq!(redeemed.access_token, "access-123");
+
+        // Second exchange should fail (single-use)
+        let second = exchange_oauth_code(&code);
+        assert!(matches!(second, Err(AuthError::InvalidToken)));
+    }
 }

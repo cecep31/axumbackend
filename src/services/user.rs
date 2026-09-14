@@ -220,3 +220,108 @@ pub async fn restore(db: &DatabaseConnection, id: Uuid) -> Result<UserResponse, 
 
     Ok(hydrate_user(db, restored_user, UserView::Admin).await?)
 }
+
+#[derive(Debug)]
+pub enum UserError {
+    Db(DbErr),
+    NotFound,
+    UserExists,
+    InvalidData(String),
+}
+
+impl From<DbErr> for UserError {
+    fn from(err: DbErr) -> Self {
+        Self::Db(err)
+    }
+}
+
+pub async fn create_user(
+    db: &DatabaseConnection,
+    req: crate::dto::user::CreateUserRequest,
+) -> Result<UserResponse, UserError> {
+    let email_exists = users::Entity::find()
+        .filter(users::Column::Email.eq(&req.email))
+        .one(db)
+        .await?
+        .is_some();
+    if email_exists {
+        return Err(UserError::UserExists);
+    }
+
+    let username_exists = users::Entity::find()
+        .filter(users::Column::Username.eq(&req.username))
+        .one(db)
+        .await?
+        .is_some();
+    if username_exists {
+        return Err(UserError::UserExists);
+    }
+
+    let hashed = crate::services::auth::hash_password(&req.password)
+        .map_err(|e| UserError::InvalidData(format!("{e:?}")))?;
+
+    let new_user = users::ActiveModel {
+        id: Set(Uuid::now_v7()),
+        email: Set(req.email),
+        username: Set(Some(req.username)),
+        password: Set(Some(hashed)),
+        first_name: Set(req.first_name),
+        last_name: Set(req.last_name),
+        created_at: Set(Some(Utc::now().into())),
+        updated_at: Set(Some(Utc::now().into())),
+        ..Default::default()
+    }
+    .insert(db)
+    .await?;
+
+    Ok(hydrate_user(db, new_user, UserView::Admin).await?)
+}
+
+pub async fn update_user(
+    db: &DatabaseConnection,
+    id: Uuid,
+    req: crate::dto::user::UpdateUserRequest,
+) -> Result<UserResponse, UserError> {
+    let user = users::Entity::find_by_id(id)
+        .filter(users::Column::DeletedAt.is_null())
+        .one(db)
+        .await?
+        .ok_or(UserError::NotFound)?;
+
+    if user.email != req.email {
+        let email_taken = users::Entity::find()
+            .filter(users::Column::Email.eq(&req.email))
+            .filter(users::Column::Id.ne(id))
+            .one(db)
+            .await?
+            .is_some();
+        if email_taken {
+            return Err(UserError::UserExists);
+        }
+    }
+
+    if user.username.as_deref() != Some(&req.username) {
+        let username_taken = users::Entity::find()
+            .filter(users::Column::Username.eq(&req.username))
+            .filter(users::Column::Id.ne(id))
+            .one(db)
+            .await?
+            .is_some();
+        if username_taken {
+            return Err(UserError::UserExists);
+        }
+    }
+
+    let mut active = user.into_active_model();
+    active.email = Set(req.email);
+    active.username = Set(Some(req.username));
+    active.first_name = Set(req.first_name);
+    active.last_name = Set(req.last_name);
+    if let Some(is_super_admin) = req.is_super_admin {
+        active.is_super_admin = Set(Some(is_super_admin));
+    }
+    active.updated_at = Set(Some(Utc::now().into()));
+    let updated = active.update(db).await?;
+
+    Ok(hydrate_user(db, updated, UserView::Admin).await?)
+}

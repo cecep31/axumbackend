@@ -122,7 +122,7 @@ pub async fn user_report(
     let rows = ContributorRow::find_by_statement(Statement::from_string(
         DbBackend::Postgres,
         format!(
-            "SELECT users.id, users.username, users.first_name, users.last_name, COUNT(posts.id)::bigint AS post_count, COALESCE(SUM(posts.view_count), 0)::bigint AS total_views, COALESCE(SUM(posts.like_count), 0)::bigint AS total_likes FROM users LEFT JOIN posts ON users.id = posts.created_by AND posts.deleted_at IS NULL GROUP BY users.id, users.username, users.first_name, users.last_name ORDER BY COUNT(posts.id) DESC LIMIT {}",
+            "SELECT users.id, users.username, users.first_name, users.last_name, COUNT(posts.id)::bigint AS post_count, COALESCE(SUM(posts.view_count), 0)::bigint AS total_views, COALESCE(SUM(posts.like_count), 0)::bigint AS total_likes FROM users LEFT JOIN posts ON users.id = posts.created_by WHERE users.deleted_at IS NULL GROUP BY users.id, users.username, users.first_name, users.last_name ORDER BY COUNT(posts.id) DESC LIMIT {}",
             limit
         ),
     ))

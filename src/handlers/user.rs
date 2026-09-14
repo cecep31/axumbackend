@@ -2,7 +2,8 @@ use crate::auth::{AdminUser, AuthUser};
 use crate::database::DbPool;
 use crate::dto::common::{PaginationQuery, UsernamePath};
 use crate::dto::user::{
-    FollowRequest, UserDeletedFilter, UserDetailQuery, UserIdPath, UserListQuery,
+    CreateUserRequest, FollowRequest, UpdateUserRequest, UserDeletedFilter, UserDetailQuery,
+    UserIdPath, UserListQuery,
 };
 use crate::error::AppError;
 use crate::extract::{VJson, VPath, VQuery};
@@ -12,9 +13,21 @@ use crate::response::ApiResponse;
 use crate::services;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, Multipart, State},
+    http::StatusCode,
     routing::{delete, get, post},
 };
+
+fn map_user_error(err: services::user::UserError) -> AppError {
+    match err {
+        services::user::UserError::Db(err) => AppError::from(err),
+        services::user::UserError::NotFound => AppError::NotFound("User not found".to_string()),
+        services::user::UserError::UserExists => {
+            AppError::Conflict("Email or username already exists".to_string())
+        }
+        services::user::UserError::InvalidData(msg) => AppError::BadRequest(msg),
+    }
+}
 
 fn map_follow_error(err: services::user_follow::UserFollowError) -> AppError {
     match err {
@@ -245,10 +258,95 @@ pub async fn get_mutual_follows(
     )))
 }
 
+fn detect_allowed_avatar(data: &[u8]) -> bool {
+    let is_jpeg = data.len() >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF;
+    let is_png = data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1a\n";
+    let is_gif = data.len() >= 6 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a");
+    let is_webp = data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP";
+    is_jpeg || is_png || is_gif || is_webp
+}
+
+pub async fn upload_avatar(
+    _auth_user: AuthUser,
+    mut multipart: Multipart,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    const MAX_AVATAR_SIZE: usize = 5 * 1024 * 1024;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|err| AppError::BadRequest(format!("Failed to upload image: {err}")))?
+    {
+        if field.name() != Some("avatar") {
+            continue;
+        }
+
+        let data = field
+            .bytes()
+            .await
+            .map_err(|err| AppError::BadRequest(format!("Failed to read image: {err}")))?;
+        if data.len() > MAX_AVATAR_SIZE {
+            return Err(AppError::BadRequest("File is too large".to_string()));
+        }
+        if !detect_allowed_avatar(&data) {
+            return Err(AppError::BadRequest("Invalid file type".to_string()));
+        }
+
+        return Err(AppError::BadRequest(
+            "Storage is not configured".to_string(),
+        ));
+    }
+
+    Err(AppError::BadRequest("No file uploaded".to_string()))
+}
+
+pub async fn create_user(
+    State(pool): State<DbPool>,
+    _admin_user: AdminUser,
+    VJson(req): VJson<CreateUserRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<UserResponse>>), AppError> {
+    let user = services::user::create_user(&pool, req)
+        .await
+        .map_err(map_user_error)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::success_with_message(
+            "User created successfully",
+            user,
+        )),
+    ))
+}
+
+pub async fn update_user(
+    State(pool): State<DbPool>,
+    _admin_user: AdminUser,
+    VPath(params): VPath<UserIdPath>,
+    VJson(req): VJson<UpdateUserRequest>,
+) -> Result<Json<ApiResponse<UserResponse>>, AppError> {
+    let user = services::user::update_user(&pool, params.id, req)
+        .await
+        .map_err(|err| match err {
+            services::user::UserError::UserExists => {
+                AppError::Conflict("Email or username already taken".to_string())
+            }
+            other => map_user_error(other),
+        })?;
+
+    Ok(Json(ApiResponse::success_with_message(
+        "User updated successfully",
+        user,
+    )))
+}
+
 pub fn routes() -> Router<DbPool> {
     Router::new()
-        .route("/api/users", get(get_users))
+        .route("/api/users", get(get_users).post(create_user))
         .route("/api/users/me", get(get_me))
+        .route(
+            "/api/users/me/image",
+            post(upload_avatar).route_layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
+        )
         .route("/api/users/username/{username}", get(get_by_username))
         .route("/api/users/follow", post(follow_user))
         .route("/api/users/{id}/follow", delete(unfollow_user))
@@ -258,5 +356,8 @@ pub fn routes() -> Router<DbPool> {
         .route("/api/users/{id}/following", get(get_following))
         .route("/api/users/{id}/follow-stats", get(get_follow_stats))
         .route("/api/users/{id}/restore", post(restore_user))
-        .route("/api/users/{id}", get(get_by_id).delete(delete_user))
+        .route(
+            "/api/users/{id}",
+            get(get_by_id).put(update_user).delete(delete_user),
+        )
 }

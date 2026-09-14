@@ -26,7 +26,6 @@ impl From<DbErr> for PostViewError {
 
 async fn post_exists(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbErr> {
     Ok(posts::Entity::find_by_id(post_id)
-        .filter(posts::Column::DeletedAt.is_null())
         .one(db)
         .await?
         .is_some())
@@ -236,7 +235,7 @@ pub async fn get_my_posts_analytics(
         SELECT to_char(DATE(pv.created_at), 'YYYY-MM-DD') AS date,
                COUNT(*)::bigint AS count
         FROM post_views pv
-        INNER JOIN posts p ON p.id = pv.post_id AND p.deleted_at IS NULL
+        INNER JOIN posts p ON p.id = pv.post_id
         WHERE p.created_by = $1
           AND pv.deleted_at IS NULL
           AND DATE(pv.created_at) >= $2
@@ -259,7 +258,7 @@ pub async fn get_my_posts_analytics(
         r#"
         SELECT COUNT(*)::bigint AS count
         FROM post_views pv
-        INNER JOIN posts p ON p.id = pv.post_id AND p.deleted_at IS NULL
+        INNER JOIN posts p ON p.id = pv.post_id
         WHERE p.created_by = $1
           AND pv.deleted_at IS NULL
           AND DATE(pv.created_at) < $2
@@ -341,7 +340,7 @@ pub async fn get_my_posts_likes_by_month(
         SELECT to_char(date_trunc('month', pl.created_at), 'YYYY-MM') AS month,
                COUNT(*)::bigint AS count
         FROM post_likes pl
-        INNER JOIN posts p ON p.id = pl.post_id AND p.deleted_at IS NULL
+        INNER JOIN posts p ON p.id = pl.post_id
         WHERE p.created_by = $1
           AND pl.created_at >= $2
           AND pl.created_at < $3

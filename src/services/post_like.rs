@@ -27,7 +27,6 @@ impl From<DbErr> for PostLikeError {
 
 async fn post_exists(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbErr> {
     Ok(posts::Entity::find_by_id(post_id)
-        .filter(posts::Column::DeletedAt.is_null())
         .one(db)
         .await?
         .is_some())
@@ -37,7 +36,6 @@ async fn like_exists(db: &DatabaseConnection, post_id: Uuid, user_id: Uuid) -> R
     Ok(post_likes::Entity::find()
         .filter(post_likes::Column::PostId.eq(post_id))
         .filter(post_likes::Column::UserId.eq(user_id))
-        .filter(post_likes::Column::DeletedAt.is_null())
         .one(db)
         .await?
         .is_some())
@@ -77,7 +75,6 @@ pub async fn like_post(
         user_id: Set(user_id),
         created_at: Set(Some(now.into())),
         updated_at: Set(Some(now.into())),
-        deleted_at: Set(None),
     }
     .insert(db)
     .await?;
@@ -97,7 +94,6 @@ pub async fn unlike_post(
     let result = post_likes::Entity::delete_many()
         .filter(post_likes::Column::PostId.eq(post_id))
         .filter(post_likes::Column::UserId.eq(user_id))
-        .filter(post_likes::Column::DeletedAt.is_null())
         .exec(db)
         .await?;
 
@@ -119,8 +115,7 @@ pub async fn get_likes_by_post_id(
     }
 
     let query = post_likes::Entity::find()
-        .filter(post_likes::Column::PostId.eq(post_id))
-        .filter(post_likes::Column::DeletedAt.is_null());
+        .filter(post_likes::Column::PostId.eq(post_id));
 
     let total = query.clone().count(db).await? as i64;
     let like_models = query
@@ -154,7 +149,6 @@ pub async fn get_like_stats(
 
     let total_likes = post_likes::Entity::find()
         .filter(post_likes::Column::PostId.eq(post_id))
-        .filter(post_likes::Column::DeletedAt.is_null())
         .count(db)
         .await? as i64;
 

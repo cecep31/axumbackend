@@ -59,6 +59,22 @@ pub struct OAuthExchangeRequest {
     pub code: String,
 }
 
+#[derive(Deserialize, Validate)]
+pub struct CheckUsernameRequest {
+    #[validate(length(min = 3, max = 30))]
+    pub username: String,
+}
+
+#[derive(Deserialize, Validate)]
+pub struct UpdateProfileRequest {
+    #[validate(length(min = 3, max = 30))]
+    pub username: String,
+    #[validate(length(max = 100))]
+    pub first_name: Option<String>,
+    #[validate(length(max = 100))]
+    pub last_name: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct GithubCallbackQuery {
     pub code: Option<String>,
@@ -199,5 +215,47 @@ mod tests {
             activity_type: None,
         };
         assert!(offset_negative.validate().is_err());
+    }
+
+    #[test]
+    fn test_check_username_request_validation() {
+        let valid = CheckUsernameRequest {
+            username: "johndoe".into(),
+        };
+        assert!(valid.validate().is_ok());
+
+        let short = CheckUsernameRequest {
+            username: "ab".into(),
+        };
+        assert!(short.validate().is_err());
+
+        let long = CheckUsernameRequest {
+            username: "a".repeat(31),
+        };
+        assert!(long.validate().is_err());
+    }
+
+    #[test]
+    fn test_update_profile_request_validation() {
+        let valid = UpdateProfileRequest {
+            username: "johndoe".into(),
+            first_name: Some("John".into()),
+            last_name: Some("Doe".into()),
+        };
+        assert!(valid.validate().is_ok());
+
+        let short_username = UpdateProfileRequest {
+            username: "jo".into(),
+            first_name: None,
+            last_name: None,
+        };
+        assert!(short_username.validate().is_err());
+
+        let long_name = UpdateProfileRequest {
+            username: "johndoe".into(),
+            first_name: Some("a".repeat(101)),
+            last_name: None,
+        };
+        assert!(long_name.validate().is_err());
     }
 }

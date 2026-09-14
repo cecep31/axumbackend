@@ -127,7 +127,6 @@ pub async fn get_all_posts(
     // echobackend's `activePostUserJoin`: posts by soft-deleted users are hidden.
     let mut query = posts::Entity::find()
         .join(JoinType::InnerJoin, posts::Relation::Users.def())
-        .filter(posts::Column::DeletedAt.is_null())
         .filter(users::Column::DeletedAt.is_null());
 
     if let Some(search) = filter.search.map(str::trim).filter(|s| !s.is_empty()) {
@@ -189,10 +188,7 @@ pub async fn get_post_by_id(
     db: &DatabaseConnection,
     id: uuid::Uuid,
 ) -> Result<Option<Post>, DbErr> {
-    let post = posts::Entity::find_by_id(id)
-        .filter(posts::Column::DeletedAt.is_null())
-        .one(db)
-        .await?;
+    let post = posts::Entity::find_by_id(id).one(db).await?;
 
     match post {
         Some(post) => {
@@ -224,8 +220,7 @@ pub async fn get_posts_by_username(
     // surfaces the user's unpublished/draft posts publicly.
     let query = user
         .clone()
-        .find_related(posts::Entity)
-        .filter(posts::Column::DeletedAt.is_null());
+        .find_related(posts::Entity);
 
     let total = query.clone().count(db).await? as i64;
     let post_models = query
@@ -245,8 +240,7 @@ pub async fn get_posts_by_created_by(
     limit: i64,
 ) -> Result<(Vec<Post>, i64), DbErr> {
     let query = posts::Entity::find()
-        .filter(posts::Column::CreatedBy.eq(user_id))
-        .filter(posts::Column::DeletedAt.is_null());
+        .filter(posts::Column::CreatedBy.eq(user_id));
 
     let total = query.clone().count(db).await? as i64;
     let post_models = query
@@ -276,7 +270,6 @@ pub async fn get_posts_for_you(
 
     let query = posts::Entity::find()
         .filter(posts::Column::Published.eq(true))
-        .filter(posts::Column::DeletedAt.is_null())
         .filter(
             posts::Column::CreatedBy
                 .eq(user_id)
@@ -301,7 +294,6 @@ pub async fn get_post_by_id_for_author(
 ) -> Result<Option<Post>, DbErr> {
     let post = posts::Entity::find_by_id(post_id)
         .filter(posts::Column::CreatedBy.eq(user_id))
-        .filter(posts::Column::DeletedAt.is_null())
         .one(db)
         .await?;
 
@@ -318,7 +310,6 @@ pub async fn get_post_by_id_for_author(
 pub async fn get_random_posts(db: &DatabaseConnection, limit: i64) -> Result<Vec<Post>, DbErr> {
     let post_models = posts::Entity::find()
         .filter(posts::Column::Published.eq(true))
-        .filter(posts::Column::DeletedAt.is_null())
         .order_by(sea_orm::sea_query::Expr::cust("RANDOM()"), Order::Asc)
         .limit(Ord::max(limit, 0) as u64)
         .all(db)
@@ -330,7 +321,6 @@ pub async fn get_random_posts(db: &DatabaseConnection, limit: i64) -> Result<Vec
 pub async fn get_trending_posts(db: &DatabaseConnection, limit: i64) -> Result<Vec<Post>, DbErr> {
     let post_models = posts::Entity::find()
         .filter(posts::Column::Published.eq(true))
-        .filter(posts::Column::DeletedAt.is_null())
         .order_by(
             sea_orm::sea_query::Expr::cust("like_count * 2 + bookmark_count * 2 + view_count"),
             Order::Desc,
@@ -348,7 +338,6 @@ pub async fn get_posts_for_sitemap(
 ) -> Result<Vec<SitemapPost>, DbErr> {
     let post_models = posts::Entity::find()
         .filter(posts::Column::Published.eq(true))
-        .filter(posts::Column::DeletedAt.is_null())
         .order_by_desc(posts::Column::CreatedAt)
         .limit(Ord::max(limit, 0) as u64)
         .all(db)
@@ -395,7 +384,6 @@ pub async fn get_post_by_username_and_slug(
         .find_related(posts::Entity)
         .filter(posts::Column::Slug.eq(slug))
         .filter(posts::Column::Published.eq(true))
-        .filter(posts::Column::DeletedAt.is_null())
         .one(db)
         .await?;
 
@@ -521,7 +509,6 @@ pub async fn is_author(
     user_id: uuid::Uuid,
 ) -> Result<Option<bool>, DbErr> {
     let post = posts::Entity::find_by_id(post_id)
-        .filter(posts::Column::DeletedAt.is_null())
         .one(db)
         .await?;
 
@@ -534,7 +521,6 @@ pub async fn update_post(
     input: UpdatePostInput,
 ) -> Result<Option<Post>, DbErr> {
     let Some(post) = posts::Entity::find_by_id(post_id)
-        .filter(posts::Column::DeletedAt.is_null())
         .one(db)
         .await?
     else {
@@ -568,20 +554,13 @@ pub async fn update_post(
     Ok(Some(hydrate_post(&post, user, tags, false).await?))
 }
 
-pub async fn soft_delete_post(db: &DatabaseConnection, post_id: uuid::Uuid) -> Result<bool, DbErr> {
-    let Some(post) = posts::Entity::find_by_id(post_id)
-        .filter(posts::Column::DeletedAt.is_null())
-        .one(db)
-        .await?
-    else {
-        return Ok(false);
-    };
+pub async fn delete_post(db: &DatabaseConnection, post_id: uuid::Uuid) -> Result<bool, DbErr> {
+    let result = posts::Entity::delete_by_id(post_id).exec(db).await?;
+    Ok(result.rows_affected > 0)
+}
 
-    let mut active = post.into_active_model();
-    active.deleted_at = Set(Some(Utc::now().into()));
-    active.updated_at = Set(Some(Utc::now().into()));
-    active.update(db).await?;
-    Ok(true)
+pub async fn soft_delete_post(db: &DatabaseConnection, post_id: uuid::Uuid) -> Result<bool, DbErr> {
+    delete_post(db, post_id).await
 }
 
 pub async fn get_posts_by_tag(
@@ -604,8 +583,7 @@ pub async fn get_posts_by_tag(
 
     let query = tag
         .find_related(posts::Entity)
-        .filter(posts::Column::Published.eq(true))
-        .filter(posts::Column::DeletedAt.is_null());
+        .filter(posts::Column::Published.eq(true));
 
     let total = query.clone().count(db).await? as i64;
     let post_models = query
