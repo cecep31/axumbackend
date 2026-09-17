@@ -24,6 +24,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = config::Config::from_env();
+    config
+        .validate()
+        .map_err(|e| format!("Invalid configuration: {}", e))?;
+
     config::JwtConfig::init(config.jwt.clone());
     config::EmailConfig::init(config.email.clone());
     config::FrontendConfig::init(config.frontend.clone());
@@ -42,8 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         })?;
     tracing::info!(
-        "Database connection pool created (max_size: {}, timeout: {:?})",
+        "Database connection pool created (max_size: {}, min_idle: {}, timeout: {:?})",
         config.db_pool.max_size,
+        config.db_pool.min_idle,
         config.db_pool.connection_timeout
     );
 

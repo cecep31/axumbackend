@@ -12,8 +12,11 @@ pub async fn create_pool(
     let mut options = ConnectOptions::new(database_url.to_string());
     options
         .max_connections(pool_config.max_size as u32)
+        .min_connections(pool_config.min_idle as u32)
         .connect_timeout(pool_config.connection_timeout)
-        .acquire_timeout(pool_config.connection_timeout);
+        .acquire_timeout(pool_config.connection_timeout)
+        .max_lifetime(Some(pool_config.max_lifetime))
+        .idle_timeout(Some(pool_config.idle_timeout));
 
     Database::connect(options).await
 }

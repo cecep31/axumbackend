@@ -6,11 +6,15 @@ use std::time::Duration;
 
 pub const DEFAULT_PORT: u16 = 8080;
 pub const DEFAULT_DATABASE_URL: &str = "postgresql://postgres:postgres@localhost:5432/axumbackend";
-pub const DEFAULT_POOL_MAX_SIZE: usize = 20;
+pub const DEFAULT_POOL_MAX_SIZE: usize = 25;
+pub const DEFAULT_POOL_MAX_IDLE: usize = 25;
+pub const DEFAULT_POOL_CONN_LIFETIME_SECS: u64 = 15 * 60;
+pub const DEFAULT_POOL_CONN_IDLE_TIME_SECS: u64 = 5 * 60;
 pub const DEFAULT_CONNECTION_TIMEOUT_SECS: u64 = 30;
 pub const DEFAULT_JWT_SECRET: &str = "your-secret-key";
-pub const DEFAULT_JWT_EXPIRY_HOURS: i64 = 3;
-pub const DEFAULT_REFRESH_TOKEN_EXPIRY_DAYS: i64 = 30;
+pub const DEFAULT_JWT_EXPIRY_SECS: u64 = 15 * 60;
+pub const DEFAULT_JWT_EXPIRY_HOURS: i64 = 0;
+pub const DEFAULT_REFRESH_TOKEN_EXPIRY_DAYS: i64 = 7;
 pub const DEFAULT_EMAIL_FROM: &str = "noreply@pilput.net";
 pub const DEFAULT_FRONTEND_URL: &str = "http://localhost:3000";
 pub const DEFAULT_FRONTEND_OAUTH_CALLBACK_URL: &str = "http://localhost:3000/auth/callback";
@@ -68,13 +72,17 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
     pub max_size: usize,
+    pub min_idle: usize,
     pub connection_timeout: Duration,
+    pub max_lifetime: Duration,
+    pub idle_timeout: Duration,
 }
 
 /// JWT authentication configuration
 #[derive(Debug, Clone)]
 pub struct JwtConfig {
     pub secret: String,
+    pub expiry: Duration,
     pub expiry_hours: i64,
     pub refresh_token_expiry_days: i64,
 }
@@ -162,7 +170,8 @@ pub struct GitHubConfig {
 /// External financial market data provider configuration.
 #[derive(Debug, Clone)]
 pub struct MarketConfig {
-    /// RapidAPI key for the Indonesia Stock Exchange (IDX) corporate-actions API.
-    /// Leave empty to disable IDX corporate-action fetching (returns empty results).
+    /// RapidAPI key for financial data providers (IDX calendar, quotes).
+    pub rapidapi_key: String,
+    /// RapidAPI key specifically for the Indonesia Stock Exchange (IDX) corporate-actions API.
     pub rapidapi_idx_key: String,
 }

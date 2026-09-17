@@ -239,7 +239,9 @@ async fn create_token_and_session(
 ) -> Result<AuthTokenResponse, AuthError> {
     let now = Utc::now();
     let jwt = JwtConfig::get();
-    let exp = now + Duration::hours(jwt.expiry_hours);
+    let expiry_duration =
+        Duration::from_std(jwt.expiry).unwrap_or_else(|_| Duration::minutes(15));
+    let exp = now + expiry_duration;
     let claims = Claims {
         user_id: user.id,
         username: user.username.clone(),

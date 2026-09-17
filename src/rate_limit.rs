@@ -88,9 +88,9 @@ pub async fn rate_limit(
         Err(retry_after) => {
             let body = Json(ApiResponse::<serde_json::Value> {
                 success: false,
-                message: "Too many requests".to_string(),
+                message: "Too many attempts. Please try again later.".to_string(),
                 data: None,
-                error: Some("Too many requests. Please try again later.".to_string()),
+                error: Some("Rate limit exceeded".to_string()),
                 errors: None,
                 meta: None,
             });

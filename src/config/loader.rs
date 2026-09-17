@@ -55,6 +55,113 @@ pub fn parse_usize(key: &str, default: usize) -> usize {
         .unwrap_or_else(|_| panic!("{key} must be a valid usize number"))
 }
 
+pub fn parse_usize_alias(keys: &[&str], default: usize) -> usize {
+    keys.iter()
+        .find_map(|key| env::var(key).ok())
+        .unwrap_or_else(|| default.to_string())
+        .parse::<usize>()
+        .unwrap_or_else(|_| panic!("{} must be a valid usize number", keys.join(" or ")))
+}
+
+/// Parse a human-readable duration string into std::time::Duration.
+///
+/// Supports Go-style duration formats such as "15m", "1h", "30s", "500ms", "1d", "1h30m",
+/// or plain numbers interpreted as seconds (e.g. "900").
+pub fn parse_duration(raw: &str) -> Result<Duration, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("empty duration string".to_string());
+    }
+
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Ok(Duration::from_secs(secs));
+    }
+
+    let mut total_millis: u64 = 0;
+    let mut num_buf = String::new();
+    let mut chars = raw.chars().peekable();
+
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() || c == '.' {
+            num_buf.push(c);
+            chars.next();
+        } else if c.is_alphabetic() || c == 'µ' {
+            let mut unit_buf = String::new();
+            while let Some(&u) = chars.peek() {
+                if u.is_alphabetic() || u == 'µ' {
+                    unit_buf.push(u);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+
+            if num_buf.is_empty() {
+                return Err(format!("missing number before unit '{unit_buf}' in '{raw}'"));
+            }
+
+            let val: f64 = num_buf
+                .parse()
+                .map_err(|_| format!("invalid numeric value in duration: '{num_buf}'"))?;
+            num_buf.clear();
+
+            let unit = unit_buf.to_ascii_lowercase();
+            let millis = match unit.as_str() {
+                "d" => val * 86_400_000.0,
+                "h" => val * 3_600_000.0,
+                "m" => val * 60_000.0,
+                "s" => val * 1_000.0,
+                "ms" => val,
+                "us" | "µs" => val / 1_000.0,
+                "ns" => val / 1_000_000.0,
+                _ => return Err(format!("unknown duration unit '{unit}' in '{raw}'")),
+            };
+            total_millis = total_millis.saturating_add(millis.round() as u64);
+        } else if c.is_whitespace() {
+            chars.next();
+        } else {
+            return Err(format!("unexpected character '{c}' in duration '{raw}'"));
+        }
+    }
+
+    if !num_buf.is_empty() {
+        let val: u64 = num_buf
+            .parse()
+            .map_err(|_| format!("invalid numeric value in duration: '{num_buf}'"))?;
+        total_millis = total_millis.saturating_add(val * 1000);
+    }
+
+    Ok(Duration::from_millis(total_millis))
+}
+
+pub fn parse_duration_alias(keys: &[&str], default: Duration) -> Duration {
+    for key in keys {
+        if let Ok(value) = env::var(key) {
+            let val = value.trim();
+            if !val.is_empty() {
+                if let Ok(d) = parse_duration(val) {
+                    return d;
+                }
+            }
+        }
+    }
+    default
+}
+
+pub fn resolve_jwt_expiry(default_duration: Duration) -> Duration {
+    if let Ok(val) = env::var("JWT_EXPIRY") {
+        if let Ok(d) = parse_duration(&val) {
+            return d;
+        }
+    }
+    if let Ok(val) = env::var("JWT_EXPIRY_HOURS") {
+        if let Ok(hours) = val.trim().parse::<u64>() {
+            return Duration::from_secs(hours * 3600);
+        }
+    }
+    default_duration
+}
+
 /// Parse an environment variable as i64 with default fallback.
 pub fn parse_i64(key: &str, default: i64) -> i64 {
     env::var(key)
@@ -157,20 +264,46 @@ impl Config {
 impl PoolConfig {
     pub fn from_env() -> Self {
         Self {
-            max_size: parse_usize("DB_POOL_MAX_SIZE", DEFAULT_POOL_MAX_SIZE),
-            connection_timeout: Duration::from_secs(parse_u64(
-                "DB_POOL_CONNECTION_TIMEOUT",
-                DEFAULT_CONNECTION_TIMEOUT_SECS,
-            )),
+            max_size: parse_usize_alias(
+                &["DB_POOL_MAX_OPEN", "DB_POOL_MAX_SIZE", "MAX_OPEN_CONNS"],
+                DEFAULT_POOL_MAX_SIZE,
+            ),
+            min_idle: parse_usize_alias(
+                &["DB_POOL_MAX_IDLE", "MAX_IDLE_CONNS", "DB_POOL_MIN_IDLE"],
+                DEFAULT_POOL_MAX_IDLE,
+            ),
+            connection_timeout: parse_duration_alias(
+                &["DB_POOL_CONNECTION_TIMEOUT"],
+                Duration::from_secs(DEFAULT_CONNECTION_TIMEOUT_SECS),
+            ),
+            max_lifetime: parse_duration_alias(
+                &[
+                    "DB_POOL_CONN_LIFETIME",
+                    "CONN_MAX_LIFETIME",
+                    "DB_POOL_MAX_LIFETIME",
+                ],
+                Duration::from_secs(DEFAULT_POOL_CONN_LIFETIME_SECS),
+            ),
+            idle_timeout: parse_duration_alias(
+                &[
+                    "DB_POOL_CONN_IDLE_TIME",
+                    "CONN_MAX_IDLE_TIME",
+                    "DB_POOL_IDLE_TIMEOUT",
+                ],
+                Duration::from_secs(DEFAULT_POOL_CONN_IDLE_TIME_SECS),
+            ),
         }
     }
 }
 
 impl JwtConfig {
     pub fn from_env() -> Self {
+        let expiry = resolve_jwt_expiry(Duration::from_secs(DEFAULT_JWT_EXPIRY_SECS));
+        let expiry_hours = (expiry.as_secs() / 3600) as i64;
         Self {
             secret: env::var("JWT_SECRET").unwrap_or_else(|_| DEFAULT_JWT_SECRET.to_string()),
-            expiry_hours: parse_i64("JWT_EXPIRY_HOURS", DEFAULT_JWT_EXPIRY_HOURS),
+            expiry,
+            expiry_hours,
             refresh_token_expiry_days: parse_i64(
                 "REFRESH_TOKEN_EXPIRY_DAYS",
                 DEFAULT_REFRESH_TOKEN_EXPIRY_DAYS,
@@ -276,12 +409,12 @@ impl S3Config {
 impl CacheConfig {
     pub fn from_env() -> Self {
         Self {
-            valkey_url: env::var("VALKEY_URL").unwrap_or_default(),
+            valkey_url: env_string_alias(&["REDIS_URL", "VALKEY_URL"], ""),
             key_prefix: env::var("CACHE_KEY_PREFIX")
                 .unwrap_or_else(|_| DEFAULT_CACHE_KEY_PREFIX.to_string()),
             ttl: Duration::from_secs(parse_u64("CACHE_TTL_SECONDS", DEFAULT_CACHE_TTL_SECS)),
-            connect_timeout: Duration::from_millis(parse_u64(
-                "VALKEY_CONNECT_TIMEOUT_MS",
+            connect_timeout: Duration::from_millis(parse_u64_alias(
+                &["REDIS_CONNECT_TIMEOUT_MS", "VALKEY_CONNECT_TIMEOUT_MS"],
                 DEFAULT_VALKEY_CONNECT_TIMEOUT_MS,
             )),
         }
@@ -290,13 +423,17 @@ impl CacheConfig {
 
 impl QueueConfig {
     pub fn from_env() -> Self {
-        let valkey_url = env::var("VALKEY_URL").unwrap_or_default();
+        let default_redis_url = env_string_alias(&["REDIS_URL", "VALKEY_URL"], "");
         Self {
-            redis_url: env_string_alias(&["QUEUE_REDIS_URL", "ASYNQ_REDIS_URL"], &valkey_url),
+            redis_url: env_string_alias(
+                &["QUEUE_REDIS_URL", "ASYNQ_REDIS_URL", "REDIS_URL", "VALKEY_URL"],
+                &default_redis_url,
+            ),
             connect_timeout: Duration::from_millis(parse_u64_alias(
                 &[
                     "QUEUE_REDIS_TIMEOUT_MS",
                     "ASYNQ_REDIS_TIMEOUT_MS",
+                    "REDIS_CONNECT_TIMEOUT_MS",
                     "VALKEY_CONNECT_TIMEOUT_MS",
                 ],
                 DEFAULT_VALKEY_CONNECT_TIMEOUT_MS,
@@ -342,9 +479,46 @@ impl GitHubConfig {
 
 impl MarketConfig {
     pub fn from_env() -> Self {
+        let key = env_string_alias(
+            &["RAPIDAPI_KEY", "RAPIDAPI_IDX_KEY", "RAPIDAPI_QUOTE_KEY"],
+            "",
+        );
         Self {
-            rapidapi_idx_key: env::var("RAPIDAPI_IDX_KEY").unwrap_or_default(),
+            rapidapi_key: key.clone(),
+            rapidapi_idx_key: key,
         }
+    }
+}
+
+impl Config {
+    /// Validates cross-section invariants and required configuration fields,
+    /// matching echobackend's Config.validate().
+    pub fn validate(&self) -> Result<(), String> {
+        if self.jwt.secret.is_empty() {
+            return Err("JWT_SECRET is required".to_string());
+        }
+        if self.jwt.secret.len() < 32 {
+            return Err("JWT_SECRET must be at least 32 characters long".to_string());
+        }
+        if self.jwt.expiry.is_zero() {
+            return Err("JWT_EXPIRY (or legacy JWT_EXPIRY_HOURS) must be > 0".to_string());
+        }
+        if self.jwt.refresh_token_expiry_days <= 0 {
+            return Err("REFRESH_TOKEN_EXPIRY_DAYS must be > 0".to_string());
+        }
+        if self.database_url.is_empty() {
+            return Err("DATABASE_URL is required".to_string());
+        }
+        if self.email.smtp_port == 0 {
+            return Err("SMTP_PORT must be between 1 and 65535".to_string());
+        }
+        if self.email.smtp_timeout.is_zero() {
+            return Err("SMTP_TIMEOUT_SECONDS must be > 0".to_string());
+        }
+        if self.email.smtp_task_timeout.is_zero() {
+            return Err("SMTP_TASK_TIMEOUT_SECONDS must be > 0".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -398,5 +572,26 @@ mod tests {
             "default_val",
         );
         assert_eq!(res, "default_val");
+    }
+
+    #[test]
+    fn test_parse_duration() {
+        assert_eq!(parse_duration("15m").unwrap(), Duration::from_secs(15 * 60));
+        assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
+        assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
+        assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
+        assert_eq!(parse_duration("1h30m").unwrap(), Duration::from_secs(5400));
+        assert_eq!(parse_duration("900").unwrap(), Duration::from_secs(900));
+        assert!(parse_duration("").is_err());
+    }
+
+    #[test]
+    fn test_config_validate_jwt_secret_length() {
+        let mut cfg = Config::from_env();
+        cfg.jwt.secret = "too-short".to_string();
+        assert!(cfg.validate().is_err());
+
+        cfg.jwt.secret = "this-is-a-valid-jwt-secret-with-at-least-32-chars".to_string();
+        assert!(cfg.validate().is_ok());
     }
 }
