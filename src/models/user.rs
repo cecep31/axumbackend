@@ -223,5 +223,9 @@ mod tests {
         assert_eq!(admin.email, Some("alice@example.com".into()));
         assert_eq!(admin.is_super_admin, Some(true));
         assert_eq!(admin.is_following, Some(true));
+        assert!(admin.profile.is_none());
+
+        let json = serde_json::to_string(&admin).unwrap();
+        assert!(!json.contains("\"profile\":"));
     }
 }
