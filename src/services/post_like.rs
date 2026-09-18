@@ -26,10 +26,7 @@ impl From<DbErr> for PostLikeError {
 }
 
 async fn post_exists(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbErr> {
-    Ok(posts::Entity::find_by_id(post_id)
-        .one(db)
-        .await?
-        .is_some())
+    Ok(posts::Entity::find_by_id(post_id).one(db).await?.is_some())
 }
 
 async fn like_exists(db: &DatabaseConnection, post_id: Uuid, user_id: Uuid) -> Result<bool, DbErr> {
@@ -114,8 +111,7 @@ pub async fn get_likes_by_post_id(
         return Err(PostLikeError::PostNotFound);
     }
 
-    let query = post_likes::Entity::find()
-        .filter(post_likes::Column::PostId.eq(post_id));
+    let query = post_likes::Entity::find().filter(post_likes::Column::PostId.eq(post_id));
 
     let total = query.clone().count(db).await? as i64;
     let like_models = query

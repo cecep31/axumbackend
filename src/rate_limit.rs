@@ -15,12 +15,19 @@ use axum::{
 
 use crate::response::ApiResponse;
 
+const MAX_RATE_LIMITER_ENTRIES: usize = 20_000;
+
 #[derive(Clone)]
 pub struct RateLimiter {
-    inner: Arc<Mutex<HashMap<RateLimitKey, Window>>>,
+    inner: Arc<Mutex<RateLimiterInner>>,
     max_requests: u32,
     window: Duration,
     trust_proxy: bool,
+}
+
+struct RateLimiterInner {
+    windows: HashMap<RateLimitKey, Window>,
+    last_cleanup: Instant,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -37,7 +44,10 @@ struct Window {
 impl RateLimiter {
     pub fn new(max_requests: u32, window: Duration, trust_proxy: bool) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(RateLimiterInner {
+                windows: HashMap::new(),
+                last_cleanup: Instant::now(),
+            })),
             max_requests,
             window,
             trust_proxy,
@@ -46,10 +56,41 @@ impl RateLimiter {
 
     fn check(&self, key: RateLimitKey) -> Result<(), u64> {
         let now = Instant::now();
-        let mut windows = self.inner.lock().expect("rate limiter lock poisoned");
-        windows.retain(|_, window| now.duration_since(window.started_at) < self.window);
+        let mut inner = self.inner.lock().expect("rate limiter lock poisoned");
 
-        let window = windows.entry(key).or_insert_with(|| Window {
+        // Periodically or upon reaching capacity, prune expired windows and shrink map capacity
+        let cleanup_interval = self.window.min(Duration::from_secs(5));
+        let should_cleanup = now.duration_since(inner.last_cleanup) >= cleanup_interval
+            || inner.windows.len() >= MAX_RATE_LIMITER_ENTRIES;
+
+        if should_cleanup {
+            inner
+                .windows
+                .retain(|_, window| now.duration_since(window.started_at) < self.window);
+
+            if inner.windows.capacity() > 128 && inner.windows.len() * 4 < inner.windows.capacity()
+            {
+                let min_cap = inner.windows.len().max(32);
+                inner.windows.shrink_to(min_cap);
+            }
+
+            inner.last_cleanup = now;
+        }
+
+        // If map is still at capacity (e.g. active DDoS with many unique URLs/IPs),
+        // evict the oldest window to ensure memory stays bounded
+        if inner.windows.len() >= MAX_RATE_LIMITER_ENTRIES
+            && !inner.windows.contains_key(&key)
+            && let Some(oldest_key) = inner
+                .windows
+                .iter()
+                .min_by_key(|(_, w)| w.started_at)
+                .map(|(k, _)| k.clone())
+        {
+            inner.windows.remove(&oldest_key);
+        }
+
+        let window = inner.windows.entry(key).or_insert_with(|| Window {
             started_at: now,
             requests: 0,
         });
@@ -201,7 +242,7 @@ mod tests {
         let res = limiter.check(key.clone());
         assert!(res.is_err());
         let retry_after = res.unwrap_err();
-        assert!(retry_after >= 1 && retry_after <= 60);
+        assert!((1..=60).contains(&retry_after));
     }
 
     #[test]
@@ -243,5 +284,31 @@ mod tests {
 
         // Should be allowed again after window expires
         assert!(limiter.check(key).is_ok());
+    }
+
+    #[test]
+    fn test_rate_limiter_eviction_and_cleanup() {
+        let limiter = RateLimiter::new(10, Duration::from_millis(50), false);
+        for i in 0..50 {
+            let key = RateLimitKey {
+                path: format!("/api/posts/{}", i),
+                client: "127.0.0.1".into(),
+            };
+            assert!(limiter.check(key).is_ok());
+        }
+
+        // Wait for window to expire
+        thread::sleep(Duration::from_millis(60));
+
+        // Next check triggers cleanup
+        let new_key = RateLimitKey {
+            path: "/api/posts/new".into(),
+            client: "127.0.0.1".into(),
+        };
+        assert!(limiter.check(new_key).is_ok());
+
+        let inner = limiter.inner.lock().unwrap();
+        // Expired items should be pruned down
+        assert!(inner.windows.len() <= 2);
     }
 }

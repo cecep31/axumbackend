@@ -218,9 +218,7 @@ pub async fn get_posts_by_username(
 
     // echobackend's GetPostByUsername has no `published` filter — it also
     // surfaces the user's unpublished/draft posts publicly.
-    let query = user
-        .clone()
-        .find_related(posts::Entity);
+    let query = user.clone().find_related(posts::Entity);
 
     let total = query.clone().count(db).await? as i64;
     let post_models = query
@@ -239,8 +237,7 @@ pub async fn get_posts_by_created_by(
     offset: i64,
     limit: i64,
 ) -> Result<(Vec<Post>, i64), DbErr> {
-    let query = posts::Entity::find()
-        .filter(posts::Column::CreatedBy.eq(user_id));
+    let query = posts::Entity::find().filter(posts::Column::CreatedBy.eq(user_id));
 
     let total = query.clone().count(db).await? as i64;
     let post_models = query
@@ -336,29 +333,41 @@ pub async fn get_posts_for_sitemap(
     db: &DatabaseConnection,
     limit: i64,
 ) -> Result<Vec<SitemapPost>, DbErr> {
-    let post_models = posts::Entity::find()
-        .filter(posts::Column::Published.eq(true))
-        .order_by_desc(posts::Column::CreatedAt)
-        .limit(Ord::max(limit, 0) as u64)
+    #[derive(FromQueryResult)]
+    struct SitemapRow {
+        username: Option<String>,
+        slug: String,
+        created_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+        updated_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    }
+
+    let rows: Vec<SitemapRow> =
+        SitemapRow::find_by_statement(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            r#"
+            SELECT
+                u.username,
+                p.slug,
+                p.created_at,
+                p.updated_at
+            FROM posts p
+            INNER JOIN users u ON u.id = p.created_by
+            WHERE p.published = true AND u.deleted_at IS NULL
+            ORDER BY p.created_at DESC
+            LIMIT $1
+            "#,
+            vec![Ord::max(limit, 0).into()],
+        ))
         .all(db)
         .await?;
 
-    let users_by_id: std::collections::HashMap<uuid::Uuid, users::Model> = users::Entity::find()
-        .filter(users::Column::Id.is_in(post_models.iter().map(|post| post.created_by)))
-        .filter(users::Column::DeletedAt.is_null())
-        .all(db)
-        .await?
+    let sitemap = rows
         .into_iter()
-        .map(|user| (user.id, user))
-        .collect();
-
-    let sitemap = post_models
-        .into_iter()
-        .filter_map(|post| {
-            users_by_id
-                .get(&post.created_by)
-                .cloned()
-                .map(|user| SitemapPost::from_entities(post, user))
+        .map(|row| SitemapPost {
+            username: row.username,
+            slug: row.slug,
+            created_at: row.created_at.map(|dt| dt.with_timezone(&Utc)),
+            updated_at: row.updated_at.map(|dt| dt.with_timezone(&Utc)),
         })
         .collect();
 
@@ -508,9 +517,7 @@ pub async fn is_author(
     post_id: uuid::Uuid,
     user_id: uuid::Uuid,
 ) -> Result<Option<bool>, DbErr> {
-    let post = posts::Entity::find_by_id(post_id)
-        .one(db)
-        .await?;
+    let post = posts::Entity::find_by_id(post_id).one(db).await?;
 
     Ok(post.map(|post| post.created_by == user_id))
 }
@@ -520,10 +527,7 @@ pub async fn update_post(
     post_id: uuid::Uuid,
     input: UpdatePostInput,
 ) -> Result<Option<Post>, DbErr> {
-    let Some(post) = posts::Entity::find_by_id(post_id)
-        .one(db)
-        .await?
-    else {
+    let Some(post) = posts::Entity::find_by_id(post_id).one(db).await? else {
         return Ok(None);
     };
 

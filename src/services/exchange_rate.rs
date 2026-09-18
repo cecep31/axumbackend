@@ -28,20 +28,45 @@ impl From<reqwest::Error> for ExchangeRateError {
     }
 }
 
+const MAX_EXCHANGE_RATE_CACHE_ENTRIES: usize = 200;
+
 fn cache_get(from: &str, to: &str) -> Option<ExchangeRateResponse> {
-    let cache = CACHE.lock().unwrap();
-    let (stored_at, response) = cache.get(&(from.to_string(), to.to_string()))?;
-    if stored_at.elapsed() < CACHE_TTL {
-        let mut response = response.clone();
-        response.cached = true;
-        Some(response)
-    } else {
-        None
+    let mut cache = CACHE.lock().unwrap();
+    let key = (from.to_string(), to.to_string());
+    if let Some((stored_at, response)) = cache.get(&key) {
+        if stored_at.elapsed() < CACHE_TTL {
+            let mut response = response.clone();
+            response.cached = true;
+            return Some(response);
+        }
+        // Entry is expired; remove it to free heap memory
+        cache.remove(&key);
     }
+    None
 }
 
 fn cache_set(from: &str, to: &str, response: ExchangeRateResponse) {
     let mut cache = CACHE.lock().unwrap();
+
+    // Prune all expired entries
+    cache.retain(|_, (stored_at, _)| stored_at.elapsed() < CACHE_TTL);
+
+    // Reclaim heap memory if capacity is disproportionately large
+    if cache.capacity() > 64 && cache.len() * 4 < cache.capacity() {
+        let min_cap = cache.len().max(16);
+        cache.shrink_to(min_cap);
+    }
+
+    // Evict oldest entry if at capacity limit
+    if cache.len() >= MAX_EXCHANGE_RATE_CACHE_ENTRIES
+        && let Some(oldest_key) = cache
+            .iter()
+            .min_by_key(|(_, (stored_at, _))| *stored_at)
+            .map(|(k, _)| k.clone())
+    {
+        cache.remove(&oldest_key);
+    }
+
     cache.insert(
         (from.to_string(), to.to_string()),
         (Instant::now(), response),
@@ -187,4 +212,75 @@ struct SparkResultResponse {
 #[serde(rename_all = "camelCase")]
 struct SparkMeta {
     regular_market_price: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_currency_code() {
+        assert!(valid_currency_code("USD"));
+        assert!(valid_currency_code("IDR"));
+        assert!(!valid_currency_code("usd"));
+        assert!(!valid_currency_code("US"));
+        assert!(!valid_currency_code("USDT"));
+        assert!(!valid_currency_code("123"));
+    }
+
+    #[test]
+    fn test_normalize_currency_code() {
+        assert_eq!(normalize_currency_code("  usd  "), "USD");
+        assert_eq!(normalize_currency_code("idr"), "IDR");
+    }
+
+    #[test]
+    fn test_cache_set_and_get() {
+        let resp = ExchangeRateResponse {
+            from: "USD".into(),
+            to: "IDR".into(),
+            symbol: "USDIDR=X".into(),
+            rate: 16000.0,
+            source: "Yahoo Finance".into(),
+            cached: false,
+            fetched_at: Utc::now().to_rfc3339(),
+        };
+
+        cache_set("USD", "IDR", resp);
+        let cached = cache_get("USD", "IDR");
+        assert!(cached.is_some());
+        let cached = cached.unwrap();
+        assert!(cached.cached);
+        assert_eq!(cached.rate, 16000.0);
+    }
+
+    #[test]
+    fn test_cache_expired_entry_removal() {
+        let resp = ExchangeRateResponse {
+            from: "EUR".into(),
+            to: "GBP".into(),
+            symbol: "EURGBP=X".into(),
+            rate: 0.85,
+            source: "Yahoo Finance".into(),
+            cached: false,
+            fetched_at: Utc::now().to_rfc3339(),
+        };
+
+        // Insert manually with expired timestamp
+        {
+            let mut cache = CACHE.lock().unwrap();
+            cache.insert(
+                ("EUR".into(), "GBP".into()),
+                (Instant::now() - CACHE_TTL - Duration::from_secs(10), resp),
+            );
+        }
+
+        // cache_get should return None and remove the expired key
+        assert!(cache_get("EUR", "GBP").is_none());
+
+        {
+            let cache = CACHE.lock().unwrap();
+            assert!(!cache.contains_key(&("EUR".into(), "GBP".into())));
+        }
+    }
 }

@@ -23,10 +23,7 @@ impl From<DbErr> for BookmarkError {
 }
 
 async fn post_exists(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbErr> {
-    Ok(posts::Entity::find_by_id(post_id)
-        .one(db)
-        .await?
-        .is_some())
+    Ok(posts::Entity::find_by_id(post_id).one(db).await?.is_some())
 }
 
 async fn folder_count(db: &DatabaseConnection, folder_id: Uuid) -> Result<i64, DbErr> {

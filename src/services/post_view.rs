@@ -9,7 +9,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait,
     FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, Statement,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -25,10 +25,7 @@ impl From<DbErr> for PostViewError {
 }
 
 async fn post_exists(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbErr> {
-    Ok(posts::Entity::find_by_id(post_id)
-        .one(db)
-        .await?
-        .is_some())
+    Ok(posts::Entity::find_by_id(post_id).one(db).await?.is_some())
 }
 
 async fn has_user_viewed(
@@ -115,27 +112,41 @@ pub async fn get_view_stats(
         return Err(PostViewError::PostNotFound);
     }
 
-    let views = post_views::Entity::find()
-        .filter(post_views::Column::PostId.eq(post_id))
-        .filter(post_views::Column::DeletedAt.is_null())
-        .all(db)
-        .await?;
+    #[derive(FromQueryResult)]
+    struct ViewStatsRow {
+        total_views: i64,
+        authenticated_views: i64,
+        unique_views: i64,
+    }
 
-    let total_views = views.len() as i64;
-    let authenticated_views = views.iter().filter(|view| view.user_id.is_some()).count() as i64;
-    let anonymous_views = total_views - authenticated_views;
-    let unique_views = views
-        .iter()
-        .filter_map(|view| view.user_id)
-        .collect::<HashSet<_>>()
-        .len() as i64;
+    let row = ViewStatsRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"
+        SELECT
+            COUNT(*)::bigint AS total_views,
+            COUNT(user_id)::bigint AS authenticated_views,
+            COUNT(DISTINCT user_id)::bigint AS unique_views
+        FROM post_views
+        WHERE post_id = $1 AND deleted_at IS NULL
+        "#,
+        vec![post_id.into()],
+    ))
+    .one(db)
+    .await?
+    .unwrap_or(ViewStatsRow {
+        total_views: 0,
+        authenticated_views: 0,
+        unique_views: 0,
+    });
+
+    let anonymous_views = row.total_views - row.authenticated_views;
 
     Ok(PostViewStats {
         post_id,
-        total_views,
-        unique_views,
+        total_views: row.total_views,
+        unique_views: row.unique_views,
         anonymous_views,
-        authenticated_views,
+        authenticated_views: row.authenticated_views,
     })
 }
 

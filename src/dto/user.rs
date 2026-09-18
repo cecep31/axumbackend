@@ -80,11 +80,26 @@ mod tests {
 
     #[test]
     fn test_user_deleted_filter_parse() {
-        assert_eq!(UserDeletedFilter::parse(None), Ok(UserDeletedFilter::Active));
-        assert_eq!(UserDeletedFilter::parse(Some("")), Ok(UserDeletedFilter::Active));
-        assert_eq!(UserDeletedFilter::parse(Some("false")), Ok(UserDeletedFilter::Active));
-        assert_eq!(UserDeletedFilter::parse(Some("true")), Ok(UserDeletedFilter::Only));
-        assert_eq!(UserDeletedFilter::parse(Some("all")), Ok(UserDeletedFilter::All));
+        assert_eq!(
+            UserDeletedFilter::parse(None),
+            Ok(UserDeletedFilter::Active)
+        );
+        assert_eq!(
+            UserDeletedFilter::parse(Some("")),
+            Ok(UserDeletedFilter::Active)
+        );
+        assert_eq!(
+            UserDeletedFilter::parse(Some("false")),
+            Ok(UserDeletedFilter::Active)
+        );
+        assert_eq!(
+            UserDeletedFilter::parse(Some("true")),
+            Ok(UserDeletedFilter::Only)
+        );
+        assert_eq!(
+            UserDeletedFilter::parse(Some("all")),
+            Ok(UserDeletedFilter::All)
+        );
         assert!(UserDeletedFilter::parse(Some("invalid")).is_err());
     }
 

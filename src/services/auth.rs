@@ -123,10 +123,9 @@ fn generate_prefixed_token(prefix: &str) -> String {
 pub fn hash_password(password: &str) -> Result<String, AuthError> {
     let mut salt_bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut salt_bytes);
-    let salt = SaltString::encode_b64(&salt_bytes)
-        .map_err(|e| AuthError::Hash(e.to_string()))?;
-    let params = Params::new(64 * 1024, 1, 4, Some(32))
-        .map_err(|e| AuthError::Hash(e.to_string()))?;
+    let salt = SaltString::encode_b64(&salt_bytes).map_err(|e| AuthError::Hash(e.to_string()))?;
+    let params =
+        Params::new(64 * 1024, 1, 4, Some(32)).map_err(|e| AuthError::Hash(e.to_string()))?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let hash = argon2
         .hash_password(password.as_bytes(), &salt)
@@ -239,8 +238,7 @@ async fn create_token_and_session(
 ) -> Result<AuthTokenResponse, AuthError> {
     let now = Utc::now();
     let jwt = JwtConfig::get();
-    let expiry_duration =
-        Duration::from_std(jwt.expiry).unwrap_or_else(|_| Duration::minutes(15));
+    let expiry_duration = Duration::from_std(jwt.expiry).unwrap_or_else(|_| Duration::minutes(15));
     let exp = now + expiry_duration;
     let claims = Claims {
         user_id: user.id,
@@ -480,10 +478,7 @@ pub async fn update_profile(
     })
 }
 
-pub async fn delete_account(
-    db: &DatabaseConnection,
-    user_id: Uuid,
-) -> Result<(), AuthError> {
+pub async fn delete_account(db: &DatabaseConnection, user_id: Uuid) -> Result<(), AuthError> {
     let user = users::Entity::find_by_id(user_id)
         .filter(users::Column::DeletedAt.is_null())
         .one(db)

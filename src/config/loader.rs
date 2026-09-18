@@ -97,7 +97,9 @@ pub fn parse_duration(raw: &str) -> Result<Duration, String> {
             }
 
             if num_buf.is_empty() {
-                return Err(format!("missing number before unit '{unit_buf}' in '{raw}'"));
+                return Err(format!(
+                    "missing number before unit '{unit_buf}' in '{raw}'"
+                ));
             }
 
             let val: f64 = num_buf
@@ -426,7 +428,12 @@ impl QueueConfig {
         let default_redis_url = env_string_alias(&["REDIS_URL", "VALKEY_URL"], "");
         Self {
             redis_url: env_string_alias(
-                &["QUEUE_REDIS_URL", "ASYNQ_REDIS_URL", "REDIS_URL", "VALKEY_URL"],
+                &[
+                    "QUEUE_REDIS_URL",
+                    "ASYNQ_REDIS_URL",
+                    "REDIS_URL",
+                    "VALKEY_URL",
+                ],
                 &default_redis_url,
             ),
             connect_timeout: Duration::from_millis(parse_u64_alias(
