@@ -4,11 +4,10 @@ use crate::email;
 use crate::entities::{auth_activity_logs, password_reset_tokens, sessions, users};
 use argon2::{
     Argon2, Params,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 use chrono::{Duration, Utc};
 use jsonwebtoken::{EncodingKey, Header, encode};
-use rand::Rng;
 use rand::distr::{Alphanumeric, SampleString};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, ExprTrait,
@@ -121,14 +120,11 @@ fn generate_prefixed_token(prefix: &str) -> String {
 /// (memory: 64MB, time: 1 iteration, threads: 4, key_len: 32 bytes),
 /// matching echobackend's `pkg/password.Hash`.
 pub fn hash_password(password: &str) -> Result<String, AuthError> {
-    let mut salt_bytes = [0u8; 16];
-    rand::rng().fill_bytes(&mut salt_bytes);
-    let salt = SaltString::encode_b64(&salt_bytes).map_err(|e| AuthError::Hash(e.to_string()))?;
     let params =
         Params::new(64 * 1024, 1, 4, Some(32)).map_err(|e| AuthError::Hash(e.to_string()))?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let hash = argon2
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map_err(|e| AuthError::Hash(e.to_string()))?;
     Ok(hash.to_string())
 }
@@ -148,10 +144,10 @@ pub fn verify_password(hashed: &str, password: &str) -> (bool, bool) {
         return (false, false);
     }
 
-    if hashed.starts_with("$2a$") || hashed.starts_with("$2b$") || hashed.starts_with("$2y$") {
-        if let Ok(valid) = bcrypt::verify(password, hashed) {
-            return (valid, valid);
-        }
+    if (hashed.starts_with("$2a$") || hashed.starts_with("$2b$") || hashed.starts_with("$2y$"))
+        && let Ok(valid) = bcrypt::verify(password, hashed)
+    {
+        return (valid, valid);
     }
 
     (false, false)
@@ -390,10 +386,8 @@ pub async fn login(
     let response = create_token_and_session(db, &user, user_agent.clone()).await?;
     let mut active: users::ActiveModel = user.clone().into();
     active.last_logged_at = Set(Some(Utc::now().into()));
-    if needs_rehash {
-        if let Ok(new_hash) = hash_password(password) {
-            active.password = Set(Some(new_hash));
-        }
+    if needs_rehash && let Ok(new_hash) = hash_password(password) {
+        active.password = Set(Some(new_hash));
     }
     let _ = active.update(db).await;
     log_activity(

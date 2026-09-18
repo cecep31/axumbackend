@@ -140,10 +140,10 @@ pub fn parse_duration_alias(keys: &[&str], default: Duration) -> Duration {
     for key in keys {
         if let Ok(value) = env::var(key) {
             let val = value.trim();
-            if !val.is_empty() {
-                if let Ok(d) = parse_duration(val) {
-                    return d;
-                }
+            if !val.is_empty()
+                && let Ok(d) = parse_duration(val)
+            {
+                return d;
             }
         }
     }
@@ -151,15 +151,15 @@ pub fn parse_duration_alias(keys: &[&str], default: Duration) -> Duration {
 }
 
 pub fn resolve_jwt_expiry(default_duration: Duration) -> Duration {
-    if let Ok(val) = env::var("JWT_EXPIRY") {
-        if let Ok(d) = parse_duration(&val) {
-            return d;
-        }
+    if let Ok(val) = env::var("JWT_EXPIRY")
+        && let Ok(d) = parse_duration(&val)
+    {
+        return d;
     }
-    if let Ok(val) = env::var("JWT_EXPIRY_HOURS") {
-        if let Ok(hours) = val.trim().parse::<u64>() {
-            return Duration::from_secs(hours * 3600);
-        }
+    if let Ok(val) = env::var("JWT_EXPIRY_HOURS")
+        && let Ok(hours) = val.trim().parse::<u64>()
+    {
+        return Duration::from_secs(hours * 3600);
     }
     default_duration
 }
