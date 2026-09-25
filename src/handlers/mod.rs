@@ -14,7 +14,11 @@ mod user;
 
 use crate::{config::HttpConfig, database::DbPool, middleware as mw, rate_limit};
 use axum::{Router, extract::DefaultBodyLimit, http::StatusCode, middleware};
-use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
+use tower_http::{
+    timeout::TimeoutLayer,
+    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+};
+use tracing::Level;
 
 pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<DbPool> {
     let http_config = HttpConfig::get();
@@ -45,7 +49,13 @@ pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<DbPool>
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn(mw::security_headers))
         .layer(mw::cors(http_config))
-        .layer(TraceLayer::new_for_http());
+        // tower-http logs at DEBUG by default, which the default `info` filter
+        // hides; log one INFO line per request (method, uri, status, latency).
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        );
 
     if let Some(limiter) = limiter {
         router.layer(middleware::from_fn_with_state(
