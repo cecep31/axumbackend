@@ -11,7 +11,7 @@ use jsonwebtoken::{EncodingKey, Header, encode};
 use rand::distr::{Alphanumeric, SampleString};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, ExprTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, prelude::DateTimeWithTimeZone,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -248,6 +248,7 @@ async fn create_token_and_session(
     db: &DatabaseConnection,
     user: &users::Model,
     user_agent: Option<String>,
+    family: Option<(Uuid, DateTimeWithTimeZone)>,
 ) -> Result<AuthTokenResponse, AuthError> {
     let now = Utc::now();
     let jwt = JwtConfig::get();
@@ -269,14 +270,19 @@ async fn create_token_and_session(
     )?;
 
     let refresh_token = generate_refresh_token();
+    let expires_at = now + Duration::days(jwt.refresh_token_expiry_days);
+    // A refresh stays in its login's family and keeps the original absolute
+    // deadline; a fresh login starts a new family.
+    let (family_id, absolute_expires_at) =
+        family.unwrap_or_else(|| (Uuid::now_v7(), expires_at.into()));
     let session = sessions::ActiveModel {
         refresh_token: Set(refresh_token.clone()),
         user_id: Set(user.id),
         created_at: Set(Some(now.into())),
         user_agent: Set(user_agent),
-        expires_at: Set(Some(
-            (now + Duration::days(jwt.refresh_token_expiry_days)).into(),
-        )),
+        expires_at: Set(Some(expires_at.into())),
+        family_id: Set(family_id),
+        absolute_expires_at: Set(absolute_expires_at),
     };
     session.insert(db).await?;
 
@@ -400,7 +406,7 @@ pub async fn login(
         return Err(AuthError::InvalidCredentials);
     }
 
-    let response = create_token_and_session(db, &user, user_agent.clone()).await?;
+    let response = create_token_and_session(db, &user, user_agent.clone(), None).await?;
     let mut active: users::ActiveModel = user.clone().into();
     active.last_logged_at = Set(Some(Utc::now().into()));
     if needs_rehash && let Ok(new_hash) = hash_password_async(password).await {
@@ -533,9 +539,11 @@ pub async fn refresh_token(
         .await?
         .ok_or(AuthError::InvalidToken)?;
 
-    if let Some(expires_at) = session.expires_at
-        && expires_at.with_timezone(&Utc) < Utc::now()
-    {
+    let now = Utc::now();
+    let idle_expired = session
+        .expires_at
+        .is_some_and(|expires_at| expires_at.with_timezone(&Utc) < now);
+    if idle_expired || session.absolute_expires_at.with_timezone(&Utc) < now {
         let _ = sessions::Entity::delete_by_id(refresh_token.to_string())
             .exec(db)
             .await;
@@ -551,7 +559,13 @@ pub async fn refresh_token(
     sessions::Entity::delete_by_id(refresh_token.to_string())
         .exec(db)
         .await?;
-    let response = create_token_and_session(db, &user, user_agent.clone()).await?;
+    let response = create_token_and_session(
+        db,
+        &user,
+        user_agent.clone(),
+        Some((session.family_id, session.absolute_expires_at)),
+    )
+    .await?;
     log_activity(
         db,
         Some(user.id),
@@ -1037,7 +1051,7 @@ pub async fn sign_in_with_github(
         }
     };
 
-    let response = match create_token_and_session(db, &user, user_agent.clone()).await {
+    let response = match create_token_and_session(db, &user, user_agent.clone(), None).await {
         Ok(response) => response,
         Err(err) => {
             log_activity(

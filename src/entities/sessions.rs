@@ -9,6 +9,10 @@ pub struct Model {
     pub created_at: Option<DateTimeWithTimeZone>,
     pub user_agent: Option<String>,
     pub expires_at: Option<DateTimeWithTimeZone>,
+    // Added by echobackend's refresh token rotation migration; every token
+    // minted from one login shares a family_id.
+    pub family_id: Uuid,
+    pub absolute_expires_at: DateTimeWithTimeZone,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
