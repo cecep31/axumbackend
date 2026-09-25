@@ -7,7 +7,6 @@ use axum::{
 use sea_orm::DbErr;
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum AppError {
     Database(DbErr),
     NotFound(String),
@@ -49,24 +48,15 @@ impl IntoResponse for AppError {
             AppError::InternalServerError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg, None),
         };
 
-        let (error_field, errors_field) = match errors {
-            Some((error, errors)) => (
-                error,
-                Some(serde_json::to_value(errors).unwrap_or_default()),
-            ),
-            None => (error_message.clone(), None),
+        let body = match errors {
+            Some((error, errors)) => ApiResponse {
+                errors: Some(serde_json::to_value(errors).unwrap_or_default()),
+                ..ApiResponse::error(error_message, error)
+            },
+            None => ApiResponse::error(error_message.clone(), error_message),
         };
 
-        let body = Json(ApiResponse::<serde_json::Value> {
-            success: false,
-            message: error_message,
-            data: None,
-            error: Some(error_field),
-            errors: errors_field,
-            meta: None,
-        });
-
-        (status, body).into_response()
+        (status, Json(body)).into_response()
     }
 }
 

@@ -17,22 +17,24 @@ pub struct ExchangeRateQuery {
     pub to: String,
 }
 
-fn map_exchange_rate_error(err: ExchangeRateError) -> AppError {
-    match err {
-        ExchangeRateError::InvalidCurrencyPair => {
-            AppError::BadRequest("Invalid currency pair".to_string())
-        }
-        ExchangeRateError::NotFound(from, to) => {
-            // Mirrors echobackend: a missing pair is a plain service error, not
-            // `ErrInvalidCurrencyPair`, so it falls through to a generic 500
-            // rather than a 404.
-            AppError::InternalServerError(format!("Exchange rate not found for {from}/{to}"))
-        }
-        ExchangeRateError::Request(err) => {
-            AppError::InternalServerError(format!("Failed to request exchange rate: {err}"))
-        }
-        ExchangeRateError::Upstream(message) => {
-            AppError::InternalServerError(format!("Exchange rate upstream error: {message}"))
+impl From<ExchangeRateError> for AppError {
+    fn from(err: ExchangeRateError) -> Self {
+        match err {
+            ExchangeRateError::InvalidCurrencyPair => {
+                AppError::BadRequest("Invalid currency pair".to_string())
+            }
+            ExchangeRateError::NotFound(from, to) => {
+                // Mirrors echobackend: a missing pair is a plain service error, not
+                // `ErrInvalidCurrencyPair`, so it falls through to a generic 500
+                // rather than a 404.
+                AppError::InternalServerError(format!("Exchange rate not found for {from}/{to}"))
+            }
+            ExchangeRateError::Request(err) => {
+                AppError::InternalServerError(format!("Failed to request exchange rate: {err}"))
+            }
+            ExchangeRateError::Upstream(message) => {
+                AppError::InternalServerError(format!("Exchange rate upstream error: {message}"))
+            }
         }
     }
 }
@@ -42,9 +44,7 @@ pub async fn get_rate(
     _auth_user: AuthUser,
     VQuery(query): VQuery<ExchangeRateQuery>,
 ) -> Result<Json<ApiResponse<ExchangeRateResponse>>, AppError> {
-    let result = exchange_rate::get_rate(query.from, query.to)
-        .await
-        .map_err(map_exchange_rate_error)?;
+    let result = exchange_rate::get_rate(query.from, query.to).await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Exchange rate fetched successfully",

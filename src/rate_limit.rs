@@ -127,14 +127,10 @@ pub async fn rate_limit(
     match limiter.check(key) {
         Ok(()) => next.run(request).await,
         Err(retry_after) => {
-            let body = Json(ApiResponse::<serde_json::Value> {
-                success: false,
-                message: "Too many attempts. Please try again later.".to_string(),
-                data: None,
-                error: Some("Rate limit exceeded".to_string()),
-                errors: None,
-                meta: None,
-            });
+            let body = Json(ApiResponse::error(
+                "Too many attempts. Please try again later.",
+                "Rate limit exceeded",
+            ));
 
             let mut response = (StatusCode::TOO_MANY_REQUESTS, body).into_response();
             if let Ok(value) = retry_after.to_string().parse() {

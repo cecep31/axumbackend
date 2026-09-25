@@ -5,9 +5,9 @@
 //! pub/sub when it is configured, but axumbackend has no Redis, so events only
 //! reach subscribers connected to the instance that published them.
 
-use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
@@ -22,7 +22,7 @@ pub struct Hub {
     topics: Arc<Mutex<Topics>>,
 }
 
-static HUB: Lazy<Hub> = Lazy::new(Hub::default);
+static HUB: LazyLock<Hub> = LazyLock::new(Hub::default);
 
 /// The process-wide hub.
 pub fn hub() -> &'static Hub {

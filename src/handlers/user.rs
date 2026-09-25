@@ -18,31 +18,35 @@ use axum::{
     routing::{delete, get, post},
 };
 
-fn map_user_error(err: services::user::UserError) -> AppError {
-    match err {
-        services::user::UserError::Db(err) => AppError::from(err),
-        services::user::UserError::NotFound => AppError::NotFound("User not found".to_string()),
-        services::user::UserError::UserExists => {
-            AppError::Conflict("Email or username already exists".to_string())
+impl From<services::user::UserError> for AppError {
+    fn from(err: services::user::UserError) -> Self {
+        match err {
+            services::user::UserError::Db(err) => AppError::from(err),
+            services::user::UserError::NotFound => AppError::NotFound("User not found".to_string()),
+            services::user::UserError::UserExists => {
+                AppError::Conflict("Email or username already exists".to_string())
+            }
+            services::user::UserError::InvalidData(msg) => AppError::BadRequest(msg),
         }
-        services::user::UserError::InvalidData(msg) => AppError::BadRequest(msg),
     }
 }
 
-fn map_follow_error(err: services::user_follow::UserFollowError) -> AppError {
-    match err {
-        services::user_follow::UserFollowError::Db(err) => AppError::from(err),
-        services::user_follow::UserFollowError::UserNotFound => {
-            AppError::NotFound("User not found".to_string())
-        }
-        services::user_follow::UserFollowError::CannotFollowSelf => {
-            AppError::BadRequest("You cannot follow yourself".to_string())
-        }
-        services::user_follow::UserFollowError::AlreadyFollowing => {
-            AppError::BadRequest("You are already following this user".to_string())
-        }
-        services::user_follow::UserFollowError::NotFollowing => {
-            AppError::BadRequest("You are not following this user".to_string())
+impl From<services::user_follow::UserFollowError> for AppError {
+    fn from(err: services::user_follow::UserFollowError) -> Self {
+        match err {
+            services::user_follow::UserFollowError::Db(err) => AppError::from(err),
+            services::user_follow::UserFollowError::UserNotFound => {
+                AppError::NotFound("User not found".to_string())
+            }
+            services::user_follow::UserFollowError::CannotFollowSelf => {
+                AppError::BadRequest("You cannot follow yourself".to_string())
+            }
+            services::user_follow::UserFollowError::AlreadyFollowing => {
+                AppError::BadRequest("You are already following this user".to_string())
+            }
+            services::user_follow::UserFollowError::NotFollowing => {
+                AppError::BadRequest("You are not following this user".to_string())
+            }
         }
     }
 }
@@ -158,9 +162,7 @@ pub async fn follow_user(
     auth_user: AuthUser,
     VJson(req): VJson<FollowRequest>,
 ) -> Result<Json<ApiResponse<FollowResponse>>, AppError> {
-    let response = services::user_follow::follow_user(&pool, auth_user.id, req.user_id)
-        .await
-        .map_err(map_follow_error)?;
+    let response = services::user_follow::follow_user(&pool, auth_user.id, req.user_id).await?;
 
     Ok(Json(ApiResponse::success_with_message(
         response.message.clone(),
@@ -173,9 +175,7 @@ pub async fn unfollow_user(
     auth_user: AuthUser,
     VPath(params): VPath<UserIdPath>,
 ) -> Result<Json<ApiResponse<FollowResponse>>, AppError> {
-    let response = services::user_follow::unfollow_user(&pool, auth_user.id, params.id)
-        .await
-        .map_err(map_follow_error)?;
+    let response = services::user_follow::unfollow_user(&pool, auth_user.id, params.id).await?;
 
     Ok(Json(ApiResponse::success_with_message(
         response.message.clone(),
@@ -305,9 +305,7 @@ pub async fn create_user(
     _admin_user: AdminUser,
     VJson(req): VJson<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<UserResponse>>), AppError> {
-    let user = services::user::create_user(&pool, req)
-        .await
-        .map_err(map_user_error)?;
+    let user = services::user::create_user(&pool, req).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -330,7 +328,7 @@ pub async fn update_user(
             services::user::UserError::UserExists => {
                 AppError::Conflict("Email or username already taken".to_string())
             }
-            other => map_user_error(other),
+            other => AppError::from(other),
         })?;
 
     Ok(Json(ApiResponse::success_with_message(

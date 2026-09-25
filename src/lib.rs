@@ -7,6 +7,7 @@ pub mod entities;
 pub mod error;
 pub mod extract;
 pub mod handlers;
+pub mod middleware;
 pub mod models;
 pub mod rate_limit;
 pub mod realtime;

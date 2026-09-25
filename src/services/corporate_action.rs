@@ -11,7 +11,6 @@ use crate::config::MarketConfig;
 use crate::entities::corporate_actions;
 use crate::models::corporate_action::{CorporateActionCalendarResponse, CorporateActionResponse};
 use chrono::{Datelike, NaiveDate, Utc};
-use once_cell::sync::Lazy;
 use reqwest::Client;
 use sea_orm::prelude::Decimal;
 use sea_orm::sea_query::OnConflict;
@@ -20,6 +19,7 @@ use sea_orm::{
 };
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 const RAPIDAPI_IDX_HOST: &str = "indonesia-stock-exchange-idx.p.rapidapi.com";
@@ -261,7 +261,7 @@ fn dedupe_actions(actions: Vec<CorporateAction>) -> Vec<CorporateAction> {
 }
 
 fn shared_client() -> &'static Client {
-    static CLIENT: Lazy<Client> = Lazy::new(|| {
+    static CLIENT: LazyLock<Client> = LazyLock::new(|| {
         Client::builder()
             .timeout(Duration::from_secs(15))
             .build()

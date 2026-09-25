@@ -28,13 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .validate()
         .map_err(|e| format!("Invalid configuration: {}", e))?;
 
-    config::JwtConfig::init(config.jwt.clone());
-    config::EmailConfig::init(config.email.clone());
-    config::FrontendConfig::init(config.frontend.clone());
-    config::GitHubConfig::init(config.github.clone());
-    config::MarketConfig::init(config.market.clone());
-    config::OpenRouterConfig::init(config.openrouter.clone());
-    config::HttpConfig::init(config.http.clone());
+    config.init_globals();
 
     // Create connection pool with configuration from environment
     let pool = database::create_pool(&config.database_url, &config.db_pool)

@@ -44,16 +44,18 @@ pub struct MessagePath {
     pub message_id: Uuid,
 }
 
-fn map_chat_error(err: ChatError) -> AppError {
-    match err {
-        ChatError::Db(err) => AppError::from(err),
-        ChatError::ConversationNotFound => {
-            AppError::NotFound("Chat conversation not found".to_string())
+impl From<ChatError> for AppError {
+    fn from(err: ChatError) -> Self {
+        match err {
+            ChatError::Db(err) => AppError::from(err),
+            ChatError::ConversationNotFound => {
+                AppError::NotFound("Chat conversation not found".to_string())
+            }
+            ChatError::ConversationNotOwned => {
+                AppError::Forbidden("You do not own this conversation".to_string())
+            }
+            ChatError::MessageNotFound => AppError::NotFound("Chat message not found".to_string()),
         }
-        ChatError::ConversationNotOwned => {
-            AppError::Forbidden("You do not own this conversation".to_string())
-        }
-        ChatError::MessageNotFound => AppError::NotFound("Chat message not found".to_string()),
     }
 }
 
@@ -62,9 +64,7 @@ pub async fn create_conversation(
     auth_user: AuthUser,
     VJson(req): VJson<CreateChatConversationRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<ChatConversationResponse>>), AppError> {
-    let conversation = services::chat::create_conversation(&pool, auth_user.id, req)
-        .await
-        .map_err(map_chat_error)?;
+    let conversation = services::chat::create_conversation(&pool, auth_user.id, req).await?;
     Ok((
         StatusCode::CREATED,
         Json(ApiResponse::success_with_message(
@@ -83,10 +83,7 @@ pub async fn create_conversation_stream(
     auth_user: AuthUser,
     VJson(req): VJson<CreateChatConversationStreamRequest>,
 ) -> Result<Response, AppError> {
-    match services::chat::create_conversation_stream(&pool, auth_user.id, req)
-        .await
-        .map_err(map_chat_error)?
-    {
+    match services::chat::create_conversation_stream(&pool, auth_user.id, req).await? {
         StreamOutcome::Fallback(user_message) => Ok((
             StatusCode::CREATED,
             Json(ApiResponse::success_with_message(
@@ -116,8 +113,7 @@ pub async fn get_conversations(
     let (limit, offset) = query.resolve(10);
     let (conversations, total) =
         services::chat::get_user_conversations(&pool, auth_user.id, offset as u64, limit as u64)
-            .await
-            .map_err(map_chat_error)?;
+            .await?;
     Ok(Json(ApiResponse::with_meta_message(
         "Successfully retrieved conversations",
         conversations,
@@ -132,9 +128,8 @@ pub async fn get_conversation(
     auth_user: AuthUser,
     VPath(params): VPath<ConversationPath>,
 ) -> Result<Json<ApiResponse<ChatConversationResponse>>, AppError> {
-    let conversation = services::chat::get_conversation_by_id(&pool, params.id, auth_user.id)
-        .await
-        .map_err(map_chat_error)?;
+    let conversation =
+        services::chat::get_conversation_by_id(&pool, params.id, auth_user.id).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Successfully retrieved conversation",
         conversation,
@@ -147,9 +142,8 @@ pub async fn update_conversation(
     VPath(params): VPath<ConversationPath>,
     VJson(req): VJson<UpdateChatConversationRequest>,
 ) -> Result<Json<ApiResponse<ChatConversationResponse>>, AppError> {
-    let conversation = services::chat::update_conversation(&pool, params.id, auth_user.id, req)
-        .await
-        .map_err(map_chat_error)?;
+    let conversation =
+        services::chat::update_conversation(&pool, params.id, auth_user.id, req).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Conversation updated successfully",
         conversation,
@@ -161,9 +155,7 @@ pub async fn delete_conversation(
     auth_user: AuthUser,
     VPath(params): VPath<ConversationPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    services::chat::delete_conversation(&pool, params.id, auth_user.id)
-        .await
-        .map_err(map_chat_error)?;
+    services::chat::delete_conversation(&pool, params.id, auth_user.id).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Successfully deleted conversation",
         serde_json::Value::Null,
@@ -176,9 +168,8 @@ pub async fn create_message(
     VPath(params): VPath<ConversationMessagesPath>,
     VJson(req): VJson<CreateChatMessageRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<Vec<ChatMessageResponse>>>), AppError> {
-    let messages = services::chat::create_message(&pool, auth_user.id, params.conversation_id, req)
-        .await
-        .map_err(map_chat_error)?;
+    let messages =
+        services::chat::create_message(&pool, auth_user.id, params.conversation_id, req).await?;
     Ok((
         StatusCode::CREATED,
         Json(ApiResponse::success_with_message(
@@ -204,8 +195,7 @@ pub async fn create_message_stream(
         params.conversation_id,
         req,
     )
-    .await
-    .map_err(map_chat_error)?
+    .await?
     {
         StreamOutcome::Fallback(user_message) => Ok((
             StatusCode::CREATED,
@@ -230,9 +220,8 @@ pub async fn get_messages(
     auth_user: AuthUser,
     VPath(params): VPath<ConversationMessagesPath>,
 ) -> Result<Json<ApiResponse<Vec<ChatMessageResponse>>>, AppError> {
-    let messages = services::chat::get_messages(&pool, params.conversation_id, auth_user.id)
-        .await
-        .map_err(map_chat_error)?;
+    let messages =
+        services::chat::get_messages(&pool, params.conversation_id, auth_user.id).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Messages fetched successfully",
         messages,
@@ -244,9 +233,7 @@ pub async fn get_message(
     auth_user: AuthUser,
     VPath(params): VPath<MessagePath>,
 ) -> Result<Json<ApiResponse<ChatMessageResponse>>, AppError> {
-    let message = services::chat::get_message(&pool, params.message_id, auth_user.id)
-        .await
-        .map_err(map_chat_error)?;
+    let message = services::chat::get_message(&pool, params.message_id, auth_user.id).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Message fetched successfully",
         message,
@@ -258,9 +245,7 @@ pub async fn delete_message(
     auth_user: AuthUser,
     VPath(params): VPath<MessagePath>,
 ) -> Result<Json<ApiResponse<ChatMessageResponse>>, AppError> {
-    let message = services::chat::delete_message(&pool, params.message_id, auth_user.id)
-        .await
-        .map_err(map_chat_error)?;
+    let message = services::chat::delete_message(&pool, params.message_id, auth_user.id).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Message deleted successfully",
         message,

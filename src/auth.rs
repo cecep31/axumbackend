@@ -1,5 +1,4 @@
 use crate::config::JwtConfig;
-use crate::error::AppError;
 use crate::response::ApiResponse;
 use axum::{
     Json,
@@ -22,7 +21,6 @@ pub struct Claims {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AuthUser {
     pub id: Uuid,
     pub email: String,
@@ -34,24 +32,12 @@ pub struct AuthUser {
 /// 401 responses use `error: "Unauthorized access"`, 403 responses use
 /// `error: "Access forbidden"`, with a more specific human-readable `message`.
 fn auth_error(status: StatusCode, message: impl Into<String>) -> Response {
-    let message = message.into();
     let error = if status == StatusCode::FORBIDDEN {
         "Access forbidden"
     } else {
         "Unauthorized access"
     };
-    (
-        status,
-        Json(ApiResponse::<serde_json::Value> {
-            success: false,
-            message,
-            data: None,
-            error: Some(error.to_string()),
-            errors: None,
-            meta: None,
-        }),
-    )
-        .into_response()
+    (status, Json(ApiResponse::error(message, error))).into_response()
 }
 
 impl<S> FromRequestParts<S> for AuthUser
@@ -118,7 +104,6 @@ where
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AdminUser(pub AuthUser);
 
 impl<S> FromRequestParts<S> for AdminUser
@@ -133,11 +118,5 @@ where
             return Err(auth_error(StatusCode::FORBIDDEN, "Insufficient privileges"));
         }
         Ok(AdminUser(auth_user))
-    }
-}
-
-impl From<AuthUser> for AppError {
-    fn from(_: AuthUser) -> Self {
-        AppError::InternalServerError("unexpected auth conversion".to_string())
     }
 }

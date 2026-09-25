@@ -12,47 +12,9 @@ mod report;
 mod tag;
 mod user;
 
-use crate::{config::HttpConfig, database::DbPool, rate_limit};
-use axum::{
-    Router,
-    extract::{DefaultBodyLimit, Request},
-    http::{HeaderName, HeaderValue, StatusCode},
-    middleware::{self, Next},
-    response::Response,
-};
-use tower_http::cors::CorsLayer;
-use tower_http::timeout::TimeoutLayer;
-use tower_http::trace::TraceLayer;
-
-async fn security_headers(request: Request, next: Next) -> Response {
-    let mut response = next.run(request).await;
-    let headers = response.headers_mut();
-    headers.insert(
-        HeaderName::from_static("x-content-type-options"),
-        HeaderValue::from_static("nosniff"),
-    );
-    headers.insert(
-        HeaderName::from_static("x-frame-options"),
-        HeaderValue::from_static("SAMEORIGIN"),
-    );
-    headers.insert(
-        HeaderName::from_static("x-xss-protection"),
-        HeaderValue::from_static("1; mode=block"),
-    );
-    headers.insert(
-        HeaderName::from_static("strict-transport-security"),
-        HeaderValue::from_static("max-age=3600"),
-    );
-    headers.insert(
-        HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static("default-src 'self'"),
-    );
-    headers.insert(
-        HeaderName::from_static("referrer-policy"),
-        HeaderValue::from_static("strict-origin-when-cross-origin"),
-    );
-    response
-}
+use crate::{config::HttpConfig, database::DbPool, middleware as mw, rate_limit};
+use axum::{Router, extract::DefaultBodyLimit, http::StatusCode, middleware};
+use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 
 pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<DbPool> {
     let http_config = HttpConfig::get();
@@ -75,30 +37,14 @@ pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<DbPool>
             http_config.request_timeout,
         ));
 
-    let cors_layer = if http_config.allow_origins.contains(&"*".to_string())
-        || http_config.allow_origins.is_empty()
-    {
-        CorsLayer::permissive()
-    } else {
-        let origins: Vec<_> = http_config
-            .allow_origins
-            .iter()
-            .filter_map(|o| o.parse().ok())
-            .collect();
-        CorsLayer::new()
-            .allow_origin(origins)
-            .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any)
-            .allow_credentials(true)
-    };
-
+    // Streaming (SSE) routes stay outside the request timeout.
     let router = Router::new()
         .merge(api_routes)
         .merge(chat::routes())
         .merge(guild::stream_routes())
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
-        .layer(middleware::from_fn(security_headers))
-        .layer(cors_layer)
+        .layer(middleware::from_fn(mw::security_headers))
+        .layer(mw::cors(http_config))
         .layer(TraceLayer::new_for_http());
 
     if let Some(limiter) = limiter {

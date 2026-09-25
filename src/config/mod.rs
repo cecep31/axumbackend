@@ -10,96 +10,49 @@ pub use types::*;
 // Global Singletons (`OnceLock`)
 // ============================================================================
 
-static JWT_CONFIG: OnceLock<JwtConfig> = OnceLock::new();
-static EMAIL_CONFIG: OnceLock<EmailConfig> = OnceLock::new();
-static FRONTEND_CONFIG: OnceLock<FrontendConfig> = OnceLock::new();
-static GITHUB_CONFIG: OnceLock<GitHubConfig> = OnceLock::new();
-static MARKET_CONFIG: OnceLock<MarketConfig> = OnceLock::new();
-static OPENROUTER_CONFIG: OnceLock<OpenRouterConfig> = OnceLock::new();
-static HTTP_CONFIG: OnceLock<HttpConfig> = OnceLock::new();
+/// Gives a config section a process-wide `init` (once, at startup) and `get`.
+macro_rules! global_config {
+    ($($ty:ident => $cell:ident),* $(,)?) => {
+        $(
+            static $cell: OnceLock<$ty> = OnceLock::new();
 
-impl JwtConfig {
-    pub fn init(cfg: JwtConfig) {
-        JWT_CONFIG.set(cfg).expect("JwtConfig already initialized");
-    }
+            impl $ty {
+                pub fn init(cfg: $ty) {
+                    $cell
+                        .set(cfg)
+                        .expect(concat!(stringify!($ty), " already initialized"));
+                }
 
-    pub fn get() -> &'static JwtConfig {
-        JWT_CONFIG.get().expect("JwtConfig not initialized")
+                pub fn get() -> &'static $ty {
+                    $cell
+                        .get()
+                        .expect(concat!(stringify!($ty), " not initialized"))
+                }
+            }
+        )*
+    };
+}
+
+impl Config {
+    /// Publishes the sections that are read through `XxxConfig::get()`.
+    /// Must be called exactly once, at startup.
+    pub fn init_globals(&self) {
+        JwtConfig::init(self.jwt.clone());
+        EmailConfig::init(self.email.clone());
+        FrontendConfig::init(self.frontend.clone());
+        GitHubConfig::init(self.github.clone());
+        MarketConfig::init(self.market.clone());
+        OpenRouterConfig::init(self.openrouter.clone());
+        HttpConfig::init(self.http.clone());
     }
 }
 
-impl EmailConfig {
-    pub fn init(cfg: EmailConfig) {
-        EMAIL_CONFIG
-            .set(cfg)
-            .expect("EmailConfig already initialized");
-    }
-
-    pub fn get() -> &'static EmailConfig {
-        EMAIL_CONFIG.get().expect("EmailConfig not initialized")
-    }
-}
-
-impl HttpConfig {
-    pub fn init(cfg: HttpConfig) {
-        HTTP_CONFIG
-            .set(cfg)
-            .expect("HttpConfig already initialized");
-    }
-
-    pub fn get() -> &'static HttpConfig {
-        HTTP_CONFIG.get().expect("HttpConfig not initialized")
-    }
-}
-
-impl FrontendConfig {
-    pub fn init(cfg: FrontendConfig) {
-        FRONTEND_CONFIG
-            .set(cfg)
-            .expect("FrontendConfig already initialized");
-    }
-
-    pub fn get() -> &'static FrontendConfig {
-        FRONTEND_CONFIG
-            .get()
-            .expect("FrontendConfig not initialized")
-    }
-}
-
-impl OpenRouterConfig {
-    pub fn init(cfg: OpenRouterConfig) {
-        OPENROUTER_CONFIG
-            .set(cfg)
-            .expect("OpenRouterConfig already initialized");
-    }
-
-    pub fn get() -> &'static OpenRouterConfig {
-        OPENROUTER_CONFIG
-            .get()
-            .expect("OpenRouterConfig not initialized")
-    }
-}
-
-impl GitHubConfig {
-    pub fn init(cfg: GitHubConfig) {
-        GITHUB_CONFIG
-            .set(cfg)
-            .expect("GitHubConfig already initialized");
-    }
-
-    pub fn get() -> &'static GitHubConfig {
-        GITHUB_CONFIG.get().expect("GitHubConfig not initialized")
-    }
-}
-
-impl MarketConfig {
-    pub fn init(cfg: MarketConfig) {
-        MARKET_CONFIG
-            .set(cfg)
-            .expect("MarketConfig already initialized");
-    }
-
-    pub fn get() -> &'static MarketConfig {
-        MARKET_CONFIG.get().expect("MarketConfig not initialized")
-    }
+global_config! {
+    JwtConfig => JWT_CONFIG,
+    EmailConfig => EMAIL_CONFIG,
+    FrontendConfig => FRONTEND_CONFIG,
+    GitHubConfig => GITHUB_CONFIG,
+    MarketConfig => MARKET_CONFIG,
+    OpenRouterConfig => OPENROUTER_CONFIG,
+    HttpConfig => HTTP_CONFIG,
 }

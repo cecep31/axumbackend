@@ -21,20 +21,22 @@ use axum::{
 };
 use chrono::{Datelike, Utc};
 
-fn map_holding_error(err: HoldingError) -> AppError {
-    match err {
-        HoldingError::Db(err) => AppError::from(err),
-        HoldingError::NotFound => AppError::NotFound("Holding not found".to_string()),
-        HoldingError::HoldingTypeNotFound => {
-            AppError::BadRequest("Holding type not found".to_string())
+impl From<HoldingError> for AppError {
+    fn from(err: HoldingError) -> Self {
+        match err {
+            HoldingError::Db(err) => AppError::from(err),
+            HoldingError::NotFound => AppError::NotFound("Holding not found".to_string()),
+            HoldingError::HoldingTypeNotFound => {
+                AppError::BadRequest("Holding type not found".to_string())
+            }
+            HoldingError::InvalidDecimal(field) => {
+                AppError::BadRequest(format!("Invalid decimal value for {}", field))
+            }
+            HoldingError::DuplicateSameMonth => {
+                AppError::BadRequest("Cannot duplicate holdings into the same month".to_string())
+            }
+            HoldingError::InvalidRange => AppError::BadRequest("Invalid monthly range".to_string()),
         }
-        HoldingError::InvalidDecimal(field) => {
-            AppError::BadRequest(format!("Invalid decimal value for {}", field))
-        }
-        HoldingError::DuplicateSameMonth => {
-            AppError::BadRequest("Cannot duplicate holdings into the same month".to_string())
-        }
-        HoldingError::InvalidRange => AppError::BadRequest("Invalid monthly range".to_string()),
     }
 }
 
@@ -59,8 +61,7 @@ pub async fn get_holdings(
         query.sort_by.as_deref(),
         query.order.as_deref(),
     )
-    .await
-    .map_err(map_holding_error)?;
+    .await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Holdings fetched successfully",
@@ -73,9 +74,7 @@ pub async fn get_holding_by_id(
     auth_user: AuthUser,
     VPath(params): VPath<HoldingPath>,
 ) -> Result<Json<ApiResponse<HoldingResponse>>, AppError> {
-    let holding = services::holding::get_holding_by_id(&pool, params.id, auth_user.id)
-        .await
-        .map_err(map_holding_error)?;
+    let holding = services::holding::get_holding_by_id(&pool, params.id, auth_user.id).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Holding fetched successfully",
         holding,
@@ -113,8 +112,7 @@ pub async fn create_holding(
             year: req.year,
         },
     )
-    .await
-    .map_err(map_holding_error)?;
+    .await?;
 
     Ok((
         axum::http::StatusCode::CREATED,
@@ -155,8 +153,7 @@ pub async fn update_holding(
             year: req.year,
         },
     )
-    .await
-    .map_err(map_holding_error)?;
+    .await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Holding updated successfully",
@@ -169,9 +166,7 @@ pub async fn delete_holding(
     auth_user: AuthUser,
     VPath(params): VPath<HoldingPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    services::holding::delete_holding(&pool, params.id, auth_user.id)
-        .await
-        .map_err(map_holding_error)?;
+    services::holding::delete_holding(&pool, params.id, auth_user.id).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Holding deleted successfully",
         serde_json::Value::Null,
@@ -182,9 +177,7 @@ pub async fn get_holding_types(
     State(pool): State<DbPool>,
     _auth_user: AuthUser,
 ) -> Result<Json<ApiResponse<Vec<HoldingTypeResponse>>>, AppError> {
-    let types = services::holding::get_holding_types(&pool)
-        .await
-        .map_err(map_holding_error)?;
+    let types = services::holding::get_holding_types(&pool).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Holding types fetched successfully",
         types,
@@ -196,9 +189,8 @@ pub async fn get_summary(
     auth_user: AuthUser,
     VQuery(query): VQuery<SummaryQuery>,
 ) -> Result<Json<ApiResponse<HoldingSummaryResponse>>, AppError> {
-    let summary = services::holding::summary(&pool, auth_user.id, query.month(), query.year())
-        .await
-        .map_err(map_holding_error)?;
+    let summary =
+        services::holding::summary(&pool, auth_user.id, query.month(), query.year()).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Holdings summary fetched successfully",
         summary,
@@ -210,9 +202,8 @@ pub async fn get_trends(
     auth_user: AuthUser,
     VQuery(query): VQuery<TrendsQuery>,
 ) -> Result<Json<ApiResponse<Vec<HoldingTrendResponse>>>, AppError> {
-    let trends = services::holding::trends(&pool, auth_user.id, parse_years(query.years.clone()))
-        .await
-        .map_err(map_holding_error)?;
+    let trends =
+        services::holding::trends(&pool, auth_user.id, parse_years(query.years.clone())).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Holdings trends fetched successfully",
         trends,
@@ -246,8 +237,7 @@ pub async fn compare_months(
         to_month,
         to_year,
     )
-    .await
-    .map_err(map_holding_error)?;
+    .await?;
     Ok(Json(ApiResponse::success_with_message(
         "Month comparison fetched successfully",
         result,
@@ -291,8 +281,7 @@ pub async fn get_monthly_data(
         end_month,
         end_year,
     )
-    .await
-    .map_err(map_holding_error)?;
+    .await?;
     Ok(Json(ApiResponse::success_with_message(
         "Holdings monthly data fetched successfully",
         result,
@@ -330,8 +319,7 @@ pub async fn duplicate_holdings(
         req.to_year,
         req.overwrite,
     )
-    .await
-    .map_err(map_holding_error)?;
+    .await?;
 
     Ok((
         axum::http::StatusCode::CREATED,

@@ -16,13 +16,15 @@ use axum::{
 };
 use uuid::Uuid;
 
-fn map_bookmark_error(err: BookmarkError) -> AppError {
-    match err {
-        BookmarkError::Db(err) => AppError::from(err),
-        BookmarkError::PostNotFound => AppError::NotFound("Post not found".to_string()),
-        BookmarkError::BookmarkNotFound => AppError::NotFound("Bookmark not found".to_string()),
-        BookmarkError::FolderNotFound => {
-            AppError::NotFound("Bookmark folder not found".to_string())
+impl From<BookmarkError> for AppError {
+    fn from(err: BookmarkError) -> Self {
+        match err {
+            BookmarkError::Db(err) => AppError::from(err),
+            BookmarkError::PostNotFound => AppError::NotFound("Post not found".to_string()),
+            BookmarkError::BookmarkNotFound => AppError::NotFound("Bookmark not found".to_string()),
+            BookmarkError::FolderNotFound => {
+                AppError::NotFound("Bookmark folder not found".to_string())
+            }
         }
     }
 }
@@ -51,8 +53,7 @@ pub async fn toggle_bookmark(
         req.name,
         req.notes,
     )
-    .await
-    .map_err(map_bookmark_error)?;
+    .await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Bookmark toggled successfully",
@@ -74,8 +75,7 @@ pub async fn get_bookmarks(
         limit,
         offset,
     )
-    .await
-    .map_err(map_bookmark_error)?;
+    .await?;
 
     Ok(Json(ApiResponse::with_meta_message(
         "Bookmarks fetched successfully",
@@ -94,8 +94,7 @@ pub async fn update_bookmark(
 ) -> Result<Json<ApiResponse<BookmarkResponse>>, AppError> {
     let bookmark =
         services::bookmark::update_bookmark(&pool, params.id, auth_user.id, req.name, req.notes)
-            .await
-            .map_err(map_bookmark_error)?;
+            .await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Bookmark updated successfully",
@@ -109,9 +108,8 @@ pub async fn move_bookmark(
     VPath(params): VPath<BookmarkPath>,
     VJson(req): VJson<MoveBookmarkRequest>,
 ) -> Result<Json<ApiResponse<BookmarkResponse>>, AppError> {
-    let bookmark = services::bookmark::move_bookmark(&pool, params.id, auth_user.id, req.folder_id)
-        .await
-        .map_err(map_bookmark_error)?;
+    let bookmark =
+        services::bookmark::move_bookmark(&pool, params.id, auth_user.id, req.folder_id).await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Bookmark moved successfully",
@@ -130,9 +128,8 @@ pub async fn create_folder(
     ),
     AppError,
 > {
-    let folder = services::bookmark::create_folder(&pool, auth_user.id, req.name, req.description)
-        .await
-        .map_err(map_bookmark_error)?;
+    let folder =
+        services::bookmark::create_folder(&pool, auth_user.id, req.name, req.description).await?;
     Ok((
         axum::http::StatusCode::CREATED,
         Json(ApiResponse::success_with_message(
@@ -146,9 +143,7 @@ pub async fn get_folders(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
 ) -> Result<Json<ApiResponse<Vec<BookmarkFolderResponse>>>, AppError> {
-    let folders = services::bookmark::get_folders_by_user(&pool, auth_user.id)
-        .await
-        .map_err(map_bookmark_error)?;
+    let folders = services::bookmark::get_folders_by_user(&pool, auth_user.id).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Folders fetched successfully",
         folders,
@@ -168,8 +163,7 @@ pub async fn update_folder(
         req.name,
         req.description,
     )
-    .await
-    .map_err(map_bookmark_error)?;
+    .await?;
     Ok(Json(ApiResponse::success_with_message(
         "Folder updated successfully",
         folder,
@@ -181,9 +175,7 @@ pub async fn delete_folder(
     auth_user: AuthUser,
     VPath(params): VPath<FolderIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    services::bookmark::delete_folder(&pool, params.folder_id, auth_user.id)
-        .await
-        .map_err(map_bookmark_error)?;
+    services::bookmark::delete_folder(&pool, params.folder_id, auth_user.id).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Folder deleted successfully",
         serde_json::Value::Null,

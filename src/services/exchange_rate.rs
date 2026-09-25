@@ -1,8 +1,8 @@
 use crate::dto::exchange_rate::ExchangeRateResponse;
 use chrono::Utc;
-use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,7 @@ const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
 type ExchangeRateCacheMap = HashMap<(String, String), (Instant, ExchangeRateResponse)>;
 
-static CACHE: Lazy<Mutex<ExchangeRateCacheMap>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static CACHE: LazyLock<Mutex<ExchangeRateCacheMap>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug)]
 pub enum ExchangeRateError {

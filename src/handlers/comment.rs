@@ -14,12 +14,16 @@ use axum::{
     routing::{get, put},
 };
 
-fn map_comment_error(err: CommentError) -> AppError {
-    match err {
-        CommentError::Db(err) => AppError::from(err),
-        CommentError::PostNotFound => AppError::NotFound("Post not found".to_string()),
-        CommentError::CommentNotFound => AppError::NotFound("Comment not found".to_string()),
-        CommentError::NotOwner => AppError::Forbidden("You are not the comment author".to_string()),
+impl From<CommentError> for AppError {
+    fn from(err: CommentError) -> Self {
+        match err {
+            CommentError::Db(err) => AppError::from(err),
+            CommentError::PostNotFound => AppError::NotFound("Post not found".to_string()),
+            CommentError::CommentNotFound => AppError::NotFound("Comment not found".to_string()),
+            CommentError::NotOwner => {
+                AppError::Forbidden("You are not the comment author".to_string())
+            }
+        }
     }
 }
 
@@ -29,9 +33,8 @@ pub async fn create_comment(
     VPath(params): VPath<PostIdPath>,
     VJson(req): VJson<CommentRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<CommentResponse>>), AppError> {
-    let comment = services::comment::create_comment(&pool, params.id, req.text, auth_user.id)
-        .await
-        .map_err(map_comment_error)?;
+    let comment =
+        services::comment::create_comment(&pool, params.id, req.text, auth_user.id).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -46,9 +49,7 @@ pub async fn get_comments_by_post_id(
     State(pool): State<DbPool>,
     VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<Vec<CommentResponse>>>, AppError> {
-    let comments = services::comment::get_comments_by_post_id(&pool, params.id)
-        .await
-        .map_err(map_comment_error)?;
+    let comments = services::comment::get_comments_by_post_id(&pool, params.id).await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Comments fetched successfully",
@@ -69,8 +70,7 @@ pub async fn update_comment(
         req.text,
         auth_user.id,
     )
-    .await
-    .map_err(map_comment_error)?;
+    .await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Comment updated successfully",
@@ -83,9 +83,7 @@ pub async fn delete_comment(
     auth_user: AuthUser,
     VPath(params): VPath<CommentPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    services::comment::delete_comment(&pool, params.id, params.comment_id, auth_user.id)
-        .await
-        .map_err(map_comment_error)?;
+    services::comment::delete_comment(&pool, params.id, params.comment_id, auth_user.id).await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Comment deleted successfully",

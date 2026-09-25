@@ -46,26 +46,30 @@ pub async fn create_post(
     ))
 }
 
-fn map_post_view_error(err: services::post_view::PostViewError) -> AppError {
-    match err {
-        services::post_view::PostViewError::Db(err) => AppError::from(err),
-        services::post_view::PostViewError::PostNotFound => {
-            AppError::NotFound("Post not found".to_string())
+impl From<services::post_view::PostViewError> for AppError {
+    fn from(err: services::post_view::PostViewError) -> Self {
+        match err {
+            services::post_view::PostViewError::Db(err) => AppError::from(err),
+            services::post_view::PostViewError::PostNotFound => {
+                AppError::NotFound("Post not found".to_string())
+            }
         }
     }
 }
 
-fn map_post_like_error(err: services::post_like::PostLikeError) -> AppError {
-    match err {
-        services::post_like::PostLikeError::Db(err) => AppError::from(err),
-        services::post_like::PostLikeError::PostNotFound => {
-            AppError::NotFound("Post not found".to_string())
-        }
-        services::post_like::PostLikeError::AlreadyLiked => {
-            AppError::BadRequest("You have already liked this post".to_string())
-        }
-        services::post_like::PostLikeError::NotLiked => {
-            AppError::BadRequest("You have not liked this post".to_string())
+impl From<services::post_like::PostLikeError> for AppError {
+    fn from(err: services::post_like::PostLikeError) -> Self {
+        match err {
+            services::post_like::PostLikeError::Db(err) => AppError::from(err),
+            services::post_like::PostLikeError::PostNotFound => {
+                AppError::NotFound("Post not found".to_string())
+            }
+            services::post_like::PostLikeError::AlreadyLiked => {
+                AppError::BadRequest("You have already liked this post".to_string())
+            }
+            services::post_like::PostLikeError::NotLiked => {
+                AppError::BadRequest("You have not liked this post".to_string())
+            }
         }
     }
 }
@@ -301,8 +305,7 @@ pub async fn record_view(
     let user_agent = header_string(&headers, "user-agent");
 
     services::post_view::record_view(&pool, params.id, Some(auth_user.id), ip_address, user_agent)
-        .await
-        .map_err(map_post_view_error)?;
+        .await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "View recorded successfully",
@@ -318,9 +321,8 @@ pub async fn get_post_views(
 ) -> Result<Json<ApiResponse<Vec<crate::models::post_view::PostViewResponse>>>, AppError> {
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(10);
-    let (views, total) = services::post_view::get_views_by_post_id(&pool, params.id, limit, offset)
-        .await
-        .map_err(map_post_view_error)?;
+    let (views, total) =
+        services::post_view::get_views_by_post_id(&pool, params.id, limit, offset).await?;
 
     Ok(Json(ApiResponse::with_meta_message(
         "Successfully retrieved post views",
@@ -335,9 +337,7 @@ pub async fn get_post_view_stats(
     State(pool): State<DbPool>,
     VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<crate::models::post_view::PostViewStats>>, AppError> {
-    let stats = services::post_view::get_view_stats(&pool, params.id)
-        .await
-        .map_err(map_post_view_error)?;
+    let stats = services::post_view::get_view_stats(&pool, params.id).await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Successfully retrieved view statistics",
@@ -350,9 +350,7 @@ pub async fn check_user_viewed(
     auth_user: AuthUser,
     VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<crate::models::post_view::ViewStatusResponse>>, AppError> {
-    let status = services::post_view::has_user_viewed_post(&pool, params.id, auth_user.id)
-        .await
-        .map_err(map_post_view_error)?;
+    let status = services::post_view::has_user_viewed_post(&pool, params.id, auth_user.id).await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Successfully checked view status",
@@ -365,9 +363,7 @@ pub async fn like_post(
     auth_user: AuthUser,
     VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    services::post_like::like_post(&pool, params.id, auth_user.id)
-        .await
-        .map_err(map_post_like_error)?;
+    services::post_like::like_post(&pool, params.id, auth_user.id).await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Post liked successfully",
@@ -380,9 +376,7 @@ pub async fn unlike_post(
     auth_user: AuthUser,
     VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    services::post_like::unlike_post(&pool, params.id, auth_user.id)
-        .await
-        .map_err(map_post_like_error)?;
+    services::post_like::unlike_post(&pool, params.id, auth_user.id).await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Post unliked successfully",
@@ -397,9 +391,7 @@ pub async fn get_post_likes(
 ) -> Result<Json<ApiResponse<crate::models::post_like::PostLikeListResponse>>, AppError> {
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(10);
-    let likes = services::post_like::get_likes_by_post_id(&pool, params.id, limit, offset)
-        .await
-        .map_err(map_post_like_error)?;
+    let likes = services::post_like::get_likes_by_post_id(&pool, params.id, limit, offset).await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Post likes retrieved successfully",
@@ -411,9 +403,7 @@ pub async fn get_post_like_stats(
     State(pool): State<DbPool>,
     VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<crate::models::post_like::PostLikeStats>>, AppError> {
-    let stats = services::post_like::get_like_stats(&pool, params.id)
-        .await
-        .map_err(map_post_like_error)?;
+    let stats = services::post_like::get_like_stats(&pool, params.id).await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Like stats retrieved successfully",
@@ -426,9 +416,7 @@ pub async fn check_user_liked(
     auth_user: AuthUser,
     VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<crate::models::post_like::LikeStatusResponse>>, AppError> {
-    let status = services::post_like::has_user_liked_post(&pool, params.id, auth_user.id)
-        .await
-        .map_err(map_post_like_error)?;
+    let status = services::post_like::has_user_liked_post(&pool, params.id, auth_user.id).await?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Like status retrieved successfully",

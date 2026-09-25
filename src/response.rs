@@ -33,6 +33,20 @@ pub struct ApiResponse<T> {
     pub meta: Option<Meta>,
 }
 
+impl ApiResponse<serde_json::Value> {
+    /// Failure envelope: `{ success: false, message, error }`.
+    pub fn error(message: impl Into<String>, error: impl Into<String>) -> Self {
+        ApiResponse {
+            success: false,
+            message: message.into(),
+            data: None,
+            error: Some(error.into()),
+            errors: None,
+            meta: None,
+        }
+    }
+}
+
 impl<T> ApiResponse<T> {
     pub fn success_with_message(message: impl Into<String>, data: T) -> Self {
         ApiResponse {

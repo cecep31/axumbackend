@@ -1,4 +1,5 @@
 use std::env;
+use std::str::FromStr;
 use std::time::Duration;
 
 use super::types::*;
@@ -7,60 +8,29 @@ use super::types::*;
 // Environment Parsing Helpers
 // ============================================================================
 
-/// Parse an environment variable as u16 with default fallback.
-pub fn parse_u16(key: &str, default: u16) -> u16 {
-    env::var(key)
-        .unwrap_or_else(|_| default.to_string())
-        .parse::<u16>()
-        .unwrap_or_else(|_| panic!("{key} must be a valid u16 number (0-65535)"))
+/// Reads `key` and parses it as `T`, falling back to `default` when unset.
+///
+/// # Panics
+/// Panics if the variable is set but cannot be parsed as `T`.
+pub fn parse_env<T: FromStr>(key: &str, default: T) -> T {
+    parse_env_alias(&[key], default)
 }
 
-/// Parse an environment variable as u64 with default fallback.
-pub fn parse_u64(key: &str, default: u64) -> u64 {
-    env::var(key)
-        .unwrap_or_else(|_| default.to_string())
-        .parse::<u64>()
-        .unwrap_or_else(|_| panic!("{key} must be a valid u64 number"))
-}
-
-pub fn parse_u64_alias(keys: &[&str], default: u64) -> u64 {
-    keys.iter()
-        .find_map(|key| env::var(key).ok())
-        .unwrap_or_else(|| default.to_string())
-        .parse::<u64>()
-        .unwrap_or_else(|_| panic!("{} must be a valid u64 number", keys.join(" or ")))
-}
-
-/// Parse an environment variable as u32 with default fallback.
-pub fn parse_u32(key: &str, default: u32) -> u32 {
-    env::var(key)
-        .unwrap_or_else(|_| default.to_string())
-        .parse::<u32>()
-        .unwrap_or_else(|_| panic!("{key} must be a valid u32 number"))
-}
-
-pub fn parse_u32_alias(keys: &[&str], default: u32) -> u32 {
-    keys.iter()
-        .find_map(|key| env::var(key).ok())
-        .unwrap_or_else(|| default.to_string())
-        .parse::<u32>()
-        .unwrap_or_else(|_| panic!("{} must be a valid u32 number", keys.join(" or ")))
-}
-
-/// Parse an environment variable as usize with default fallback.
-pub fn parse_usize(key: &str, default: usize) -> usize {
-    env::var(key)
-        .unwrap_or_else(|_| default.to_string())
-        .parse::<usize>()
-        .unwrap_or_else(|_| panic!("{key} must be a valid usize number"))
-}
-
-pub fn parse_usize_alias(keys: &[&str], default: usize) -> usize {
-    keys.iter()
-        .find_map(|key| env::var(key).ok())
-        .unwrap_or_else(|| default.to_string())
-        .parse::<usize>()
-        .unwrap_or_else(|_| panic!("{} must be a valid usize number", keys.join(" or ")))
+/// Like [`parse_env`], but reads the first of `keys` that is set.
+///
+/// # Panics
+/// Panics if the variable is set but cannot be parsed as `T`.
+pub fn parse_env_alias<T: FromStr>(keys: &[&str], default: T) -> T {
+    let Some(raw) = keys.iter().find_map(|key| env::var(key).ok()) else {
+        return default;
+    };
+    raw.parse().unwrap_or_else(|_| {
+        panic!(
+            "{} must be a valid {} number",
+            keys.join(" or "),
+            std::any::type_name::<T>()
+        )
+    })
 }
 
 /// Parse a human-readable duration string into std::time::Duration.
@@ -164,34 +134,23 @@ pub fn resolve_jwt_expiry(default_duration: Duration) -> Duration {
     default_duration
 }
 
-/// Parse an environment variable as i64 with default fallback.
-pub fn parse_i64(key: &str, default: i64) -> i64 {
-    env::var(key)
-        .unwrap_or_else(|_| default.to_string())
-        .parse::<i64>()
-        .unwrap_or_else(|_| panic!("{key} must be a valid i64 number"))
-}
-
 pub fn parse_bool(key: &str, default: bool) -> bool {
-    match env::var(key) {
-        Ok(value) => matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => default,
-    }
+    parse_bool_alias(&[key], default)
 }
 
 pub fn parse_bool_alias(keys: &[&str], default: bool) -> bool {
-    for key in keys {
-        if let Ok(value) = env::var(key) {
-            return matches!(
+    keys.iter()
+        .find_map(|key| env::var(key).ok())
+        .map_or(default, |value| {
+            matches!(
                 value.trim().to_ascii_lowercase().as_str(),
                 "1" | "true" | "yes" | "on"
-            );
-        }
-    }
-    default
+            )
+        })
+}
+
+pub fn env_string(key: &str, default: &str) -> String {
+    env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
 pub fn env_string_alias(keys: &[&str], default: &str) -> String {
@@ -225,28 +184,17 @@ pub fn parse_origins(raw: &str) -> Vec<String> {
 // ============================================================================
 
 impl Config {
-    /// Load configuration from environment variables with sensible defaults
-    ///
-    /// # Environment Variables
-    /// - `PORT`: Server port (default: 8080)
-    /// - `DATABASE_URL`: PostgreSQL connection string
-    /// - `DB_POOL_MAX_SIZE`: Maximum pool size (default: 20)
-    /// - `DB_POOL_CONNECTION_TIMEOUT`: Connection timeout in seconds (default: 30)
-    /// - `DB_POOL_MAX_LIFETIME`: Max connection lifetime in seconds, 0 = no limit (default: 1800)
-    /// - `DB_POOL_IDLE_TIMEOUT`: Idle timeout in seconds, 0 = no limit (default: 600)
-    /// - `JWT_SECRET`: Secret key for signing JWT tokens (default: "your-secret-key")
-    /// - `JWT_EXPIRY_HOURS`: Access token expiry in hours (default: 3)
-    /// - `RATE_LIMIT_MAX_REQUESTS`: Maximum requests per client/path window, 0 disables rate limiting (default: 0)
-    /// - `RATE_LIMIT_WINDOW_SECS`: Rate limit window in seconds (default: 60)
+    /// Load configuration from environment variables with sensible defaults.
+    /// The primary keys are documented in `.env.example`; legacy aliases are the
+    /// extra names passed to the `*_alias` helpers below.
     ///
     /// # Panics
-    /// Panics if numeric values cannot be parsed.
+    /// Panics if a numeric value is set but cannot be parsed.
     pub fn from_env() -> Self {
         Self {
             debug: parse_bool("APP_DEBUG", parse_bool("DEBUG", false)),
-            port: parse_u16("PORT", DEFAULT_PORT),
-            database_url: env::var("DATABASE_URL")
-                .unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string()),
+            port: parse_env("PORT", DEFAULT_PORT),
+            database_url: env_string("DATABASE_URL", DEFAULT_DATABASE_URL),
             db_pool: PoolConfig::from_env(),
             jwt: JwtConfig::from_env(),
             email: EmailConfig::from_env(),
@@ -266,11 +214,11 @@ impl Config {
 impl PoolConfig {
     pub fn from_env() -> Self {
         Self {
-            max_size: parse_usize_alias(
+            max_size: parse_env_alias(
                 &["DB_POOL_MAX_OPEN", "DB_POOL_MAX_SIZE", "MAX_OPEN_CONNS"],
                 DEFAULT_POOL_MAX_SIZE,
             ),
-            min_idle: parse_usize_alias(
+            min_idle: parse_env_alias(
                 &["DB_POOL_MAX_IDLE", "MAX_IDLE_CONNS", "DB_POOL_MIN_IDLE"],
                 DEFAULT_POOL_MAX_IDLE,
             ),
@@ -303,10 +251,10 @@ impl JwtConfig {
         let expiry = resolve_jwt_expiry(Duration::from_secs(DEFAULT_JWT_EXPIRY_SECS));
         let expiry_hours = (expiry.as_secs() / 3600) as i64;
         Self {
-            secret: env::var("JWT_SECRET").unwrap_or_else(|_| DEFAULT_JWT_SECRET.to_string()),
+            secret: env_string("JWT_SECRET", DEFAULT_JWT_SECRET),
             expiry,
             expiry_hours,
-            refresh_token_expiry_days: parse_i64(
+            refresh_token_expiry_days: parse_env(
                 "REFRESH_TOKEN_EXPIRY_DAYS",
                 DEFAULT_REFRESH_TOKEN_EXPIRY_DAYS,
             ),
@@ -319,18 +267,20 @@ impl EmailConfig {
         Self {
             resend_api_key: env::var("RESEND_API_KEY").unwrap_or_default(),
             from: env_string_alias(&["SMTP_FROM", "EMAIL_FROM"], DEFAULT_EMAIL_FROM),
-            frontend_reset_password_url: env::var("FRONTEND_RESET_PASSWORD_URL")
-                .unwrap_or_else(|_| DEFAULT_FRONTEND_RESET_PASSWORD_URL.to_string()),
+            frontend_reset_password_url: env_string(
+                "FRONTEND_RESET_PASSWORD_URL",
+                DEFAULT_FRONTEND_RESET_PASSWORD_URL,
+            ),
             smtp_host: env::var("SMTP_HOST").unwrap_or_default(),
-            smtp_port: parse_u16("SMTP_PORT", DEFAULT_SMTP_PORT),
+            smtp_port: parse_env("SMTP_PORT", DEFAULT_SMTP_PORT),
             smtp_username: env::var("SMTP_USERNAME").unwrap_or_default(),
             smtp_password: env::var("SMTP_PASSWORD").unwrap_or_default(),
             smtp_use_tls: parse_bool("SMTP_TLS", false),
-            smtp_timeout: Duration::from_secs(parse_u64(
+            smtp_timeout: Duration::from_secs(parse_env(
                 "SMTP_TIMEOUT_SECONDS",
                 DEFAULT_SMTP_TIMEOUT_SECS,
             )),
-            smtp_task_timeout: Duration::from_secs(parse_u64(
+            smtp_task_timeout: Duration::from_secs(parse_env(
                 "SMTP_TASK_TIMEOUT_SECONDS",
                 DEFAULT_SMTP_TASK_TIMEOUT_SECS,
             )),
@@ -341,7 +291,7 @@ impl EmailConfig {
 impl RateLimitConfig {
     pub fn from_env() -> Self {
         Self {
-            max_requests: parse_u32_alias(
+            max_requests: parse_env_alias(
                 &[
                     "RATE_LIMIT_MAX_REQUESTS",
                     "HTTP_RATE_LIMIT_RPS",
@@ -349,7 +299,7 @@ impl RateLimitConfig {
                 ],
                 DEFAULT_RATE_LIMIT_MAX_REQUESTS,
             ),
-            window: Duration::from_secs(parse_u64_alias(
+            window: Duration::from_secs(parse_env_alias(
                 &[
                     "RATE_LIMIT_WINDOW_SECS",
                     "HTTP_RATE_LIMIT_WINDOW_SEC",
@@ -365,10 +315,8 @@ impl HttpConfig {
     pub fn from_env() -> Self {
         Self {
             trust_proxy: parse_bool_alias(&["HTTP_TRUST_PROXY", "TRUST_PROXY"], false),
-            allow_origins: parse_origins(
-                &env::var("HTTP_ALLOW_ORIGINS").unwrap_or_else(|_| "*".to_string()),
-            ),
-            request_timeout: Duration::from_secs(parse_u64_alias(
+            allow_origins: parse_origins(&env_string("HTTP_ALLOW_ORIGINS", "*")),
+            request_timeout: Duration::from_secs(parse_env_alias(
                 &["HTTP_REQUEST_TIMEOUT_SECS", "REQUEST_TIMEOUT_SECS"],
                 DEFAULT_HTTP_REQUEST_TIMEOUT_SECS,
             )),
@@ -379,13 +327,16 @@ impl HttpConfig {
 impl FrontendConfig {
     pub fn from_env() -> Self {
         Self {
-            url: env::var("FRONTEND_URL").unwrap_or_else(|_| DEFAULT_FRONTEND_URL.to_string()),
-            oauth_callback_url: env::var("FRONTEND_OAUTH_CALLBACK_URL")
-                .unwrap_or_else(|_| DEFAULT_FRONTEND_OAUTH_CALLBACK_URL.to_string()),
-            reset_password_url: env::var("FRONTEND_RESET_PASSWORD_URL")
-                .unwrap_or_else(|_| DEFAULT_FRONTEND_RESET_PASSWORD_URL.to_string()),
-            main_domain: env::var("MAIN_DOMAIN")
-                .unwrap_or_else(|_| DEFAULT_MAIN_DOMAIN.to_string()),
+            url: env_string("FRONTEND_URL", DEFAULT_FRONTEND_URL),
+            oauth_callback_url: env_string(
+                "FRONTEND_OAUTH_CALLBACK_URL",
+                DEFAULT_FRONTEND_OAUTH_CALLBACK_URL,
+            ),
+            reset_password_url: env_string(
+                "FRONTEND_RESET_PASSWORD_URL",
+                DEFAULT_FRONTEND_RESET_PASSWORD_URL,
+            ),
+            main_domain: env_string("MAIN_DOMAIN", DEFAULT_MAIN_DOMAIN),
         }
     }
 }
@@ -412,10 +363,9 @@ impl CacheConfig {
     pub fn from_env() -> Self {
         Self {
             valkey_url: env_string_alias(&["REDIS_URL", "VALKEY_URL"], ""),
-            key_prefix: env::var("CACHE_KEY_PREFIX")
-                .unwrap_or_else(|_| DEFAULT_CACHE_KEY_PREFIX.to_string()),
-            ttl: Duration::from_secs(parse_u64("CACHE_TTL_SECONDS", DEFAULT_CACHE_TTL_SECS)),
-            connect_timeout: Duration::from_millis(parse_u64_alias(
+            key_prefix: env_string("CACHE_KEY_PREFIX", DEFAULT_CACHE_KEY_PREFIX),
+            ttl: Duration::from_secs(parse_env("CACHE_TTL_SECONDS", DEFAULT_CACHE_TTL_SECS)),
+            connect_timeout: Duration::from_millis(parse_env_alias(
                 &["REDIS_CONNECT_TIMEOUT_MS", "VALKEY_CONNECT_TIMEOUT_MS"],
                 DEFAULT_VALKEY_CONNECT_TIMEOUT_MS,
             )),
@@ -436,7 +386,7 @@ impl QueueConfig {
                 ],
                 &default_redis_url,
             ),
-            connect_timeout: Duration::from_millis(parse_u64_alias(
+            connect_timeout: Duration::from_millis(parse_env_alias(
                 &[
                     "QUEUE_REDIS_TIMEOUT_MS",
                     "ASYNQ_REDIS_TIMEOUT_MS",
@@ -445,10 +395,9 @@ impl QueueConfig {
                 ],
                 DEFAULT_VALKEY_CONNECT_TIMEOUT_MS,
             )),
-            default_queue: env::var("QUEUE_DEFAULT_NAME")
-                .unwrap_or_else(|_| DEFAULT_QUEUE_DEFAULT_NAME.to_string()),
-            concurrency: parse_u32("QUEUE_CONCURRENCY", DEFAULT_QUEUE_CONCURRENCY),
-            max_retry: parse_u32("QUEUE_MAX_RETRY", DEFAULT_QUEUE_MAX_RETRY),
+            default_queue: env_string("QUEUE_DEFAULT_NAME", DEFAULT_QUEUE_DEFAULT_NAME),
+            concurrency: parse_env("QUEUE_CONCURRENCY", DEFAULT_QUEUE_CONCURRENCY),
+            max_retry: parse_env("QUEUE_MAX_RETRY", DEFAULT_QUEUE_MAX_RETRY),
         }
     }
 }
@@ -457,15 +406,11 @@ impl OpenRouterConfig {
     pub fn from_env() -> Self {
         Self {
             api_key: env::var("OPENROUTER_API_KEY").unwrap_or_default(),
-            base_url: env::var("OPENROUTER_BASE_URL")
-                .unwrap_or_else(|_| DEFAULT_OPENROUTER_BASE_URL.to_string()),
-            default_model: env::var("OPENROUTER_DEFAULT_MODEL")
-                .unwrap_or_else(|_| DEFAULT_OPENROUTER_DEFAULT_MODEL.to_string()),
-            http_referer: env::var("OPENROUTER_HTTP_REFERER")
-                .unwrap_or_else(|_| DEFAULT_OPENROUTER_HTTP_REFERER.to_string()),
-            title: env::var("OPENROUTER_TITLE")
-                .unwrap_or_else(|_| DEFAULT_OPENROUTER_TITLE.to_string()),
-            timeout: Duration::from_secs(parse_u64(
+            base_url: env_string("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL),
+            default_model: env_string("OPENROUTER_DEFAULT_MODEL", DEFAULT_OPENROUTER_DEFAULT_MODEL),
+            http_referer: env_string("OPENROUTER_HTTP_REFERER", DEFAULT_OPENROUTER_HTTP_REFERER),
+            title: env_string("OPENROUTER_TITLE", DEFAULT_OPENROUTER_TITLE),
+            timeout: Duration::from_secs(parse_env(
                 "OPENROUTER_TIMEOUT_SECONDS",
                 DEFAULT_OPENROUTER_TIMEOUT_SECS,
             )),
@@ -478,8 +423,7 @@ impl GitHubConfig {
         Self {
             client_id: env::var("GITHUB_CLIENT_ID").unwrap_or_default(),
             client_secret: env::var("GITHUB_CLIENT_SECRET").unwrap_or_default(),
-            redirect_uri: env::var("GITHUB_REDIRECT_URI")
-                .unwrap_or_else(|_| DEFAULT_GITHUB_REDIRECT_URI.to_string()),
+            redirect_uri: env_string("GITHUB_REDIRECT_URI", DEFAULT_GITHUB_REDIRECT_URI),
         }
     }
 }
@@ -558,11 +502,11 @@ mod tests {
     #[test]
     fn test_parse_numeric_defaults() {
         let non_existent = "TEST_NON_EXISTENT_VAR_XYZ_987";
-        assert_eq!(parse_u16(non_existent, 8080), 8080);
-        assert_eq!(parse_u32(non_existent, 100), 100);
-        assert_eq!(parse_u64(non_existent, 5000), 5000);
-        assert_eq!(parse_usize(non_existent, 20), 20);
-        assert_eq!(parse_i64(non_existent, -42), -42);
+        assert_eq!(parse_env::<u16>(non_existent, 8080), 8080);
+        assert_eq!(parse_env::<u32>(non_existent, 100), 100);
+        assert_eq!(parse_env::<u64>(non_existent, 5000), 5000);
+        assert_eq!(parse_env::<usize>(non_existent, 20), 20);
+        assert_eq!(parse_env::<i64>(non_existent, -42), -42);
     }
 
     #[test]
