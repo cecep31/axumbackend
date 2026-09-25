@@ -2,6 +2,7 @@ pub mod bookmark;
 pub mod chat;
 pub mod comment;
 pub mod corporate_action;
+pub mod guild;
 pub mod holding;
 pub mod notification;
 pub mod post;

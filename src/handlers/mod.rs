@@ -3,6 +3,7 @@ mod bookmark;
 mod chat;
 mod comment;
 mod exchange_rate;
+mod guild;
 mod health;
 mod holding;
 mod notification;
@@ -62,6 +63,7 @@ pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<DbPool>
         .merge(bookmark::routes())
         .merge(comment::routes())
         .merge(exchange_rate::routes())
+        .merge(guild::routes())
         .merge(holding::routes())
         .merge(notification::routes())
         .merge(post::routes())
@@ -93,6 +95,7 @@ pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<DbPool>
     let router = Router::new()
         .merge(api_routes)
         .merge(chat::routes())
+        .merge(guild::stream_routes())
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn(security_headers))
         .layer(cors_layer)

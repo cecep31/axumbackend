@@ -98,6 +98,25 @@ where
     }
 }
 
+/// Mirrors echobackend's `OptionalAuth` middleware: a valid Bearer token yields
+/// the user, while a missing, malformed or expired one leaves the caller
+/// anonymous instead of rejecting the request.
+#[derive(Debug, Clone)]
+pub struct OptionalAuthUser(pub Option<AuthUser>);
+
+impl<S> FromRequestParts<S> for OptionalAuthUser
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Ok(OptionalAuthUser(
+            AuthUser::from_request_parts(parts, state).await.ok(),
+        ))
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct AdminUser(pub AuthUser);
