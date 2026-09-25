@@ -15,8 +15,8 @@ Recommended order: `cargo fmt && cargo clippy && cargo test`
 ## Setup
 
 - Copy `.env.example` to `.env` and configure `DATABASE_URL`. A running PostgreSQL instance is required.
-- `JwtConfig` is initialized once at startup via `OnceLock`; do not attempt to set it again after `main` runs.
-- Config is loaded from env vars (via `dotenvy`), not from a config file. All env keys are documented in `src/config.rs`.
+- Config sections read via `XxxConfig::get()` are published once at startup by `Config::init_globals()` (`OnceLock`); never call `init` again after `main` runs.
+- Config is loaded from env vars (via `dotenvy`), not from a config file. Primary keys are in `.env.example`; loaders and legacy aliases live in `src/config/loader.rs`. Use `parse_env` / `parse_env_alias` / `env_string` when adding a key.
 
 ## Architecture
 
@@ -27,14 +27,15 @@ Recommended order: `cargo fmt && cargo clippy && cargo test`
 - `src/entities/` — SeaORM `DeriveEntityModel` structs mirroring DB tables. Do not confuse with `models/`.
 - `src/models/` — Application-level types (response shapes, view models) that map from entity rows.
 - `src/auth.rs` — `AuthUser` (JWT Bearer) and `AdminUser` (super-admin guard) Axum extractors.
-- `src/response.rs` — `ApiResponse<T>` wrapper: `{ success, message, data, error, meta }`.
+- `src/response.rs` — `ApiResponse<T>` wrapper: `{ success, message, data, error, meta }`. Use `ApiResponse::error(message, error)` for failure envelopes.
+- `src/middleware.rs` — security headers and CORS layer; routing itself stays in `handlers/mod.rs`.
 - `src/error.rs` — `AppError` enum implementing `IntoResponse`; all errors flow through this.
 - `src/rate_limit.rs` — In-memory rate limiter (not Redis-backed).
 
 ## Conventions
 
 - Every handler accepting input uses `Valid<Json<T>>` or `Valid<Query<T>>` with `validator::Validate` derive.
-- Error propagation uses `?`; services return `Result<_, DbErr>` or `Result<_, AppError>`.
+- Error propagation uses `?`; services return `Result<_, DbErr>` or a domain error enum (e.g. `BookmarkError`). Map a domain error to HTTP with `impl From<XError> for AppError` in the matching handler file, so handlers just use `?`. (Exceptions: `auth` takes a context message, and `guild` has separate guild/channel mappings.)
 - API responses always use `ApiResponse::success_with_message` or `ApiResponse::with_meta_message` for paginated data.
 - Route registration uses `Router::merge` per domain in `handlers/mod.rs`.
 - No migrations in this repo — manage DB schema externally. Entity files must stay in sync with the actual schema.
@@ -46,5 +47,4 @@ Multi-stage Debian build using `cargo-chef` for dependency caching (`rust:1.98-t
 ## Known Gotchas
 
 - `DbPool` is a type alias for `DatabaseConnection` (SeaORM), not a separate connection pool library.
-- `config.rs` doc comments mention `DB_POOL_MAX_LIFETIME` and `DB_POOL_IDLE_TIMEOUT` env vars, but they are **not implemented** — only `DB_POOL_MAX_SIZE` and `DB_POOL_CONNECTION_TIMEOUT` are actually parsed.
 - Pagination query params differ per endpoint (some use `PaginationQuery`, others use `limit`/`offset` directly); check individual handlers.
