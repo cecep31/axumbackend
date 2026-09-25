@@ -34,7 +34,7 @@ Recommended order: `cargo fmt && cargo clippy && cargo test`
 
 ## Conventions
 
-- Every handler accepting input uses `Valid<Json<T>>` or `Valid<Query<T>>` with `validator::Validate` derive.
+- Every handler accepting input uses `VJson<T>` / `VQuery<T>` / `VPath<T>` (`src/extract.rs`) with `garde::Validate` derive. garde requires an attribute on every field (`#[garde(skip)]` when unvalidated); use `length(chars, ...)` for strings (default mode counts bytes) and `inner(custom(...))` for custom rules on `Option` fields. Custom rules return `garde::Error::new("<tag>")`, which becomes the `tag` in the 422 envelope.
 - Error propagation uses `?`; services return `Result<_, DbErr>` or a domain error enum (e.g. `BookmarkError`). Map a domain error to HTTP with `impl From<XError> for AppError` in the matching handler file, so handlers just use `?`. (Exceptions: `auth` takes a context message, and `guild` has separate guild/channel mappings.)
 - API responses always use `ApiResponse::success_with_message` or `ApiResponse::with_meta_message` for paginated data.
 - Route registration uses `Router::merge` per domain in `handlers/mod.rs`.

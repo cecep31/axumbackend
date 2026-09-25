@@ -6,14 +6,16 @@ use crate::extract::VQuery;
 use crate::response::ApiResponse;
 use crate::services::exchange_rate::{self, ExchangeRateError};
 use axum::{Json, Router, extract::State, routing::get};
+use garde::Validate;
 use serde::Deserialize;
-use validator::Validate;
 
 #[derive(Debug, Default, Deserialize, Validate)]
 pub struct ExchangeRateQuery {
     #[serde(default)]
+    #[garde(skip)]
     pub from: String,
     #[serde(default)]
+    #[garde(skip)]
     pub to: String,
 }
 

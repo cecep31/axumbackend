@@ -1,71 +1,73 @@
+use garde::Validate;
 use serde::Deserialize;
 use uuid::Uuid;
-use validator::{Validate, ValidationError};
 
 /// Mirrors echobackend's `omitempty,uuid` tag on `reply_to_id`: the field is
 /// kept as a string so a malformed id fails validation (`422`) instead of body
 /// parsing (`400`).
-fn validate_uuid(value: &str) -> Result<(), ValidationError> {
-    Uuid::parse_str(value)
+fn validate_uuid<T: AsRef<str>>(value: &T, _: &()) -> garde::Result {
+    Uuid::parse_str(value.as_ref())
         .map(|_| ())
-        .map_err(|_| ValidationError::new("uuid"))
+        .map_err(|_| garde::Error::new("uuid"))
 }
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct CreateGuildRequest {
-    #[validate(length(min = 3, max = 100))]
+    #[garde(length(chars, min = 3, max = 100))]
     pub name: String,
-    #[validate(length(min = 3, max = 100))]
+    #[garde(length(chars, min = 3, max = 100))]
     pub slug: Option<String>,
-    #[validate(length(max = 2000))]
+    #[garde(length(chars, max = 2000))]
     pub description: Option<String>,
-    #[validate(url, length(max = 2048))]
+    #[garde(url, length(chars, max = 2048))]
     pub avatar_url: Option<String>,
+    #[garde(skip)]
     pub is_public: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct UpdateGuildRequest {
-    #[validate(length(min = 3, max = 100))]
+    #[garde(length(chars, min = 3, max = 100))]
     pub name: Option<String>,
-    #[validate(length(max = 2000))]
+    #[garde(length(chars, max = 2000))]
     pub description: Option<String>,
-    #[validate(url, length(max = 2048))]
+    #[garde(url, length(chars, max = 2048))]
     pub avatar_url: Option<String>,
+    #[garde(skip)]
     pub is_public: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct CreateGuildChannelRequest {
-    #[validate(length(min = 1, max = 100))]
+    #[garde(length(chars, min = 1, max = 100))]
     pub name: String,
-    #[validate(length(max = 1024))]
+    #[garde(length(chars, max = 1024))]
     pub topic: Option<String>,
-    #[validate(range(min = 0))]
+    #[garde(range(min = 0))]
     pub position: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct UpdateGuildChannelRequest {
-    #[validate(length(min = 1, max = 100))]
+    #[garde(length(chars, min = 1, max = 100))]
     pub name: Option<String>,
-    #[validate(length(max = 1024))]
+    #[garde(length(chars, max = 1024))]
     pub topic: Option<String>,
-    #[validate(range(min = 0))]
+    #[garde(range(min = 0))]
     pub position: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct CreateGuildMessageRequest {
-    #[validate(length(min = 1, max = 4000))]
+    #[garde(length(chars, min = 1, max = 4000))]
     pub content: String,
-    #[validate(custom(function = "validate_uuid"))]
+    #[garde(inner(custom(validate_uuid)))]
     pub reply_to_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct UpdateGuildMessageRequest {
-    #[validate(length(min = 1, max = 4000))]
+    #[garde(length(chars, min = 1, max = 4000))]
     pub content: String,
 }
 
@@ -73,8 +75,11 @@ pub struct UpdateGuildMessageRequest {
 /// `ParsePaginationParams(c, 20)` plus `?search=`.
 #[derive(Deserialize, Validate)]
 pub struct GuildListQuery {
+    #[garde(skip)]
     pub limit: Option<String>,
+    #[garde(skip)]
     pub offset: Option<String>,
+    #[garde(skip)]
     pub search: Option<String>,
 }
 
@@ -88,7 +93,9 @@ impl GuildListQuery {
 /// `?before=<message id>` cursor.
 #[derive(Deserialize, Validate)]
 pub struct GuildMessagesQuery {
+    #[garde(skip)]
     pub limit: Option<String>,
+    #[garde(skip)]
     pub before: Option<String>,
 }
 
@@ -104,21 +111,27 @@ impl GuildMessagesQuery {
 
 #[derive(Deserialize, Validate)]
 pub struct GuildSlugPath {
+    #[garde(skip)]
     pub slug: String,
 }
 
 #[derive(Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct GuildChannelPath {
+    #[garde(skip)]
     pub slug: String,
+    #[garde(skip)]
     pub channel_id: String,
 }
 
 #[derive(Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct GuildMessagePath {
+    #[garde(skip)]
     pub slug: String,
+    #[garde(skip)]
     pub channel_id: String,
+    #[garde(skip)]
     pub message_id: String,
 }
 

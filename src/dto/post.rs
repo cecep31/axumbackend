@@ -1,20 +1,23 @@
-use crate::dto::validation::{SLUG_RE, TAG_RE, USERNAME_RE};
+use crate::dto::validation::{slug_chars, tag_chars, username_chars};
 use crate::services;
+use garde::Validate;
 use serde::Deserialize;
-use validator::Validate;
 
 #[derive(Deserialize, Validate)]
 pub struct CreatePostRequest {
-    #[validate(length(min = 7))]
+    #[garde(length(chars, min = 7))]
     pub title: String,
+    #[garde(skip)]
     pub photo_url: Option<String>,
-    #[validate(length(min = 7))]
+    #[garde(length(chars, min = 7))]
     pub slug: String,
-    #[validate(length(min = 10))]
+    #[garde(length(chars, min = 10))]
     pub body: String,
     #[serde(default)]
+    #[garde(skip)]
     pub published: bool,
     #[serde(default)]
+    #[garde(skip)]
     pub tags: Vec<String>,
 }
 
@@ -23,17 +26,23 @@ pub struct CreatePostRequest {
 /// simply ignored by the update service.
 #[derive(Deserialize, Validate)]
 pub struct UpdatePostRequest {
+    #[garde(skip)]
     pub title: Option<String>,
+    #[garde(skip)]
     pub photo_url: Option<String>,
+    #[garde(skip)]
     pub slug: Option<String>,
+    #[garde(skip)]
     pub body: Option<String>,
+    #[garde(skip)]
     pub published: Option<bool>,
+    #[garde(skip)]
     pub tags: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Validate)]
 pub struct RandomPostQuery {
-    #[validate(range(min = 1, max = 100))]
+    #[garde(range(min = 1, max = 100))]
     pub limit: Option<i64>,
 }
 
@@ -41,7 +50,9 @@ pub struct RandomPostQuery {
 /// echobackend's `MyPostsAnalyticsQuery` (invalid dates fall back to defaults).
 #[derive(Deserialize, Validate)]
 pub struct MyPostsAnalyticsQuery {
+    #[garde(skip)]
     pub start_date: Option<String>,
+    #[garde(skip)]
     pub end_date: Option<String>,
 }
 
@@ -49,6 +60,7 @@ pub struct MyPostsAnalyticsQuery {
 /// echobackend's `GetMyPostsLikesByMonth`.
 #[derive(Deserialize, Validate)]
 pub struct MyPostsLikesByMonthQuery {
+    #[garde(skip)]
     pub months: Option<i64>,
 }
 
@@ -71,15 +83,17 @@ impl From<OrderDirection> for services::post::SortDirection {
 #[derive(Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct PostPaginationQuery {
-    #[validate(range(min = 0, max = 10_000))]
+    #[garde(range(min = 0, max = 10_000))]
     pub offset: Option<i64>,
-    #[validate(range(min = 1, max = 100))]
+    #[garde(range(min = 1, max = 100))]
     pub limit: Option<i64>,
-    #[validate(length(max = 200))]
+    #[garde(length(chars, max = 200))]
     pub search: Option<String>,
     #[serde(alias = "sort_by")]
+    #[garde(skip)]
     pub order_by: Option<String>,
     #[serde(alias = "sort_order")]
+    #[garde(skip)]
     pub order_direction: Option<OrderDirection>,
 }
 
@@ -90,32 +104,39 @@ pub struct PostPaginationQuery {
 /// interpreted by the handler.
 #[derive(Deserialize, Validate)]
 pub struct PostsFilterQuery {
-    #[validate(range(min = 0, max = 10_000))]
+    #[garde(range(min = 0, max = 10_000))]
     pub offset: Option<i64>,
-    #[validate(range(min = 1, max = 10_000))]
+    #[garde(range(min = 1, max = 10_000))]
     pub limit: Option<i64>,
-    #[validate(length(max = 200))]
+    #[garde(length(chars, max = 200))]
     pub search: Option<String>,
+    #[garde(skip)]
     pub sort_by: Option<String>,
+    #[garde(skip)]
     pub sort_order: Option<String>,
+    #[garde(skip)]
     pub start_date: Option<String>,
+    #[garde(skip)]
     pub end_date: Option<String>,
+    #[garde(skip)]
     pub created_by: Option<String>,
+    #[garde(skip)]
     pub published: Option<String>,
+    #[garde(skip)]
     pub tags: Option<String>,
 }
 
 #[derive(Deserialize, Validate)]
 pub struct TagPath {
-    #[validate(length(min = 1, max = 50), regex(path = *TAG_RE))]
+    #[garde(length(chars, min = 1, max = 50), custom(tag_chars))]
     pub tag: String,
 }
 
 #[derive(Deserialize, Validate)]
 pub struct PostPath {
-    #[validate(length(min = 1, max = 50), regex(path = *USERNAME_RE))]
+    #[garde(length(chars, min = 1, max = 50), custom(username_chars))]
     pub username: String,
-    #[validate(length(min = 1, max = 100), regex(path = *SLUG_RE))]
+    #[garde(length(chars, min = 1, max = 100), custom(slug_chars))]
     pub slug: String,
 }
 
@@ -221,7 +242,7 @@ mod tests {
 
         let invalid_slug = PostPath {
             username: "johndoe".into(),
-            slug: "my_slug_underscores".into(), // SLUG_RE only allows [a-zA-Z0-9-]
+            slug: "my_slug_underscores".into(), // slug charset only allows [a-zA-Z0-9-]
         };
         assert!(invalid_slug.validate().is_err());
     }

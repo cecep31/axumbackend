@@ -10,7 +10,7 @@ axum = { version = "0.8.9", features = ["multipart"] }
 tower-http = { version = "0.7.1", features = ["cors", "trace", "timeout"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokio = { version = "1.51.1", features = ["full"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
 sea-orm = { version = "2.0", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid", "with-chrono"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -21,6 +21,5 @@ argon2 = "0.6"
 rand = "0.10"
 async-stream = "0.3"
 tokio-stream = "0.1"
-validator = { version = "0.21", features = ["derive"] }
-regex = "1.11"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form", "query"] }
+garde = { version = "0.23.0", features = ["derive", "email", "url"] }

@@ -1,19 +1,23 @@
 use crate::models::report::{EngagementMetricsResponse, OverviewStatsResponse};
+use garde::Validate;
 use serde::{Deserialize, Serialize};
-use validator::Validate;
 
 #[derive(Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportQuery {
+    #[garde(skip)]
     pub start_date: Option<String>,
+    #[garde(skip)]
     pub end_date: Option<String>,
     /// Kept as a raw string and parsed leniently (mirrors echobackend's
     /// `strconv.Atoi`, which silently falls back to the default instead of
     /// rejecting the request for a non-numeric/out-of-range `limit`).
+    #[garde(skip)]
     pub limit: Option<String>,
     /// Kept as a raw string and parsed leniently (mirrors echobackend's
     /// `strconv.Atoi`, which silently ignores a malformed `tagId` instead of
     /// rejecting the request).
+    #[garde(skip)]
     pub tag_id: Option<String>,
 }
 

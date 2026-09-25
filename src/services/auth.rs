@@ -153,6 +153,23 @@ pub fn verify_password(hashed: &str, password: &str) -> (bool, bool) {
     (false, false)
 }
 
+/// Runs [`hash_password`] on the blocking pool: Argon2id with 64MB memory is
+/// CPU/memory heavy and would otherwise stall a tokio worker thread.
+async fn hash_password_async(password: &str) -> Result<String, AuthError> {
+    let password = password.to_owned();
+    tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|e| AuthError::Hash(e.to_string()))?
+}
+
+/// Runs [`verify_password`] on the blocking pool (see [`hash_password_async`]).
+async fn verify_password_async(hashed: &str, password: &str) -> (bool, bool) {
+    let (hashed, password) = (hashed.to_owned(), password.to_owned());
+    tokio::task::spawn_blocking(move || verify_password(&hashed, &password))
+        .await
+        .unwrap_or((false, false))
+}
+
 fn make_user_brief(user: &users::Model) -> UserBrief {
     UserBrief {
         id: user.id,
@@ -289,7 +306,7 @@ pub async fn register(
         return Err(AuthError::UserExists);
     }
 
-    let hashed = hash_password(&password)?;
+    let hashed = hash_password_async(&password).await?;
     let user = users::ActiveModel {
         id: Set(Uuid::now_v7()),
         email: Set(email),
@@ -367,7 +384,7 @@ pub async fn login(
         return Err(AuthError::InvalidCredentials);
     };
 
-    let (is_valid, needs_rehash) = verify_password(hashed_password, password);
+    let (is_valid, needs_rehash) = verify_password_async(hashed_password, password).await;
     if !is_valid {
         log_activity(
             db,
@@ -386,7 +403,7 @@ pub async fn login(
     let response = create_token_and_session(db, &user, user_agent.clone()).await?;
     let mut active: users::ActiveModel = user.clone().into();
     active.last_logged_at = Set(Some(Utc::now().into()));
-    if needs_rehash && let Ok(new_hash) = hash_password(password) {
+    if needs_rehash && let Ok(new_hash) = hash_password_async(password).await {
         active.password = Set(Some(new_hash));
     }
     let _ = active.update(db).await;
@@ -685,7 +702,7 @@ pub async fn reset_password(
         .await?
         .ok_or(AuthError::InvalidToken)?;
 
-    let hashed = hash_password(password)?;
+    let hashed = hash_password_async(password).await?;
     let mut active_user: users::ActiveModel = user.clone().into();
     active_user.password = Set(Some(hashed));
     active_user.updated_at = Set(Some(Utc::now().into()));
@@ -731,7 +748,7 @@ pub async fn change_password(
         return Err(AuthError::InvalidCredentials);
     };
 
-    let (is_valid, _) = verify_password(hashed_password, current_password);
+    let (is_valid, _) = verify_password_async(hashed_password, current_password).await;
     if !is_valid {
         log_activity(
             db,
@@ -747,7 +764,7 @@ pub async fn change_password(
         return Err(AuthError::InvalidCredentials);
     }
 
-    let hashed = hash_password(new_password)?;
+    let hashed = hash_password_async(new_password).await?;
     let mut active_user: users::ActiveModel = user.clone().into();
     active_user.password = Set(Some(hashed));
     active_user.updated_at = Set(Some(Utc::now().into()));

@@ -21,26 +21,29 @@ use axum::{
     },
     routing::{get, post},
 };
+use garde::Validate;
 use serde::Deserialize;
 use std::convert::Infallible;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
-use validator::Validate;
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct ConversationPath {
+    #[garde(skip)]
     pub id: Uuid,
 }
 
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationMessagesPath {
+    #[garde(skip)]
     pub conversation_id: Uuid,
 }
 
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct MessagePath {
+    #[garde(skip)]
     pub message_id: Uuid,
 }
 

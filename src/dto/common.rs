@@ -1,14 +1,16 @@
-use crate::dto::validation::{USERNAME_RE, parse_pagination};
+use crate::dto::validation::{parse_pagination, username_chars};
+use garde::Validate;
 use serde::Deserialize;
 use uuid::Uuid;
-use validator::Validate;
 
 /// Lenient pagination query, mirroring echobackend's `ParsePaginationParams`:
 /// invalid or out-of-range values are silently clamped/defaulted rather than
 /// rejected with a `422`.
 #[derive(Deserialize, Validate)]
 pub struct PaginationQuery {
+    #[garde(skip)]
     pub offset: Option<String>,
+    #[garde(skip)]
     pub limit: Option<String>,
 }
 
@@ -21,11 +23,12 @@ impl PaginationQuery {
 
 #[derive(Deserialize, Validate)]
 pub struct UsernamePath {
-    #[validate(length(min = 1, max = 50), regex(path = *USERNAME_RE))]
+    #[garde(length(chars, min = 1, max = 50), custom(username_chars))]
     pub username: String,
 }
 
 #[derive(Deserialize, Validate)]
 pub struct PostIdPath {
+    #[garde(skip)]
     pub id: Uuid,
 }

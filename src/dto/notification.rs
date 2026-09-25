@@ -1,13 +1,16 @@
+use garde::Validate;
 use serde::Deserialize;
 use uuid::Uuid;
-use validator::Validate;
 
 #[derive(Deserialize, Validate)]
 pub struct NotificationQuery {
     /// Kept as a raw string and compared against `"true"`, mirroring
     /// echobackend's `c.QueryParam("unread") == "true"` (lenient parsing).
+    #[garde(skip)]
     pub unread: Option<String>,
+    #[garde(skip)]
     pub limit: Option<String>,
+    #[garde(skip)]
     pub offset: Option<String>,
 }
 
@@ -21,5 +24,6 @@ impl NotificationQuery {
 
 #[derive(Deserialize, Validate)]
 pub struct NotificationPath {
+    #[garde(skip)]
     pub id: Uuid,
 }

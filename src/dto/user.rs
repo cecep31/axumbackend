@@ -1,14 +1,16 @@
+use garde::Validate;
 use serde::Deserialize;
 use uuid::Uuid;
-use validator::Validate;
 
 #[derive(Deserialize, Validate)]
 pub struct UserIdPath {
+    #[garde(skip)]
     pub id: Uuid,
 }
 
 #[derive(Deserialize, Validate)]
 pub struct FollowRequest {
+    #[garde(skip)]
     pub user_id: Uuid,
 }
 
@@ -34,43 +36,46 @@ impl UserDeletedFilter {
 
 #[derive(Deserialize, Validate)]
 pub struct UserListQuery {
-    #[validate(range(min = 0, max = 10_000))]
+    #[garde(range(min = 0, max = 10_000))]
     pub offset: Option<i64>,
-    #[validate(range(min = 1, max = 100))]
+    #[garde(range(min = 1, max = 100))]
     pub limit: Option<i64>,
+    #[garde(skip)]
     pub deleted: Option<String>,
 }
 
 #[derive(Deserialize, Validate)]
 pub struct UserDetailQuery {
+    #[garde(skip)]
     pub deleted: Option<String>,
 }
 
 #[derive(Deserialize, Validate)]
 pub struct CreateUserRequest {
-    #[validate(length(min = 3, max = 30))]
+    #[garde(length(chars, min = 3, max = 30))]
     pub username: String,
-    #[validate(email)]
+    #[garde(email)]
     pub email: String,
-    #[validate(length(min = 8))]
+    #[garde(length(chars, min = 8))]
     pub password: String,
-    #[validate(length(max = 100))]
+    #[garde(length(chars, max = 100))]
     pub first_name: Option<String>,
-    #[validate(length(max = 100))]
+    #[garde(length(chars, max = 100))]
     pub last_name: Option<String>,
 }
 
 #[derive(Deserialize, Validate)]
 pub struct UpdateUserRequest {
-    #[validate(length(min = 3, max = 30))]
+    #[garde(length(chars, min = 3, max = 30))]
     pub username: String,
-    #[validate(email)]
+    #[garde(email)]
     pub email: String,
-    #[validate(length(max = 100))]
+    #[garde(length(chars, max = 100))]
     pub first_name: Option<String>,
-    #[validate(length(max = 100))]
+    #[garde(length(chars, max = 100))]
     pub last_name: Option<String>,
     #[serde(default)]
+    #[garde(skip)]
     pub is_super_admin: Option<bool>,
 }
 

@@ -1,15 +1,17 @@
+use garde::Validate;
 use serde::Deserialize;
 use uuid::Uuid;
-use validator::Validate;
 
 #[derive(Deserialize, Validate)]
 pub struct CommentRequest {
-    #[validate(length(min = 1, max = 1000))]
+    #[garde(length(chars, min = 1, max = 1000))]
     pub text: String,
 }
 
 #[derive(Deserialize, Validate)]
 pub struct CommentPath {
+    #[garde(skip)]
     pub id: Uuid,
+    #[garde(skip)]
     pub comment_id: Uuid,
 }

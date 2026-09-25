@@ -1,9 +1,10 @@
 use crate::dto::validation::{parse_month, parse_year};
+use garde::Validate;
 use serde::Deserialize;
-use validator::Validate;
 
 #[derive(Deserialize, Validate)]
 pub struct HoldingPath {
+    #[garde(skip)]
     pub id: i64,
 }
 
@@ -12,11 +13,15 @@ pub struct HoldingPath {
 pub struct HoldingQuery {
     /// Kept as a raw string and parsed leniently: only `1..=12` overrides the
     /// caller's default month, mirroring echobackend's inline `QueryParam` parsing.
+    #[garde(skip)]
     pub month: Option<String>,
     /// Kept as a raw string and parsed leniently: any integer is accepted
     /// (no range bound), mirroring echobackend.
+    #[garde(skip)]
     pub year: Option<String>,
+    #[garde(skip)]
     pub sort_by: Option<String>,
+    #[garde(skip)]
     pub order: Option<String>,
 }
 
@@ -32,69 +37,90 @@ impl HoldingQuery {
 
 #[derive(Deserialize, Validate)]
 pub struct CreateHoldingRequest {
-    #[validate(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub name: String,
+    #[garde(skip)]
     pub symbol: Option<String>,
-    #[validate(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub platform: String,
+    #[garde(skip)]
     pub holding_type_id: i16,
-    #[validate(length(equal = 3))]
+    #[garde(length(chars, equal = 3))]
     pub currency: String,
+    #[garde(skip)]
     pub invested_amount: String,
+    #[garde(skip)]
     pub current_value: String,
+    #[garde(skip)]
     pub units: Option<String>,
+    #[garde(skip)]
     pub avg_buy_price: Option<String>,
+    #[garde(skip)]
     pub current_price: Option<String>,
+    #[garde(skip)]
     pub last_updated: Option<String>,
+    #[garde(skip)]
     pub notes: Option<String>,
-    #[validate(range(min = 1, max = 12))]
+    #[garde(range(min = 1, max = 12))]
     pub month: i32,
-    #[validate(range(min = 2000))]
+    #[garde(range(min = 2000))]
     pub year: i32,
 }
 
 #[derive(Deserialize, Validate)]
 pub struct UpdateHoldingRequest {
-    #[validate(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub name: Option<String>,
+    #[garde(skip)]
     pub symbol: Option<String>,
-    #[validate(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub platform: Option<String>,
+    #[garde(skip)]
     pub holding_type_id: Option<i16>,
-    #[validate(length(equal = 3))]
+    #[garde(length(chars, equal = 3))]
     pub currency: Option<String>,
+    #[garde(skip)]
     pub invested_amount: Option<String>,
+    #[garde(skip)]
     pub current_value: Option<String>,
+    #[garde(skip)]
     pub units: Option<String>,
+    #[garde(skip)]
     pub avg_buy_price: Option<String>,
+    #[garde(skip)]
     pub current_price: Option<String>,
+    #[garde(skip)]
     pub last_updated: Option<String>,
+    #[garde(skip)]
     pub notes: Option<String>,
-    #[validate(range(min = 1, max = 12))]
+    #[garde(range(min = 1, max = 12))]
     pub month: Option<i32>,
-    #[validate(range(min = 2000))]
+    #[garde(range(min = 2000))]
     pub year: Option<i32>,
 }
 
 #[derive(Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct DuplicateHoldingRequest {
-    #[validate(range(min = 1, max = 12))]
+    #[garde(range(min = 1, max = 12))]
     pub from_month: i32,
-    #[validate(range(min = 1900, max = 2100))]
+    #[garde(range(min = 1900, max = 2100))]
     pub from_year: i32,
-    #[validate(range(min = 1, max = 12))]
+    #[garde(range(min = 1, max = 12))]
     pub to_month: i32,
-    #[validate(range(min = 1900, max = 2100))]
+    #[garde(range(min = 1900, max = 2100))]
     pub to_year: i32,
     #[serde(default)]
+    #[garde(skip)]
     pub overwrite: bool,
 }
 
 #[derive(Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct SummaryQuery {
+    #[garde(skip)]
     pub month: Option<String>,
+    #[garde(skip)]
     pub year: Option<String>,
 }
 
@@ -110,15 +136,20 @@ impl SummaryQuery {
 
 #[derive(Deserialize, Validate)]
 pub struct TrendsQuery {
+    #[garde(skip)]
     pub years: Option<String>,
 }
 
 #[derive(Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct CompareQuery {
+    #[garde(skip)]
     pub from_month: Option<String>,
+    #[garde(skip)]
     pub from_year: Option<String>,
+    #[garde(skip)]
     pub to_month: Option<String>,
+    #[garde(skip)]
     pub to_year: Option<String>,
 }
 
@@ -143,9 +174,13 @@ impl CompareQuery {
 #[derive(Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct MonthlyQuery {
+    #[garde(skip)]
     pub start_month: Option<String>,
+    #[garde(skip)]
     pub start_year: Option<String>,
+    #[garde(skip)]
     pub end_month: Option<String>,
+    #[garde(skip)]
     pub end_year: Option<String>,
 }
 
@@ -173,8 +208,10 @@ impl MonthlyQuery {
 pub struct CalendarQuery {
     /// Month `1-12`. Defaults to the current month; invalid values also fall
     /// back to the current month (handled by the service, like echobackend).
+    #[garde(skip)]
     pub month: Option<i32>,
     /// Four-digit year. Defaults to the current year.
+    #[garde(skip)]
     pub year: Option<i32>,
 }
 

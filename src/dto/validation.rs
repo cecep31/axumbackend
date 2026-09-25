@@ -1,10 +1,45 @@
-use regex::Regex;
-use std::sync::LazyLock;
+/// `^[a-zA-Z0-9_-]+$`
+fn is_username(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
 
-pub static USERNAME_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap());
-pub static SLUG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9-]+$").unwrap());
-pub static TAG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap());
+/// `^[a-zA-Z0-9-]+$`
+fn is_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// `^[a-zA-Z0-9_-]+$`
+fn is_tag(value: &str) -> bool {
+    is_username(value)
+}
+
+/// Charset checks keep the `regex` tag so the 422 envelope is unchanged from
+/// the previous `validator` `regex(path = ...)` rules.
+fn charset(valid: bool) -> garde::Result {
+    if valid {
+        Ok(())
+    } else {
+        Err(garde::Error::new("regex"))
+    }
+}
+
+pub fn username_chars<T: AsRef<str>>(value: &T, _: &()) -> garde::Result {
+    charset(is_username(value.as_ref()))
+}
+
+pub fn slug_chars<T: AsRef<str>>(value: &T, _: &()) -> garde::Result {
+    charset(is_slug(value.as_ref()))
+}
+
+pub fn tag_chars<T: AsRef<str>>(value: &T, _: &()) -> garde::Result {
+    charset(is_tag(value.as_ref()))
+}
 
 /// Mirrors echobackend's `ParsePaginationParams(defaultLimit)`: an invalid or
 /// missing value silently falls back to the default instead of failing the
@@ -116,29 +151,29 @@ mod tests {
     }
 
     #[test]
-    fn test_username_regex() {
-        assert!(USERNAME_RE.is_match("user_123"));
-        assert!(USERNAME_RE.is_match("test-user"));
-        assert!(USERNAME_RE.is_match("Alice"));
-        assert!(!USERNAME_RE.is_match("user with spaces"));
-        assert!(!USERNAME_RE.is_match("user@email"));
-        assert!(!USERNAME_RE.is_match(""));
+    fn test_username_charset() {
+        assert!(is_username("user_123"));
+        assert!(is_username("test-user"));
+        assert!(is_username("Alice"));
+        assert!(!is_username("user with spaces"));
+        assert!(!is_username("user@email"));
+        assert!(!is_username(""));
     }
 
     #[test]
-    fn test_slug_regex() {
-        assert!(SLUG_RE.is_match("my-awesome-post-2024"));
-        assert!(SLUG_RE.is_match("post1"));
-        assert!(!SLUG_RE.is_match("post_with_underscore"));
-        assert!(!SLUG_RE.is_match("post with spaces"));
+    fn test_slug_charset() {
+        assert!(is_slug("my-awesome-post-2024"));
+        assert!(is_slug("post1"));
+        assert!(!is_slug("post_with_underscore"));
+        assert!(!is_slug("post with spaces"));
     }
 
     #[test]
-    fn test_tag_regex() {
-        assert!(TAG_RE.is_match("rust_lang"));
-        assert!(TAG_RE.is_match("web-dev"));
-        assert!(TAG_RE.is_match("backend"));
-        assert!(!TAG_RE.is_match("tag with space"));
-        assert!(!TAG_RE.is_match("tag!"));
+    fn test_tag_charset() {
+        assert!(is_tag("rust_lang"));
+        assert!(is_tag("web-dev"));
+        assert!(is_tag("backend"));
+        assert!(!is_tag("tag with space"));
+        assert!(!is_tag("tag!"));
     }
 }
