@@ -77,7 +77,7 @@ impl Related<super::tags::Entity> for Entity {
     }
 
     fn via() -> Option<RelationDef> {
-        Some(Relation::PostsToTags.def().rev())
+        Some(super::posts_to_tags::Relation::Posts.def().rev())
     }
 }
 
