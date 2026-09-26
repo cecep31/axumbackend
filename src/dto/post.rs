@@ -1,4 +1,4 @@
-use crate::dto::validation::{slug_chars, tag_chars, username_chars};
+use crate::dto::validation::{tag_chars, username_chars};
 use crate::services;
 use garde::Validate;
 use serde::Deserialize;
@@ -136,7 +136,10 @@ pub struct TagPath {
 pub struct PostPath {
     #[garde(length(chars, min = 1, max = 50), custom(username_chars))]
     pub username: String,
-    #[garde(length(chars, min = 1, max = 100), custom(slug_chars))]
+    // No charset rule: post creation only enforces a minimum length (same as
+    // echobackend), so stored slugs may hold any character and must stay
+    // reachable. Max mirrors the varchar(255) column.
+    #[garde(length(chars, min = 1, max = 255))]
     pub slug: String,
 }
 
@@ -240,11 +243,17 @@ mod tests {
         };
         assert!(invalid_username.validate().is_err());
 
-        let invalid_slug = PostPath {
+        let legacy_slug = PostPath {
             username: "johndoe".into(),
-            slug: "my_slug_underscores".into(), // slug charset only allows [a-zA-Z0-9-]
+            slug: "my_slug_underscores".into(),
         };
-        assert!(invalid_slug.validate().is_err());
+        assert!(legacy_slug.validate().is_ok());
+
+        let empty_slug = PostPath {
+            username: "johndoe".into(),
+            slug: "".into(),
+        };
+        assert!(empty_slug.validate().is_err());
     }
 
     #[test]

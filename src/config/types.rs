@@ -15,6 +15,10 @@ pub const DEFAULT_JWT_SECRET: &str = "your-secret-key";
 pub const DEFAULT_JWT_EXPIRY_SECS: u64 = 15 * 60;
 pub const DEFAULT_JWT_EXPIRY_HOURS: i64 = 0;
 pub const DEFAULT_REFRESH_TOKEN_EXPIRY_DAYS: i64 = 7;
+/// Matches echobackend's REFRESH_TOKEN_ABSOLUTE_EXPIRY default (720h).
+pub const DEFAULT_REFRESH_TOKEN_ABSOLUTE_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
+/// Matches echobackend's REFRESH_TOKEN_GRACE_PERIOD default (60s).
+pub const DEFAULT_REFRESH_TOKEN_GRACE_PERIOD_SECS: u64 = 60;
 pub const DEFAULT_EMAIL_FROM: &str = "noreply@pilput.net";
 pub const DEFAULT_FRONTEND_URL: &str = "http://localhost:3000";
 pub const DEFAULT_FRONTEND_OAUTH_CALLBACK_URL: &str = "http://localhost:3000/auth/callback";
@@ -85,6 +89,12 @@ pub struct JwtConfig {
     pub expiry: Duration,
     pub expiry_hours: i64,
     pub refresh_token_expiry_days: i64,
+    /// Caps the total lifetime of a rotation chain, however often it is
+    /// refreshed (OWASP ASVS v5.0 7.3.2).
+    pub refresh_token_absolute_expiry: Duration,
+    /// Keeps a just-rotated refresh token usable briefly so a client's own
+    /// concurrent refreshes are not mistaken for a replay. Zero disables it.
+    pub refresh_token_grace_period: Duration,
 }
 
 /// Email delivery configuration

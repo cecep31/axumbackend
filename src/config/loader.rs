@@ -258,6 +258,14 @@ impl JwtConfig {
                 "REFRESH_TOKEN_EXPIRY_DAYS",
                 DEFAULT_REFRESH_TOKEN_EXPIRY_DAYS,
             ),
+            refresh_token_absolute_expiry: parse_duration_alias(
+                &["REFRESH_TOKEN_ABSOLUTE_EXPIRY"],
+                Duration::from_secs(DEFAULT_REFRESH_TOKEN_ABSOLUTE_EXPIRY_SECS),
+            ),
+            refresh_token_grace_period: parse_duration_alias(
+                &["REFRESH_TOKEN_GRACE_PERIOD"],
+                Duration::from_secs(DEFAULT_REFRESH_TOKEN_GRACE_PERIOD_SECS),
+            ),
         }
     }
 }
@@ -456,6 +464,9 @@ impl Config {
         }
         if self.jwt.refresh_token_expiry_days <= 0 {
             return Err("REFRESH_TOKEN_EXPIRY_DAYS must be > 0".to_string());
+        }
+        if self.jwt.refresh_token_absolute_expiry.is_zero() {
+            return Err("REFRESH_TOKEN_ABSOLUTE_EXPIRY must be > 0".to_string());
         }
         if self.database_url.is_empty() {
             return Err("DATABASE_URL is required".to_string());

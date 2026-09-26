@@ -6,14 +6,6 @@ fn is_username(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-/// `^[a-zA-Z0-9-]+$`
-fn is_slug(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-}
-
 /// `^[a-zA-Z0-9_-]+$`
 fn is_tag(value: &str) -> bool {
     is_username(value)
@@ -31,10 +23,6 @@ fn charset(valid: bool) -> garde::Result {
 
 pub fn username_chars<T: AsRef<str>>(value: &T, _: &()) -> garde::Result {
     charset(is_username(value.as_ref()))
-}
-
-pub fn slug_chars<T: AsRef<str>>(value: &T, _: &()) -> garde::Result {
-    charset(is_slug(value.as_ref()))
 }
 
 pub fn tag_chars<T: AsRef<str>>(value: &T, _: &()) -> garde::Result {
@@ -158,14 +146,6 @@ mod tests {
         assert!(!is_username("user with spaces"));
         assert!(!is_username("user@email"));
         assert!(!is_username(""));
-    }
-
-    #[test]
-    fn test_slug_charset() {
-        assert!(is_slug("my-awesome-post-2024"));
-        assert!(is_slug("post1"));
-        assert!(!is_slug("post_with_underscore"));
-        assert!(!is_slug("post with spaces"));
     }
 
     #[test]
