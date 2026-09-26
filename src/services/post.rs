@@ -1,3 +1,4 @@
+use crate::cache;
 use crate::entities::{posts, posts_to_tags, tags, users};
 use crate::models::post::{Post, SitemapPost};
 use chrono::Utc;
@@ -8,6 +9,7 @@ use sea_orm::{
     FromQueryResult, IntoActiveModel, JoinType, ModelTrait, Order, PaginatorTrait, QueryFilter,
     QueryOrder, QuerySelect, QueryTrait, RelationTrait, Set,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 #[derive(Clone, Copy)]
@@ -304,7 +306,14 @@ pub async fn get_post_by_id_for_author(
     }
 }
 
+/// Cached for `CACHE_TTL_SECONDS` under `posts:random:<limit>` when Redis is
+/// configured, like echobackend's `GetPostsRandom`.
 pub async fn get_random_posts(db: &DatabaseConnection, limit: i64) -> Result<Vec<Post>, DbErr> {
+    let cache_key = cache::get().map(|c| c.build_key(&["posts", "random", &limit.to_string()]));
+    if let Some(posts) = read_cached::<Vec<Post>>(cache_key.as_deref()).await {
+        return Ok(posts);
+    }
+
     let post_models = posts::Entity::find()
         .filter(posts::Column::Published.eq(true))
         .order_by(sea_orm::sea_query::Expr::cust("RANDOM()"), Order::Asc)
@@ -312,10 +321,27 @@ pub async fn get_random_posts(db: &DatabaseConnection, limit: i64) -> Result<Vec
         .all(db)
         .await?;
 
-    hydrate_posts(db, post_models, true).await
+    let posts = hydrate_posts(db, post_models, true).await?;
+    write_cached(cache_key.as_deref(), &posts).await;
+    Ok(posts)
 }
 
+/// echobackend caches trending posts wrapped in its `trendingPostsCacheEntry`
+/// struct, so the shared key holds `{"Posts": [...]}`.
+#[derive(Serialize, Deserialize)]
+struct TrendingPostsCacheEntry {
+    #[serde(rename = "Posts")]
+    posts: Vec<Post>,
+}
+
+/// Cached for `CACHE_TTL_SECONDS` under `posts:trending:<limit>` when Redis is
+/// configured, like echobackend's `GetPostsTrending`.
 pub async fn get_trending_posts(db: &DatabaseConnection, limit: i64) -> Result<Vec<Post>, DbErr> {
+    let cache_key = cache::get().map(|c| c.build_key(&["posts", "trending", &limit.to_string()]));
+    if let Some(entry) = read_cached::<TrendingPostsCacheEntry>(cache_key.as_deref()).await {
+        return Ok(entry.posts);
+    }
+
     let post_models = posts::Entity::find()
         .filter(posts::Column::Published.eq(true))
         .order_by(
@@ -326,7 +352,32 @@ pub async fn get_trending_posts(db: &DatabaseConnection, limit: i64) -> Result<V
         .all(db)
         .await?;
 
-    hydrate_posts(db, post_models, true).await
+    let entry = TrendingPostsCacheEntry {
+        posts: hydrate_posts(db, post_models, true).await?,
+    };
+    write_cached(cache_key.as_deref(), &entry).await;
+    Ok(entry.posts)
+}
+
+/// A cache error is treated as a miss: the database stays the source of truth.
+async fn read_cached<T: serde::de::DeserializeOwned>(key: Option<&str>) -> Option<T> {
+    let (cache, key) = (cache::get()?, key?);
+    match cache.get_json(key).await {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(key, error = %err, "post cache: read failed");
+            None
+        }
+    }
+}
+
+async fn write_cached<T: Serialize>(key: Option<&str>, value: &T) {
+    let (Some(cache), Some(key)) = (cache::get(), key) else {
+        return;
+    };
+    if let Err(err) = cache.set_json(key, value).await {
+        tracing::warn!(key, error = %err, "post cache: write failed");
+    }
 }
 
 pub async fn get_posts_for_sitemap(

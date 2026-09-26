@@ -1,25 +1,42 @@
 //! In-process fan-out of realtime events to long-lived subscribers (SSE
 //! streams), mirroring echobackend's `internal/platform/realtime.Hub`.
 //!
-//! Delivery is local to this instance: echobackend relays through Redis
-//! pub/sub when it is configured, but axumbackend has no Redis, so events only
-//! reach subscribers connected to the instance that published them.
+//! Every instance keeps its subscribers in memory. Once [`Hub::start_relay`]
+//! runs (Redis configured), events are published through Redis pub/sub on
+//! `<CACHE_KEY_PREFIX>:realtime:<topic>`, the same channels echobackend uses,
+//! and each instance delivers what its pattern subscription receives, so
+//! events reach subscribers connected to any instance. Without Redis,
+//! delivery is local only, which is correct for a single instance.
 
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::broadcast;
+use std::sync::{LazyLock, OnceLock};
+use std::time::Duration;
+use tokio::sync::{broadcast, mpsc};
+use tokio_stream::StreamExt;
+
+use crate::cache::Cache;
 
 /// How many undelivered events a subscriber may lag behind before it is
 /// dropped.
 const SUBSCRIPTION_BUFFER: usize = 64;
+
+/// Bounds the wait between attempts to re-open the Redis subscription.
+const RELAY_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 type Topics = HashMap<String, broadcast::Sender<Arc<str>>>;
 
 #[derive(Clone, Default)]
 pub struct Hub {
     topics: Arc<Mutex<Topics>>,
+    relay: Arc<OnceLock<Relay>>,
+}
+
+struct Relay {
+    /// Feeds one publisher task, which keeps events in publish order.
+    outgoing: mpsc::UnboundedSender<(String, Arc<str>)>,
 }
 
 static HUB: LazyLock<Hub> = LazyLock::new(Hub::default);
@@ -44,15 +61,118 @@ impl Hub {
         }
     }
 
-    /// Serializes `event` and sends it to every subscriber of `topic`. Having
-    /// no subscribers is not an error.
+    /// Serializes `event` and sends it to every subscriber of `topic`, across
+    /// instances when the Redis relay runs. Having no subscribers is not an
+    /// error.
     pub fn publish<T: Serialize>(&self, topic: &str, event: &T) -> Result<(), serde_json::Error> {
         let payload: Arc<str> = serde_json::to_string(event)?.into();
+        match self.relay.get() {
+            Some(relay) => {
+                if let Err(mpsc::error::SendError((topic, payload))) =
+                    relay.outgoing.send((topic.to_string(), payload))
+                {
+                    self.deliver(&topic, payload);
+                }
+            }
+            None => self.deliver(topic, payload),
+        }
+        Ok(())
+    }
+
+    /// Hands `payload` to this instance's subscribers of `topic`.
+    fn deliver(&self, topic: &str, payload: Arc<str>) {
         let topics = self.topics.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(tx) = topics.get(topic) {
             let _ = tx.send(payload);
         }
-        Ok(())
+    }
+
+    /// Routes events through Redis pub/sub from now on. Spawns the publisher
+    /// and subscriber tasks on the current Tokio runtime; call it once, at
+    /// startup, after [`crate::cache::init`] succeeded.
+    pub fn start_relay(&self, cache: &'static Cache) {
+        let prefix = format!("{}:", cache.build_key(&["realtime"]));
+        let (outgoing, rx) = mpsc::unbounded_channel();
+        // Whether the pattern subscription is live. While it is down, events
+        // published by this instance are also delivered locally, since they
+        // would otherwise never come back from Redis.
+        let subscribed = Arc::new(AtomicBool::new(false));
+        if self.relay.set(Relay { outgoing }).is_err() {
+            tracing::warn!("realtime: Redis relay already started");
+            return;
+        }
+
+        tokio::spawn(run_publisher(
+            self.clone(),
+            cache,
+            prefix.clone(),
+            rx,
+            subscribed.clone(),
+        ));
+        tokio::spawn(run_subscriber(self.clone(), cache, prefix, subscribed));
+        tracing::info!("realtime: relaying events through Redis pub/sub");
+    }
+}
+
+async fn run_publisher(
+    hub: Hub,
+    cache: &'static Cache,
+    prefix: String,
+    mut rx: mpsc::UnboundedReceiver<(String, Arc<str>)>,
+    subscribed: Arc<AtomicBool>,
+) {
+    while let Some((topic, payload)) = rx.recv().await {
+        let channel = format!("{prefix}{topic}");
+        match cache.publish(&channel, payload.as_bytes()).await {
+            Ok(()) if subscribed.load(Ordering::Acquire) => {}
+            // Redis accepted it but this instance's subscription is down,
+            // so it would not come back to local subscribers.
+            Ok(()) => hub.deliver(&topic, payload),
+            Err(err) => {
+                tracing::warn!(error = %err, %topic, "realtime: Redis publish failed, delivering locally");
+                hub.deliver(&topic, payload);
+            }
+        }
+    }
+}
+
+/// Keeps one pattern subscription open, re-opening it with backoff whenever
+/// the connection drops.
+async fn run_subscriber(
+    hub: Hub,
+    cache: &'static Cache,
+    prefix: String,
+    subscribed: Arc<AtomicBool>,
+) {
+    let pattern = format!("{prefix}*");
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match cache.pubsub().await {
+            Ok(mut pubsub) => match pubsub.psubscribe(&pattern).await {
+                Ok(()) => {
+                    subscribed.store(true, Ordering::Release);
+                    backoff = Duration::from_secs(1);
+                    let mut messages = pubsub.into_on_message();
+                    while let Some(msg) = messages.next().await {
+                        let Some(topic) = msg.get_channel_name().strip_prefix(&prefix) else {
+                            continue;
+                        };
+                        match std::str::from_utf8(msg.get_payload_bytes()) {
+                            Ok(payload) => hub.deliver(topic, payload.into()),
+                            Err(_) => {
+                                tracing::warn!(%topic, "realtime: dropping non-UTF-8 event");
+                            }
+                        }
+                    }
+                    subscribed.store(false, Ordering::Release);
+                    tracing::warn!("realtime: Redis subscription closed, reconnecting");
+                }
+                Err(err) => tracing::warn!(error = %err, "realtime: Redis psubscribe failed"),
+            },
+            Err(err) => tracing::warn!(error = %err, "realtime: Redis pub/sub connect failed"),
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(RELAY_MAX_BACKOFF);
     }
 }
 

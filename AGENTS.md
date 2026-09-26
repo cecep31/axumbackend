@@ -30,7 +30,9 @@ Recommended order: `cargo fmt && cargo clippy && cargo test`
 - `src/response.rs` — `ApiResponse<T>` wrapper: `{ success, message, data, error, meta }`. Use `ApiResponse::error(message, error)` for failure envelopes.
 - `src/middleware.rs` — security headers and CORS layer; routing itself stays in `handlers/mod.rs`.
 - `src/error.rs` — `AppError` enum implementing `IntoResponse`; all errors flow through this.
-- `src/rate_limit.rs` — In-memory rate limiter (not Redis-backed).
+- `src/rate_limit.rs` — Fixed-window rate limiter. In-memory by default; limiters built with `.shared(name)` (the auth routes) count in Redis when it is available.
+- `src/cache.rs` — Optional, fail-open Redis/Valkey client (`cache::get()` returns `None` when `REDIS_URL` is empty or unreachable). Every caller must keep an in-memory/DB fallback. Keys are `<CACHE_KEY_PREFIX>:<parts>` and match echobackend's layout, so keep key names and cached JSON shapes compatible.
+- `src/realtime.rs` — SSE fan-out hub; relays through Redis pub/sub (`<prefix>:realtime:<topic>`) when the cache is enabled.
 
 ## Conventions
 

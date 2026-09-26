@@ -25,3 +25,5 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 garde = { version = "0.23.0", features = ["derive", "email", "url"] }
 sha2 = "0.10"
 hex = "0.4"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+redis = { version = "1.7", default-features = false, features = ["script", "tokio-rustls-comp", "connection-manager"] }

@@ -1,4 +1,4 @@
-use axumbackend::{config, database, handlers, rate_limit::RateLimiter};
+use axumbackend::{cache, config, database, handlers, rate_limit::RateLimiter, realtime};
 use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -45,6 +45,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.db_pool.min_idle,
         config.db_pool.connection_timeout
     );
+
+    // Optional: without Redis, caching, auth rate limits, OAuth exchange codes
+    // and realtime delivery stay in-process.
+    if let Some(cache) = cache::init(&config.cache).await {
+        realtime::hub().start_relay(cache);
+    }
 
     let limiter = if config.rate_limit.max_requests == 0 {
         tracing::info!("Rate limiter disabled");

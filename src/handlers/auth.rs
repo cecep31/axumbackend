@@ -441,7 +441,7 @@ pub async fn github_oauth_callback(
         }
     };
 
-    let exchange_code = services::auth::create_oauth_exchange_code(tokens);
+    let exchange_code = services::auth::create_oauth_exchange_code(tokens).await;
     oauth_redirect(
         append_query_param(callback_url, "code", &exchange_code),
         Some(clear_cookie),
@@ -452,12 +452,14 @@ pub async fn github_oauth_callback(
 pub async fn exchange_oauth_code(
     VJson(req): VJson<OAuthExchangeRequest>,
 ) -> Result<Json<ApiResponse<services::auth::AuthTokenResponse>>, AppError> {
-    let response = services::auth::exchange_oauth_code(&req.code).map_err(|err| match err {
-        AuthError::InvalidToken => {
-            AppError::Unauthorized("Invalid or expired OAuth code".to_string())
-        }
-        other => map_auth_error("Failed to exchange OAuth code", other),
-    })?;
+    let response = services::auth::exchange_oauth_code(&req.code)
+        .await
+        .map_err(|err| match err {
+            AuthError::InvalidToken => {
+                AppError::Unauthorized("Invalid or expired OAuth code".to_string())
+            }
+            other => map_auth_error("Failed to exchange OAuth code", other),
+        })?;
 
     Ok(Json(ApiResponse::success_with_message(
         "OAuth code exchanged successfully",
@@ -519,16 +521,24 @@ pub async fn delete_account(
 
 pub fn routes() -> Router<DbPool> {
     // Fixed-window auth rate limits per IP, mirroring the documented
-    // echobackend limits (`docs/api/auth.md`).
+    // echobackend limits (`docs/api/auth.md`). Shared through Redis under the
+    // same names as echobackend when it is configured.
     let trust_proxy =
         std::panic::catch_unwind(|| crate::config::HttpConfig::get().trust_proxy).unwrap_or(false);
-    let register_limiter = RateLimiter::new(5, Duration::from_secs(5 * 60), trust_proxy);
-    let login_limiter = RateLimiter::new(5, Duration::from_secs(5 * 60), trust_proxy);
-    let forgot_password_limiter = RateLimiter::new(3, Duration::from_secs(5 * 60), trust_proxy);
-    let reset_password_limiter = RateLimiter::new(5, Duration::from_secs(5 * 60), trust_proxy);
-    let refresh_limiter = RateLimiter::new(30, Duration::from_secs(60), trust_proxy);
-    let oauth_exchange_limiter = RateLimiter::new(10, Duration::from_secs(60), trust_proxy);
-    let check_username_limiter = RateLimiter::new(20, Duration::from_secs(5 * 60), trust_proxy);
+    let register_limiter =
+        RateLimiter::new(5, Duration::from_secs(5 * 60), trust_proxy).shared("auth:register");
+    let login_limiter =
+        RateLimiter::new(5, Duration::from_secs(5 * 60), trust_proxy).shared("auth:login");
+    let forgot_password_limiter = RateLimiter::new(3, Duration::from_secs(5 * 60), trust_proxy)
+        .shared("auth:forgot-password");
+    let reset_password_limiter =
+        RateLimiter::new(5, Duration::from_secs(5 * 60), trust_proxy).shared("auth:reset-password");
+    let refresh_limiter =
+        RateLimiter::new(30, Duration::from_secs(60), trust_proxy).shared("auth:refresh");
+    let oauth_exchange_limiter =
+        RateLimiter::new(10, Duration::from_secs(60), trust_proxy).shared("auth:oauth-exchange");
+    let check_username_limiter = RateLimiter::new(20, Duration::from_secs(5 * 60), trust_proxy)
+        .shared("auth:check-username");
     Router::new()
         .route(
             "/api/auth/register",

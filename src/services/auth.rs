@@ -1,4 +1,5 @@
 use crate::auth::Claims;
+use crate::cache;
 use crate::config::{GitHubConfig, JwtConfig};
 use crate::email;
 use crate::entities::{auth_activity_logs, password_reset_tokens, sessions, users};
@@ -19,14 +20,14 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use uuid::Uuid;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct UserBrief {
     pub id: Uuid,
     pub email: String,
     pub username: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct AuthTokenResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -1116,6 +1117,7 @@ pub struct GithubUser {
     pub html_url: Option<String>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct OAuthExchangeEntry {
     response: AuthTokenResponse,
     expires_at: chrono::DateTime<Utc>,
@@ -1313,28 +1315,57 @@ pub async fn sign_in_with_github(
     Ok(response)
 }
 
+fn oauth_exchange_cache_key(cache: &cache::Cache, code: &str) -> String {
+    cache.build_key(&["oauth_exchange", code])
+}
+
 /// Create a one-time OAuth exchange code (2-minute TTL) holding the issued
-/// tokens. Mirrors echobackend's in-memory fallback of `CreateOAuthExchangeCode`.
-pub fn create_oauth_exchange_code(response: AuthTokenResponse) -> String {
+/// tokens. Mirrors echobackend's `CreateOAuthExchangeCode`: the code lives in
+/// Redis (`oauth_exchange:<code>`) so any instance can redeem it, or in memory
+/// when Redis is off or rejects the write.
+pub async fn create_oauth_exchange_code(response: AuthTokenResponse) -> String {
     let code = generate_prefixed_token("oc");
     let now = Utc::now();
+    let entry = OAuthExchangeEntry {
+        response,
+        expires_at: now + Duration::minutes(OAUTH_EXCHANGE_TTL_MINUTES),
+    };
+
+    if let Some(cache) = cache::get() {
+        let ttl = std::time::Duration::from_secs(OAUTH_EXCHANGE_TTL_MINUTES as u64 * 60);
+        let key = oauth_exchange_cache_key(cache, &code);
+        match cache.set_json_with_ttl(&key, &entry, ttl).await {
+            Ok(()) => return code,
+            Err(err) => {
+                tracing::warn!(error = %err, "oauth exchange: Redis write failed, storing in memory");
+            }
+        }
+    }
+
     let mut store = oauth_exchange_store()
         .lock()
         .expect("oauth exchange store lock poisoned");
     store.retain(|_, entry| entry.expires_at > now);
-    store.insert(
-        code.clone(),
-        OAuthExchangeEntry {
-            response,
-            expires_at: now + Duration::minutes(OAUTH_EXCHANGE_TTL_MINUTES),
-        },
-    );
+    store.insert(code.clone(), entry);
     code
 }
 
 /// Atomically redeem and delete a one-time OAuth exchange code.
-/// Mirrors echobackend's `ExchangeOAuthCode`.
-pub fn exchange_oauth_code(code: &str) -> Result<AuthTokenResponse, AuthError> {
+/// Mirrors echobackend's `ExchangeOAuthCode`. Codes missing from Redis are
+/// still looked up in memory, where they land while Redis is failing.
+pub async fn exchange_oauth_code(code: &str) -> Result<AuthTokenResponse, AuthError> {
+    if let Some(cache) = cache::get() {
+        let key = oauth_exchange_cache_key(cache, code);
+        match cache.take_json::<OAuthExchangeEntry>(&key).await {
+            Ok(Some(entry)) if entry.expires_at > Utc::now() => return Ok(entry.response),
+            Ok(Some(_)) => return Err(AuthError::InvalidToken),
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(error = %err, "oauth exchange: Redis read failed, checking memory");
+            }
+        }
+    }
+
     let now = Utc::now();
     let mut store = oauth_exchange_store()
         .lock()
@@ -1405,8 +1436,8 @@ mod tests {
         assert!(!invalid);
     }
 
-    #[test]
-    fn test_oauth_exchange_roundtrip() {
+    #[tokio::test]
+    async fn test_oauth_exchange_roundtrip() {
         let token_resp = AuthTokenResponse {
             access_token: "access-123".into(),
             refresh_token: "pl_test".into(),
@@ -1416,14 +1447,16 @@ mod tests {
                 username: Some("testuser".into()),
             },
         };
-        let code = create_oauth_exchange_code(token_resp);
+        let code = create_oauth_exchange_code(token_resp).await;
         assert!(code.starts_with("oc_"));
 
-        let redeemed = exchange_oauth_code(&code).expect("should exchange successfully");
+        let redeemed = exchange_oauth_code(&code)
+            .await
+            .expect("should exchange successfully");
         assert_eq!(redeemed.access_token, "access-123");
 
         // Second exchange should fail (single-use)
-        let second = exchange_oauth_code(&code);
+        let second = exchange_oauth_code(&code).await;
         assert!(matches!(second, Err(AuthError::InvalidToken)));
     }
 }

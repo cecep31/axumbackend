@@ -13,7 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::response::ApiResponse;
+use crate::{cache, response::ApiResponse};
 
 const MAX_RATE_LIMITER_ENTRIES: usize = 20_000;
 
@@ -23,6 +23,9 @@ pub struct RateLimiter {
     max_requests: u32,
     window: Duration,
     trust_proxy: bool,
+    /// Set by [`RateLimiter::shared`]: counts in Redis under
+    /// `rate_limit:<name>:<client>` so every instance shares one limit.
+    shared_name: Option<Arc<str>>,
 }
 
 struct RateLimiterInner {
@@ -51,6 +54,33 @@ impl RateLimiter {
             max_requests,
             window,
             trust_proxy,
+            shared_name: None,
+        }
+    }
+
+    /// Keeps the counters in Redis, when it is available, under `name` (e.g.
+    /// `auth:login`, as in echobackend), so the limit holds across instances.
+    /// The limit then applies per client for every path behind this limiter.
+    /// Falls back to the in-memory counters whenever Redis is off or failing.
+    pub fn shared(mut self, name: &str) -> Self {
+        self.shared_name = Some(name.into());
+        self
+    }
+
+    /// Counts the hit in Redis. `None` means the shared store is unavailable
+    /// and the caller should use the in-memory counters instead.
+    async fn check_shared(&self, client: &str) -> Option<Result<(), u64>> {
+        let name = self.shared_name.as_deref()?;
+        let cache = cache::get()?;
+        let key = cache.build_key(&["rate_limit", name, client]);
+        match cache.increment_fixed_window(&key, self.window).await {
+            Ok((0, _)) => None,
+            Ok((count, _)) if count <= u64::from(self.max_requests) => Some(Ok(())),
+            Ok((_, remaining)) => Some(Err(remaining.as_secs_f64().ceil().max(1.0) as u64)),
+            Err(err) => {
+                tracing::warn!(name, error = %err, "rate limit: Redis unavailable, using in-memory counters");
+                None
+            }
         }
     }
 
@@ -119,12 +149,16 @@ pub async fn rate_limit(
     request: Request,
     next: Next,
 ) -> Response {
-    let key = RateLimitKey {
-        path: request.uri().path().to_owned(),
-        client: client_identity(&request, limiter.trust_proxy),
+    let client = client_identity(&request, limiter.trust_proxy);
+    let result = match limiter.check_shared(&client).await {
+        Some(result) => result,
+        None => limiter.check(RateLimitKey {
+            path: request.uri().path().to_owned(),
+            client,
+        }),
     };
 
-    match limiter.check(key) {
+    match result {
         Ok(()) => next.run(request).await,
         Err(retry_after) => {
             let body = Json(ApiResponse::error(
