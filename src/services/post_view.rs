@@ -25,7 +25,13 @@ impl From<DbErr> for PostViewError {
 }
 
 async fn post_exists(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbErr> {
-    Ok(posts::Entity::find_by_id(post_id).one(db).await?.is_some())
+    // Mirrors echobackend ensurePostInteractable: a hidden post is reported as
+    // missing so engagement endpoints do not confirm that it exists.
+    Ok(posts::Entity::find_by_id(post_id)
+        .filter(posts::Column::HiddenAt.is_null())
+        .one(db)
+        .await?
+        .is_some())
 }
 
 async fn has_user_viewed(

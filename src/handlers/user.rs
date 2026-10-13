@@ -300,6 +300,48 @@ pub async fn upload_avatar(
     Err(AppError::BadRequest("No file uploaded".to_string()))
 }
 
+pub async fn get_user_stats(
+    State(pool): State<DbPool>,
+    _admin_user: AdminUser,
+    VQuery(query): VQuery<crate::dto::report::ReportQuery>,
+) -> Result<Json<ApiResponse<crate::models::report::UserStatsResponse>>, AppError> {
+    let report =
+        services::report::user_report(&pool, crate::dto::report::date_range(&query), query.limit())
+            .await?;
+    Ok(Json(ApiResponse::success_with_message(
+        "User stats fetched successfully",
+        crate::models::report::UserStatsResponse {
+            total_users: report.total_users,
+            new_users_this_period: report.new_users_this_period,
+            active_users: report.active_users,
+            new_users_today: report.new_users_today,
+            active_users_this_week: report.active_users_this_week,
+            top_contributors: report
+                .top_contributors
+                .into_iter()
+                .map(|c| crate::models::report::TopContributor {
+                    id: c.id,
+                    username: c.username,
+                    first_name: c.first_name,
+                    last_name: c.last_name,
+                    post_count: c.post_count,
+                    total_views: c.total_views,
+                    total_likes: c.total_likes,
+                })
+                .collect(),
+            growth_trend: report
+                .growth_trend
+                .into_iter()
+                .map(|g| crate::models::report::UserGrowthData {
+                    date: g.date,
+                    new_users: g.new_users,
+                    cumulative_users: g.cumulative_users,
+                })
+                .collect(),
+        },
+    )))
+}
+
 pub async fn create_user(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
@@ -340,6 +382,7 @@ pub async fn update_user(
 pub fn routes() -> Router<DbPool> {
     Router::new()
         .route("/api/users", get(get_users).post(create_user))
+        .route("/api/users/stats", get(get_user_stats))
         .route("/api/users/me", get(get_me))
         .route(
             "/api/users/me/image",

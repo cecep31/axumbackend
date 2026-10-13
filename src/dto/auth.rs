@@ -66,6 +66,12 @@ pub struct CheckUsernameRequest {
 }
 
 #[derive(Deserialize, Validate)]
+pub struct RevokeAllSessionsRequest {
+    #[garde(skip)]
+    pub confirm: Option<bool>,
+}
+
+#[derive(Deserialize, Validate)]
 pub struct UpdateProfileRequest {
     #[garde(length(chars, min = 3, max = 30))]
     pub username: String,

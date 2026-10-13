@@ -1,14 +1,14 @@
-use crate::auth::AuthUser;
+use crate::auth::{AdminUser, AuthUser};
 use crate::config::FrontendConfig;
 use crate::database::DbPool;
 use crate::dto::auth::{
     ActivityLogQuery, ChangePasswordRequest, CheckUsernameRequest, FailedLoginsQuery,
     ForgotPasswordRequest, GithubCallbackQuery, LoginRequest, LogoutRequest, OAuthExchangeRequest,
     RecentActivityQuery, RefreshTokenRequest, RegisterRequest, ResetPasswordRequest,
-    UpdateProfileRequest,
+    RevokeAllSessionsRequest, UpdateProfileRequest,
 };
 use crate::error::AppError;
-use crate::extract::{VJson, VQuery};
+use crate::extract::{VJson, VPath, VQuery};
 use crate::rate_limit::{RateLimiter, rate_limit};
 use crate::response::ApiResponse;
 use crate::services::{self, auth::AuthError};
@@ -519,6 +519,65 @@ pub async fn delete_account(
     )))
 }
 
+fn map_revoke_error(err: services::auth::RevokeError) -> AppError {
+    match err {
+        services::auth::RevokeError::UserNotFound => {
+            AppError::NotFound("User not found".to_string())
+        }
+        services::auth::RevokeError::Db(e) => AppError::from(e),
+    }
+}
+
+/// `DELETE /api/auth/sessions/:userId` — admin only, mirrors echobackend's
+/// `AuthHandler.RevokeUserSessions`.
+pub async fn revoke_user_sessions(
+    State(pool): State<DbPool>,
+    admin: AdminUser,
+    headers: HeaderMap,
+    VPath(params): VPath<RevokeUserPath>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    let revoked = services::auth::revoke_user_sessions(
+        &pool,
+        params.user_id,
+        admin.0.id,
+        user_agent(&headers),
+    )
+    .await
+    .map_err(map_revoke_error)?;
+    Ok(Json(ApiResponse::success_with_message(
+        "Sessions revoked successfully",
+        serde_json::json!({ "user_id": params.user_id, "revoked_sessions": revoked }),
+    )))
+}
+
+/// `POST /api/auth/sessions/revoke-all` — admin only, mirrors echobackend's
+/// `AuthHandler.RevokeAllSessions`. Requires `{ "confirm": true }`.
+pub async fn revoke_all_sessions(
+    State(pool): State<DbPool>,
+    admin: AdminUser,
+    headers: HeaderMap,
+    VJson(req): VJson<RevokeAllSessionsRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    if req.confirm != Some(true) {
+        return Err(AppError::BadRequest(
+            "Set \"confirm\": true to log out every user".to_string(),
+        ));
+    }
+    let revoked = services::auth::revoke_all_sessions(&pool, admin.0.id, user_agent(&headers))
+        .await
+        .map_err(map_revoke_error)?;
+    Ok(Json(ApiResponse::success_with_message(
+        "All sessions revoked successfully",
+        serde_json::json!({ "revoked_sessions": revoked }),
+    )))
+}
+
+#[derive(serde::Deserialize, garde::Validate)]
+pub struct RevokeUserPath {
+    #[garde(skip)]
+    pub user_id: uuid::Uuid,
+}
+
 pub fn routes() -> Router<DbPool> {
     // Fixed-window auth rate limits per IP, mirroring the documented
     // echobackend limits (`docs/api/auth.md`). Shared through Redis under the
@@ -579,6 +638,11 @@ pub fn routes() -> Router<DbPool> {
         .route("/api/auth/profile", get(profile).put(update_profile))
         .route("/api/auth/account", axum::routing::delete(delete_account))
         .route("/api/auth/password", axum::routing::patch(change_password))
+        .route("/api/auth/sessions/revoke-all", post(revoke_all_sessions))
+        .route(
+            "/api/auth/sessions/{user_id}",
+            axum::routing::delete(revoke_user_sessions),
+        )
         .route("/api/auth/activity-logs", get(activity_logs))
         .route("/api/auth/activity-logs/recent", get(recent_activity))
         .route("/api/auth/activity-logs/failed-logins", get(failed_logins))

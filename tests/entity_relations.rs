@@ -16,6 +16,7 @@ fn post() -> posts::Model {
         photo_url: None,
         published: None,
         published_at: None,
+        hidden_at: None,
         view_count: None,
         like_count: None,
         bookmark_count: None,

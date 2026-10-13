@@ -14,6 +14,8 @@ pub mod password_reset_tokens;
 pub mod post_bookmarks;
 pub mod post_comments;
 pub mod post_likes;
+pub mod post_moderation_actions;
+pub mod post_reports;
 pub mod post_views;
 pub mod posts;
 pub mod posts_to_tags;

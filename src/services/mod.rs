@@ -11,6 +11,7 @@ pub mod notification;
 pub mod openrouter;
 pub mod post;
 pub mod post_like;
+pub mod post_report;
 pub mod post_view;
 pub mod report;
 pub mod tag;

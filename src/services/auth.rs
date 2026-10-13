@@ -629,6 +629,73 @@ pub async fn delete_account(db: &DatabaseConnection, user_id: Uuid) -> Result<()
     Ok(())
 }
 
+#[derive(Debug)]
+pub enum RevokeError {
+    Db(DbErr),
+    UserNotFound,
+}
+
+impl From<DbErr> for RevokeError {
+    fn from(err: DbErr) -> Self {
+        Self::Db(err)
+    }
+}
+
+/// Terminates every session of one user (admin only, mirrors echobackend
+/// `RevokeUserSessions`). Returns the number of sessions killed.
+pub async fn revoke_user_sessions(
+    db: &DatabaseConnection,
+    target_user_id: Uuid,
+    actor_id: Uuid,
+    user_agent: Option<String>,
+) -> Result<u64, RevokeError> {
+    let user = users::Entity::find_by_id(target_user_id)
+        .one(db)
+        .await?
+        .ok_or(RevokeError::UserNotFound)?;
+    let _ = user;
+    let result = sessions::Entity::delete_many()
+        .filter(sessions::Column::UserId.eq(target_user_id))
+        .exec(db)
+        .await?;
+    log_activity(
+        db,
+        Some(target_user_id),
+        "session_revoked",
+        "success",
+        None,
+        user_agent,
+        None,
+        Some(serde_json::json!({"revoked_by": actor_id, "revoked_sessions": result.rows_affected})),
+    )
+    .await;
+    Ok(result.rows_affected)
+}
+
+/// Terminates every session of every user, including the acting admin
+/// (mirrors echobackend `RevokeAllSessions`).
+pub async fn revoke_all_sessions(
+    db: &DatabaseConnection,
+    actor_id: Uuid,
+    user_agent: Option<String>,
+) -> Result<u64, RevokeError> {
+    let result = sessions::Entity::delete_many().exec(db).await?;
+    log_activity(
+        db,
+        None,
+        "session_revoked",
+        "success",
+        None,
+        user_agent,
+        None,
+        Some(
+            serde_json::json!({"revoked_by": actor_id, "revoked_sessions": result.rows_affected, "scope": "all_users"}),
+        ),
+    )
+    .await;
+    Ok(result.rows_affected)
+}
+
 pub async fn check_email_availability(
     db: &DatabaseConnection,
     email: &str,

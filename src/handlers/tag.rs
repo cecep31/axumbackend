@@ -2,7 +2,7 @@ use crate::auth::{AdminUser, AuthUser};
 use crate::database::DbPool;
 use crate::dto::tag::{CreateTagRequest, TagIdPath, UpdateTagRequest};
 use crate::error::AppError;
-use crate::extract::{VJson, VPath};
+use crate::extract::{VJson, VPath, VQuery};
 use crate::models::tag::{SitemapTag, Tag, TrendingTag};
 use crate::response::ApiResponse;
 use crate::services;
@@ -98,9 +98,22 @@ pub async fn delete_tag(
     }
 }
 
+pub async fn get_tag_stats(
+    State(pool): State<DbPool>,
+    _admin_user: AdminUser,
+    VQuery(query): VQuery<crate::dto::report::ReportQuery>,
+) -> Result<Json<ApiResponse<Vec<crate::models::report::TagPerformance>>>, AppError> {
+    let stats = services::report::tag_stats(&pool, query.limit()).await?;
+    Ok(Json(ApiResponse::success_with_message(
+        "Tag stats fetched successfully",
+        stats,
+    )))
+}
+
 pub fn routes() -> Router<DbPool> {
     Router::new()
         .route("/api/tags", get(get_tags).post(create_tag))
+        .route("/api/tags/stats", get(get_tag_stats))
         .route("/api/tags/trending", get(get_trending_tags))
         .route("/api/tags/sitemap", get(get_tags_for_sitemap))
         .route(

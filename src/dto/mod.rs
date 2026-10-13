@@ -8,6 +8,7 @@ pub mod guild;
 pub mod holding;
 pub mod notification;
 pub mod post;
+pub mod post_report;
 pub mod report;
 pub mod tag;
 pub mod user;

@@ -14,6 +14,7 @@ pub struct Model {
     pub photo_url: Option<String>,
     pub published: Option<bool>,
     pub published_at: Option<DateTimeWithTimeZone>,
+    pub hidden_at: Option<DateTimeWithTimeZone>,
     pub view_count: Option<i64>,
     pub like_count: Option<i64>,
     pub bookmark_count: Option<i64>,

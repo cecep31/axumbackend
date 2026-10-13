@@ -127,9 +127,12 @@ pub async fn get_all_posts(
     filter: PostsFilter<'_>,
 ) -> Result<(Vec<Post>, i64), DbErr> {
     // echobackend's `activePostUserJoin`: posts by soft-deleted users are hidden.
+    // Hidden posts (moderated) are excluded from every public listing but stay
+    // visible to their author and to admins (mirrors posts.hidden_at IS NULL).
     let mut query = posts::Entity::find()
         .join(JoinType::InnerJoin, posts::Relation::Users.def())
-        .filter(users::Column::DeletedAt.is_null());
+        .filter(users::Column::DeletedAt.is_null())
+        .filter(posts::Column::HiddenAt.is_null());
 
     if let Some(search) = filter.search.map(str::trim).filter(|s| !s.is_empty()) {
         // echobackend: `posts.title ILIKE '%search%' AND posts.published = true`.
@@ -220,7 +223,11 @@ pub async fn get_posts_by_username(
 
     // echobackend's GetPostByUsername has no `published` filter — it also
     // surfaces the user's unpublished/draft posts publicly.
-    let query = user.clone().find_related(posts::Entity);
+    // Hidden posts are excluded (posts.hidden_at IS NULL).
+    let query = user
+        .clone()
+        .find_related(posts::Entity)
+        .filter(posts::Column::HiddenAt.is_null());
 
     let total = query.clone().count(db).await? as i64;
     let post_models = query
@@ -269,6 +276,7 @@ pub async fn get_posts_for_you(
 
     let query = posts::Entity::find()
         .filter(posts::Column::Published.eq(true))
+        .filter(posts::Column::HiddenAt.is_null())
         .filter(
             posts::Column::CreatedBy
                 .eq(user_id)
@@ -316,6 +324,7 @@ pub async fn get_random_posts(db: &DatabaseConnection, limit: i64) -> Result<Vec
 
     let post_models = posts::Entity::find()
         .filter(posts::Column::Published.eq(true))
+        .filter(posts::Column::HiddenAt.is_null())
         .order_by(sea_orm::sea_query::Expr::cust("RANDOM()"), Order::Asc)
         .limit(Ord::max(limit, 0) as u64)
         .all(db)
@@ -344,6 +353,7 @@ pub async fn get_trending_posts(db: &DatabaseConnection, limit: i64) -> Result<V
 
     let post_models = posts::Entity::find()
         .filter(posts::Column::Published.eq(true))
+        .filter(posts::Column::HiddenAt.is_null())
         .order_by(
             sea_orm::sea_query::Expr::cust("like_count * 2 + bookmark_count * 2 + view_count"),
             Order::Desc,
@@ -403,7 +413,7 @@ pub async fn get_posts_for_sitemap(
                 p.updated_at
             FROM posts p
             INNER JOIN users u ON u.id = p.created_by
-            WHERE p.published = true AND u.deleted_at IS NULL
+            WHERE p.published = true AND p.hidden_at IS NULL AND u.deleted_at IS NULL
             ORDER BY p.created_at DESC
             LIMIT $1
             "#,
@@ -444,6 +454,7 @@ pub async fn get_post_by_username_and_slug(
         .find_related(posts::Entity)
         .filter(posts::Column::Slug.eq(slug))
         .filter(posts::Column::Published.eq(true))
+        .filter(posts::Column::HiddenAt.is_null())
         .one(db)
         .await?;
 
@@ -638,7 +649,8 @@ pub async fn get_posts_by_tag(
 
     let query = tag
         .find_related(posts::Entity)
-        .filter(posts::Column::Published.eq(true));
+        .filter(posts::Column::Published.eq(true))
+        .filter(posts::Column::HiddenAt.is_null());
 
     let total = query.clone().count(db).await? as i64;
     let post_models = query

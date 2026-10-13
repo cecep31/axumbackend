@@ -6,17 +6,49 @@ use crate::dto::post::{
     PostPath, PostsFilterQuery, RandomPostQuery, TagPath, UpdatePostRequest,
     post_pagination_params,
 };
+use crate::dto::post_report::{CreatePostReportRequest, ModeratePostRequest, ReportStatusQuery};
+use crate::dto::report::{ReportQuery, date_range};
 use crate::error::AppError;
 use crate::extract::{VJson, VPath, VQuery};
 use crate::models::post::{Post, SitemapPost};
+use crate::models::report::{
+    ModerationActionResponse, PostStatsResponse, SinglePostReportResponse,
+};
+use crate::rate_limit::{self, RateLimiter};
 use crate::response::ApiResponse;
 use crate::services;
+use crate::services::post_report::PostReportError;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Multipart, State},
+    middleware,
     routing::{get, post},
 };
+use std::time::Duration;
 use uuid::Uuid;
+
+impl From<PostReportError> for AppError {
+    fn from(err: PostReportError) -> Self {
+        match err {
+            PostReportError::InvalidPostId | PostReportError::InvalidUserId => {
+                AppError::BadRequest("Invalid ID format".to_string())
+            }
+            PostReportError::InvalidReportStatus => {
+                AppError::BadRequest("Invalid report status".to_string())
+            }
+            PostReportError::CannotReportOwnPost => {
+                AppError::BadRequest("Cannot report your own post".to_string())
+            }
+            PostReportError::PostNotFound => AppError::NotFound("Post not found".to_string()),
+            PostReportError::NoPendingReports
+            | PostReportError::PostAlreadyHidden
+            | PostReportError::PostNotHidden => {
+                AppError::Conflict("Moderation state conflict".to_string())
+            }
+            PostReportError::Db(e) => AppError::from(e),
+        }
+    }
+}
 
 pub async fn create_post(
     State(pool): State<DbPool>,
@@ -643,9 +675,160 @@ pub async fn get_post_by_username_and_slug(
     }
 }
 
+pub async fn get_post_stats(
+    State(pool): State<DbPool>,
+    _admin: AdminUser,
+    VQuery(query): VQuery<ReportQuery>,
+) -> Result<Json<ApiResponse<PostStatsResponse>>, AppError> {
+    let report =
+        services::report::post_report(&pool, date_range(&query), query.limit(), query.tag_id())
+            .await?;
+    Ok(Json(ApiResponse::success_with_message(
+        "Post stats fetched successfully",
+        PostStatsResponse {
+            total_posts: report.total_posts,
+            new_posts_this_period: report.new_posts_this_period,
+            total_views: report.total_views,
+            total_likes: report.total_likes,
+            total_comments: report.total_comments,
+            new_posts_today: report.new_posts_today,
+            avg_engagement_rate: report.avg_engagement_rate,
+            top_posts: report.top_posts,
+        },
+    )))
+}
+
+pub async fn get_post_engagement(
+    State(pool): State<DbPool>,
+    _admin: AdminUser,
+    VQuery(query): VQuery<ReportQuery>,
+) -> Result<Json<ApiResponse<crate::models::report::EngagementMetricsResponse>>, AppError> {
+    let metrics = services::report::engagement(&pool, date_range(&query)).await?;
+    Ok(Json(ApiResponse::success_with_message(
+        "Engagement metrics fetched successfully",
+        metrics,
+    )))
+}
+
+pub async fn report_post(
+    State(pool): State<DbPool>,
+    auth_user: AuthUser,
+    VPath(params): VPath<PostIdPath>,
+    VJson(req): VJson<CreatePostReportRequest>,
+) -> Result<(axum::http::StatusCode, Json<ApiResponse<serde_json::Value>>), AppError> {
+    if !crate::services::post_report::REASON_CHOICES.contains(&req.reason.as_str()) {
+        return Err(AppError::BadRequest("Invalid report reason".to_string()));
+    }
+    services::post_report::report_post(&pool, params.id, auth_user.id, &req.reason, req.details)
+        .await?;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(ApiResponse::success_with_message(
+            "Report submitted",
+            serde_json::Value::Null,
+        )),
+    ))
+}
+
+pub async fn list_reported_posts(
+    State(pool): State<DbPool>,
+    _admin: AdminUser,
+    VQuery(query): VQuery<ReportStatusQuery>,
+) -> Result<Json<ApiResponse<Vec<crate::models::report::PostReportGroup>>>, AppError> {
+    let status = query.status_or_default();
+    let (groups, total) = services::post_report::list_reported_posts(
+        &pool,
+        &status,
+        query.limit_or(20),
+        query.offset_or(),
+    )
+    .await?;
+    let limit = query.limit_or(20) as i64;
+    let offset = query.offset_or() as i64;
+    Ok(Json(ApiResponse::with_meta_message(
+        "Reported posts fetched successfully",
+        groups,
+        total as i64,
+        limit,
+        offset,
+    )))
+}
+
+pub async fn list_post_reports(
+    State(pool): State<DbPool>,
+    _admin: AdminUser,
+    VPath(params): VPath<PostIdPath>,
+    VQuery(query): VQuery<ReportStatusQuery>,
+) -> Result<Json<ApiResponse<Vec<SinglePostReportResponse>>>, AppError> {
+    let status = query.status.as_deref().unwrap_or("");
+    let (reports, total) = services::post_report::list_post_reports(
+        &pool,
+        params.id,
+        Some(status),
+        query.limit_or(20),
+        query.offset_or(),
+    )
+    .await?;
+    Ok(Json(ApiResponse::with_meta_message(
+        "Post reports fetched successfully",
+        reports,
+        total as i64,
+        query.limit_or(20) as i64,
+        query.offset_or() as i64,
+    )))
+}
+
+pub async fn moderate_post(
+    State(pool): State<DbPool>,
+    admin: AdminUser,
+    VPath(params): VPath<PostIdPath>,
+    VJson(req): VJson<ModeratePostRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    if !crate::services::post_report::ACTION_CHOICES.contains(&req.action.as_str()) {
+        return Err(AppError::BadRequest(
+            "Invalid moderation action".to_string(),
+        ));
+    }
+    services::post_report::moderate_post(&pool, params.id, admin.0.id, &req.action, req.note)
+        .await?;
+    Ok(Json(ApiResponse::success_with_message(
+        "Moderation action applied",
+        serde_json::Value::Null,
+    )))
+}
+
+pub async fn list_moderation_actions(
+    State(pool): State<DbPool>,
+    _admin: AdminUser,
+    VPath(params): VPath<PostIdPath>,
+    VQuery(query): VQuery<ReportStatusQuery>,
+) -> Result<Json<ApiResponse<Vec<ModerationActionResponse>>>, AppError> {
+    let (actions, total) = services::post_report::list_moderation_actions(
+        &pool,
+        params.id,
+        query.limit_or(20),
+        query.offset_or(),
+    )
+    .await?;
+    Ok(Json(ApiResponse::with_meta_message(
+        "Moderation history fetched successfully",
+        actions,
+        total as i64,
+        query.limit_or(20) as i64,
+        query.offset_or() as i64,
+    )))
+}
+
 pub fn routes() -> Router<DbPool> {
+    let trust_proxy =
+        std::panic::catch_unwind(|| crate::config::HttpConfig::get().trust_proxy).unwrap_or(false);
+    let report_limiter =
+        RateLimiter::new(10, Duration::from_secs(3600), trust_proxy).shared("posts:report");
     Router::new()
         .route("/api/posts", get(get_posts).post(create_post))
+        .route("/api/posts/stats", get(get_post_stats))
+        .route("/api/posts/stats/engagement", get(get_post_engagement))
+        .route("/api/posts/reports", get(list_reported_posts))
         .route("/api/posts/random", get(get_random_posts))
         .route("/api/posts/trending", get(get_trending_posts))
         .route("/api/posts/me", get(get_my_posts))
@@ -670,6 +853,19 @@ pub fn routes() -> Router<DbPool> {
             get(get_post_by_username_and_slug),
         )
         .route("/api/posts/tag/{tag}", get(get_posts_by_tag))
+        .route(
+            "/api/posts/{id}/reports",
+            post(report_post)
+                .route_layer(middleware::from_fn_with_state(
+                    report_limiter,
+                    rate_limit::rate_limit,
+                ))
+                .get(list_post_reports),
+        )
+        .route(
+            "/api/posts/{id}/moderation",
+            post(moderate_post).get(list_moderation_actions),
+        )
         .route("/api/posts/{id}/view", post(record_view))
         .route("/api/posts/{id}/views", get(get_post_views))
         .route("/api/posts/{id}/view-stats", get(get_post_view_stats))

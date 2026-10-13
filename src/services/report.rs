@@ -115,7 +115,25 @@ pub async fn user_report(
     .await?;
     let active_users = scalar_i64(
         db,
-        "SELECT COUNT(DISTINCT user_id)::bigint AS value FROM post_views WHERE user_id IS NOT NULL AND created_at >= NOW() - INTERVAL '30 days'",
+        "SELECT COUNT(DISTINCT user_id)::bigint AS value FROM post_views WHERE user_id IS NOT NULL AND deleted_at IS NULL AND created_at >= NOW() - INTERVAL '30 days'",
+    )
+    .await?;
+    let today = Utc::now().date_naive();
+    let week_ago = today - Duration::days(7);
+    let new_users_today = scalar_i64(
+        db,
+        &format!(
+            "SELECT COUNT(*)::bigint AS value FROM users WHERE DATE(created_at) >= '{}'",
+            today
+        ),
+    )
+    .await?;
+    let active_users_this_week = scalar_i64(
+        db,
+        &format!(
+            "SELECT COUNT(DISTINCT user_id)::bigint AS value FROM post_views WHERE user_id IS NOT NULL AND deleted_at IS NULL AND DATE(created_at) >= '{}'",
+            week_ago
+        ),
     )
     .await?;
 
@@ -146,6 +164,8 @@ pub async fn user_report(
         total_users,
         new_users_this_period,
         active_users,
+        new_users_today,
+        active_users_this_week,
         top_contributors,
         growth_trend: user_growth_trend(db, range).await?,
     })
@@ -354,6 +374,15 @@ pub async fn post_report(
     )
     .await?;
     let total_comments = post_comments::Entity::find().count(db).await? as i64;
+    let today = Utc::now().date_naive();
+    let new_posts_today = scalar_i64(
+        db,
+        &format!(
+            "SELECT COUNT(*)::bigint AS value FROM posts WHERE published = true AND DATE(created_at) >= '{}'",
+            today
+        ),
+    )
+    .await?;
     let tag_join = if tag_id.is_some() {
         " INNER JOIN posts_to_tags filter_tags ON posts.id = filter_tags.post_id"
     } else {
@@ -425,8 +454,39 @@ pub async fn post_report(
         total_views,
         total_likes,
         total_comments,
+        new_posts_today,
         avg_engagement_rate,
         top_posts,
         tag_performance,
     })
+}
+
+pub async fn tag_stats(db: &DatabaseConnection, limit: i64) -> Result<Vec<TagPerformance>, DbErr> {
+    #[derive(FromQueryResult)]
+    struct TagRow {
+        id: i32,
+        name: String,
+        post_count: i64,
+        total_views: i64,
+        total_likes: i64,
+    }
+    let rows = TagRow::find_by_statement(Statement::from_string(
+        DbBackend::Postgres,
+        format!(
+            "SELECT tags.id, tags.name, COUNT(posts_to_tags.post_id)::bigint AS post_count, COALESCE(SUM(posts.view_count), 0)::bigint AS total_views, COALESCE(SUM(posts.like_count), 0)::bigint AS total_likes FROM tags INNER JOIN posts_to_tags ON tags.id = posts_to_tags.tag_id INNER JOIN posts ON posts_to_tags.post_id = posts.id WHERE posts.published = true GROUP BY tags.id, tags.name ORDER BY COUNT(posts_to_tags.post_id) DESC LIMIT {}",
+            limit
+        ),
+    ))
+    .all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| TagPerformance {
+            id: row.id,
+            name: row.name,
+            post_count: row.post_count,
+            total_views: row.total_views,
+            total_likes: row.total_likes,
+        })
+        .collect())
 }
