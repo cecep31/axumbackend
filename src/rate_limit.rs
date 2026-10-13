@@ -189,7 +189,14 @@ fn client_identity(request: &Request, trust_proxy: bool) -> String {
         if !is_trusted_hop(peer) {
             return peer.to_string();
         }
-        if let Some(ip) = trusted_proxy_client_ip(request.headers()) {
+        if let Some(ip) = trusted_proxy_client_ip(request.headers()).or_else(|| {
+            request
+                .headers()
+                .get("x-real-ip")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse().ok())
+                .filter(|ip| !is_trusted_hop(*ip))
+        }) {
             return ip.to_string();
         }
         return peer.to_string();
@@ -206,7 +213,13 @@ fn client_identity(request: &Request, trust_proxy: bool) -> String {
 
 fn is_trusted_hop(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        // 100.64.0.0/10 (CGNAT) is what Railway's edge proxies connect from.
+        IpAddr::V4(ip) => {
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 64)
+        }
         IpAddr::V6(ip) => {
             ip.is_loopback()
                 || (ip.segments()[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
@@ -278,6 +291,19 @@ mod tests {
         req.extensions_mut().insert(ConnectInfo(socket_addr));
 
         assert_eq!(client_identity(&req, true), "198.51.100.7");
+    }
+
+    #[test]
+    fn test_client_identity_railway_cgnat_peer() {
+        for peer in ["100.64.0.3:1", "100.127.9.9:1"] {
+            let mut req = Request::builder()
+                .header("x-forwarded-for", "203.0.113.50")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            assert_eq!(client_identity(&req, true), "203.0.113.50");
+        }
     }
 
     #[test]
