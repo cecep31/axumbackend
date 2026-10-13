@@ -437,6 +437,56 @@ mod tests {
         assert!(inner.windows.len() <= 2);
     }
 
+    /// Sends 6 logins from one client (`X-Forwarded-For`) that arrive through
+    /// a different Railway edge proxy each time, against a limit of 3.
+    async fn statuses_behind_rotating_proxies(trust_proxy: bool, xff: &str) -> Vec<u16> {
+        use axum::{Router, middleware, routing::post};
+        use tower::ServiceExt;
+
+        let limiter = RateLimiter::new(3, Duration::from_secs(60), trust_proxy);
+        let app = Router::new().route(
+            "/login",
+            post(|| async { "ok" })
+                .route_layer(middleware::from_fn_with_state(limiter, rate_limit)),
+        );
+        let mut codes = vec![];
+        for i in 0..6 {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("x-forwarded-for", xff)
+                .body(Body::empty())
+                .unwrap();
+            let peer: SocketAddr = format!("100.64.0.{}:4000", i + 1).parse().unwrap();
+            req.extensions_mut().insert(ConnectInfo(peer));
+            codes.push(app.clone().oneshot(req).await.unwrap().status().as_u16());
+        }
+        codes
+    }
+
+    #[tokio::test]
+    async fn test_middleware_limits_client_behind_rotating_proxies() {
+        assert_eq!(
+            statuses_behind_rotating_proxies(true, "203.0.113.50").await,
+            vec![200, 200, 200, 429, 429, 429]
+        );
+        // A forged leading entry does not buy a fresh counter.
+        assert_eq!(
+            statuses_behind_rotating_proxies(true, "9.9.9.9, 203.0.113.50").await,
+            vec![200, 200, 200, 429, 429, 429]
+        );
+    }
+
+    /// Without `HTTP_TRUST_PROXY` every edge proxy counts as its own client,
+    /// so the limit is never reached behind a load-balanced proxy.
+    #[tokio::test]
+    async fn test_middleware_without_trust_proxy_counts_per_proxy() {
+        assert_eq!(
+            statuses_behind_rotating_proxies(false, "203.0.113.50").await,
+            vec![200; 6]
+        );
+    }
+
     #[tokio::test]
     async fn test_middleware_blocks_after_limit() {
         use axum::{Router, middleware, routing::post};
