@@ -9,6 +9,7 @@ use crate::extract::{VJson, VPath, VQuery};
 use crate::models::bookmark::{BookmarkFolderResponse, BookmarkResponse, ToggleBookmarkResponse};
 use crate::response::ApiResponse;
 use crate::services::{self, bookmark::BookmarkError};
+use crate::state::AppState;
 use axum::{
     Json, Router,
     extract::State,
@@ -182,7 +183,7 @@ pub async fn delete_folder(
     )))
 }
 
-pub fn routes() -> Router<DbPool> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/bookmarks", get(get_bookmarks))
         .route(

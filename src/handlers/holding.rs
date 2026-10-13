@@ -14,6 +14,7 @@ use crate::models::holding::{
 };
 use crate::response::ApiResponse;
 use crate::services::{self, holding::HoldingError};
+use crate::state::AppState;
 use axum::{
     Json, Router,
     extract::State,
@@ -348,7 +349,7 @@ pub async fn get_calendar(
     )))
 }
 
-pub fn routes() -> Router<DbPool> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/holdings", get(get_holdings).post(create_holding))
         .route("/api/holdings/summary", get(get_summary))

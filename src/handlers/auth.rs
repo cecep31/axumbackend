@@ -7,11 +7,13 @@ use crate::dto::auth::{
     RecentActivityQuery, RefreshTokenRequest, RegisterRequest, ResetPasswordRequest,
     RevokeAllSessionsRequest, UpdateProfileRequest,
 };
+use crate::email::Mailer;
 use crate::error::AppError;
 use crate::extract::{VJson, VPath, VQuery};
 use crate::rate_limit::{RateLimiter, rate_limit};
 use crate::response::ApiResponse;
 use crate::services::{self, auth::AuthError};
+use crate::state::AppState;
 use axum::{
     Json, Router,
     extract::{Query, State},
@@ -21,6 +23,7 @@ use axum::{
     routing::{get, post},
 };
 use rand::distr::{Alphanumeric, SampleString};
+use std::sync::Arc;
 use std::time::Duration;
 
 fn user_agent(headers: &HeaderMap) -> Option<String> {
@@ -88,10 +91,13 @@ pub async fn login(
 
 pub async fn forgot_password(
     State(pool): State<DbPool>,
+    State(mailer): State<Arc<dyn Mailer>>,
     headers: HeaderMap,
     VJson(req): VJson<ForgotPasswordRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    let _ = services::auth::forgot_password(&pool, &req.email, user_agent(&headers)).await;
+    let _ =
+        services::auth::forgot_password(&pool, mailer.as_ref(), &req.email, user_agent(&headers))
+            .await;
     Ok(Json(ApiResponse::success_with_message(
         "If the email exists, a password reset link has been sent",
         serde_json::Value::Null,
@@ -578,7 +584,7 @@ pub struct RevokeUserPath {
     pub user_id: uuid::Uuid,
 }
 
-pub fn routes() -> Router<DbPool> {
+pub fn routes() -> Router<AppState> {
     // Fixed-window auth rate limits per IP, mirroring the documented
     // echobackend limits (`docs/api/auth.md`). Shared through Redis under the
     // same names as echobackend when it is configured.

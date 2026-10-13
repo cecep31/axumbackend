@@ -6,6 +6,7 @@ use crate::extract::{VJson, VPath, VQuery};
 use crate::models::tag::{SitemapTag, Tag, TrendingTag};
 use crate::response::ApiResponse;
 use crate::services;
+use crate::state::AppState;
 use axum::{Json, Router, extract::State, routing::get};
 
 const TRENDING_TAGS_LIMIT: i64 = 5;
@@ -110,7 +111,7 @@ pub async fn get_tag_stats(
     )))
 }
 
-pub fn routes() -> Router<DbPool> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/tags", get(get_tags).post(create_tag))
         .route("/api/tags/stats", get(get_tag_stats))

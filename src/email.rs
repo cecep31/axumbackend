@@ -1,5 +1,6 @@
 use crate::config::EmailConfig;
 use serde::Serialize;
+use std::{future::Future, pin::Pin};
 
 const RESEND_API_URL: &str = "https://api.resend.com/emails";
 
@@ -12,18 +13,34 @@ struct SendEmailRequest<'a> {
     html: &'a str,
 }
 
-pub fn is_configured() -> bool {
-    !EmailConfig::get().resend_api_key.is_empty()
+pub type MailFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+/// Outgoing email dependency. Handlers and services receive it as
+/// `Arc<dyn Mailer>` so tests can swap in a fake instead of calling Resend.
+pub trait Mailer: Send + Sync {
+    fn is_configured(&self) -> bool;
+    fn send_password_reset_email<'a>(&'a self, to: &'a str, reset_link: &'a str) -> MailFuture<'a>;
 }
 
-pub async fn send_password_reset_email(to: &str, reset_link: &str) -> Result<(), String> {
-    let config = EmailConfig::get();
-    if config.resend_api_key.is_empty() {
-        return Err("email service not configured".to_string());
+/// Production mailer backed by the Resend API and the global `EmailConfig`.
+pub struct ResendMailer;
+
+impl Mailer for ResendMailer {
+    fn is_configured(&self) -> bool {
+        !EmailConfig::get().resend_api_key.is_empty()
     }
 
-    let (text, html) = password_reset_template(reset_link, "1 hour");
-    send_email(config, to, "Reset your password", &text, &html).await
+    fn send_password_reset_email<'a>(&'a self, to: &'a str, reset_link: &'a str) -> MailFuture<'a> {
+        Box::pin(async move {
+            let config = EmailConfig::get();
+            if config.resend_api_key.is_empty() {
+                return Err("email service not configured".to_string());
+            }
+
+            let (text, html) = password_reset_template(reset_link, "1 hour");
+            send_email(config, to, "Reset your password", &text, &html).await
+        })
+    }
 }
 
 async fn send_email(

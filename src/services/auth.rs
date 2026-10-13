@@ -1,7 +1,7 @@
 use crate::auth::Claims;
 use crate::cache;
 use crate::config::{GitHubConfig, JwtConfig};
-use crate::email;
+use crate::email::Mailer;
 use crate::entities::{auth_activity_logs, password_reset_tokens, sessions, users};
 use argon2::{
     Argon2, Params,
@@ -888,6 +888,7 @@ pub async fn logout(
 
 pub async fn forgot_password(
     db: &DatabaseConnection,
+    mailer: &dyn Mailer,
     email: &str,
     user_agent: Option<String>,
 ) -> Result<(), AuthError> {
@@ -919,8 +920,8 @@ pub async fn forgot_password(
 
     let reset_link = build_password_reset_link(&reset_token);
 
-    if email::is_configured() {
-        if let Err(err) = email::send_password_reset_email(email, &reset_link).await {
+    if mailer.is_configured() {
+        if let Err(err) = mailer.send_password_reset_email(email, &reset_link).await {
             log_activity(
                 db,
                 Some(user.id),

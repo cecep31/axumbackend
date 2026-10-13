@@ -6,6 +6,7 @@ use crate::extract::VQuery;
 use crate::models::report::{EngagementMetricsResponse, PostReportResponse, UserReportResponse};
 use crate::response::ApiResponse;
 use crate::services;
+use crate::state::AppState;
 use axum::{Json, Router, extract::State, routing::get};
 
 pub async fn get_overview(
@@ -63,7 +64,7 @@ pub async fn get_engagement(
     )))
 }
 
-pub fn routes() -> Router<DbPool> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/reports/overview", get(get_overview))
         .route("/api/reports/users", get(get_users))

@@ -5,6 +5,7 @@ use crate::error::AppError;
 use crate::extract::VQuery;
 use crate::response::ApiResponse;
 use crate::services::exchange_rate::{self, ExchangeRateError};
+use crate::state::AppState;
 use axum::{Json, Router, extract::State, routing::get};
 use garde::Validate;
 use serde::Deserialize;
@@ -54,6 +55,6 @@ pub async fn get_rate(
     )))
 }
 
-pub fn routes() -> Router<DbPool> {
+pub fn routes() -> Router<AppState> {
     Router::new().route("/api/exchange-rates", get(get_rate))
 }

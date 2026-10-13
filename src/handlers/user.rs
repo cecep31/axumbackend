@@ -11,6 +11,7 @@ use crate::models::user::UserResponse;
 use crate::models::user_follow::{FollowResponse, FollowStats};
 use crate::response::ApiResponse;
 use crate::services;
+use crate::state::AppState;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Multipart, State},
@@ -379,7 +380,7 @@ pub async fn update_user(
     )))
 }
 
-pub fn routes() -> Router<DbPool> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/users", get(get_users).post(create_user))
         .route("/api/users/stats", get(get_user_stats))

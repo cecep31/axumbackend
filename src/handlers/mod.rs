@@ -12,7 +12,7 @@ mod report;
 mod tag;
 mod user;
 
-use crate::{config::HttpConfig, database::DbPool, middleware as mw, rate_limit};
+use crate::{config::HttpConfig, middleware as mw, rate_limit, state::AppState};
 use axum::{Router, extract::DefaultBodyLimit, http::StatusCode, middleware};
 use tower_http::{
     timeout::TimeoutLayer,
@@ -20,7 +20,7 @@ use tower_http::{
 };
 use tracing::Level;
 
-pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<DbPool> {
+pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<AppState> {
     let http_config = HttpConfig::get();
 
     let api_routes = Router::new()

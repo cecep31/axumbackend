@@ -18,6 +18,7 @@ use crate::rate_limit::{self, RateLimiter};
 use crate::response::ApiResponse;
 use crate::services;
 use crate::services::post_report::PostReportError;
+use crate::state::AppState;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Multipart, State},
@@ -819,7 +820,7 @@ pub async fn list_moderation_actions(
     )))
 }
 
-pub fn routes() -> Router<DbPool> {
+pub fn routes() -> Router<AppState> {
     let trust_proxy =
         std::panic::catch_unwind(|| crate::config::HttpConfig::get().trust_proxy).unwrap_or(false);
     let report_limiter =

@@ -1,5 +1,8 @@
-use axumbackend::{cache, config, database, handlers, rate_limit::RateLimiter, realtime};
-use std::net::SocketAddr;
+use axumbackend::{
+    cache, config, database, email::ResendMailer, handlers, rate_limit::RateLimiter, realtime,
+    state::AppState,
+};
+use std::{net::SocketAddr, sync::Arc};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -68,7 +71,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
     };
 
-    let app = handlers::create_router(limiter).with_state(pool);
+    let state = AppState {
+        db: pool,
+        mailer: Arc::new(ResendMailer),
+    };
+    let app = handlers::create_router(limiter).with_state(state);
 
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr)

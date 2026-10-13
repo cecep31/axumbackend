@@ -7,6 +7,7 @@ use crate::extract::{VJson, VPath};
 use crate::models::comment::CommentResponse;
 use crate::response::ApiResponse;
 use crate::services::{self, comment::CommentError};
+use crate::state::AppState;
 use axum::{
     Json, Router,
     extract::State,
@@ -91,7 +92,7 @@ pub async fn delete_comment(
     )))
 }
 
-pub fn routes() -> Router<DbPool> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/posts/{id}/comments",

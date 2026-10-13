@@ -11,6 +11,7 @@ use crate::models::chat::{ChatConversationResponse, ChatMessageResponse};
 use crate::response::ApiResponse;
 use crate::services::chat::StreamOutcome;
 use crate::services::{self, chat::ChatError, openrouter};
+use crate::state::AppState;
 use axum::{
     Json, Router,
     extract::State,
@@ -346,7 +347,7 @@ fn ai_stream_response(
     Sse::new(stream)
 }
 
-pub fn routes() -> Router<DbPool> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/chat/conversations",

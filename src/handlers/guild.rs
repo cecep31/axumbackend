@@ -15,6 +15,7 @@ use crate::models::guild::{
 use crate::response::ApiResponse;
 use crate::services::guild::{CreateGuildInput, GuildError, UpdateGuildInput};
 use crate::services::{self, guild_channel::UpdateChannelInput};
+use crate::state::AppState;
 use axum::{
     Json, Router,
     extract::State,
@@ -480,7 +481,7 @@ pub async fn stream_events(
 /// Guild routes. Static segments like `/api/guilds/me` take precedence over
 /// `/{slug}`, and `services::guild` refuses to create a guild with a reserved
 /// slug so none can be shadowed.
-pub fn routes() -> Router<DbPool> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/guilds", get(list_guilds).post(create_guild))
         .route("/api/guilds/me", get(get_my_guilds))
@@ -511,7 +512,7 @@ pub fn routes() -> Router<DbPool> {
 
 /// The realtime stream is long-lived, so it is registered outside the request
 /// timeout layer.
-pub fn stream_routes() -> Router<DbPool> {
+pub fn stream_routes() -> Router<AppState> {
     Router::new().route("/api/guilds/{slug}/events", get(stream_events))
 }
 

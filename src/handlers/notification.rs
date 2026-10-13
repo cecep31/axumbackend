@@ -6,6 +6,7 @@ use crate::extract::{VPath, VQuery};
 use crate::models::notification::{MarkAllReadResponse, NotificationResponse, UnreadCountResponse};
 use crate::response::ApiResponse;
 use crate::services;
+use crate::state::AppState;
 use axum::{
     Json, Router,
     extract::State,
@@ -69,7 +70,7 @@ pub async fn mark_all_as_read(
     )))
 }
 
-pub fn routes() -> Router<DbPool> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/notifications", get(get_notifications))
         .route("/api/notifications/unread-count", get(get_unread_count))

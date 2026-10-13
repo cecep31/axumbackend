@@ -1,4 +1,5 @@
 use crate::database::DbPool;
+use crate::state::AppState;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use serde::{Deserialize, Serialize};
@@ -45,7 +46,7 @@ pub async fn health(State(pool): State<DbPool>) -> (StatusCode, Json<HealthRespo
     }
 }
 
-pub fn routes() -> Router<DbPool> {
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(root))
         .route("/health", get(health))
