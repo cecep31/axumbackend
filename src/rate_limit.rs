@@ -175,18 +175,62 @@ pub async fn rate_limit(
     }
 }
 
+/// Mirrors echobackend: with `trust_proxy`, `X-Forwarded-For` is only honoured
+/// when the direct peer is a trusted (loopback/private/link-local) proxy, and
+/// is walked right to left for the first untrusted hop. Taking the leftmost
+/// entry would let a client dodge the limit by sending a fresh fake IP.
 fn client_identity(request: &Request, trust_proxy: bool) -> String {
-    if trust_proxy && let Some(ip) = forwarded_ip(request.headers()) {
-        return ip.to_string();
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip());
+
+    if trust_proxy && let Some(peer) = peer {
+        if !is_trusted_hop(peer) {
+            return peer.to_string();
+        }
+        if let Some(ip) = trusted_proxy_client_ip(request.headers()) {
+            return ip.to_string();
+        }
+        return peer.to_string();
     }
 
-    if let Some(ConnectInfo(addr)) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
-        return addr.ip().to_string();
+    if let Some(peer) = peer {
+        return peer.to_string();
     }
 
     forwarded_ip(request.headers())
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn is_trusted_hop(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || (ip.segments()[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (ip.segments()[0] & 0xffc0) == 0xfe80 // link local fe80::/10
+        }
+    }
+}
+
+/// Rightmost `X-Forwarded-For` entry that is not a trusted proxy hop.
+fn trusted_proxy_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    let hops: Vec<Option<IpAddr>> = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(|p| p.trim().parse().ok())
+        .collect();
+    for hop in hops.into_iter().rev() {
+        match hop {
+            Some(ip) if is_trusted_hop(ip) => continue,
+            other => return other,
+        }
+    }
+    None
 }
 
 fn forwarded_ip(headers: &HeaderMap) -> Option<IpAddr> {
@@ -220,7 +264,32 @@ mod tests {
             .unwrap();
         req.extensions_mut().insert(ConnectInfo(socket_addr));
 
-        assert_eq!(client_identity(&req, true), "203.0.113.195");
+        // Peer is a loopback proxy: walk XFF from the right.
+        assert_eq!(client_identity(&req, true), "70.41.3.18");
+    }
+
+    #[test]
+    fn test_client_identity_ignores_xff_from_untrusted_peer() {
+        let socket_addr: SocketAddr = "198.51.100.7:8080".parse().unwrap();
+        let mut req = Request::builder()
+            .header("x-forwarded-for", "1.2.3.4")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(socket_addr));
+
+        assert_eq!(client_identity(&req, true), "198.51.100.7");
+    }
+
+    #[test]
+    fn test_client_identity_cannot_spoof_leftmost_xff() {
+        let socket_addr: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+        let mut req = Request::builder()
+            .header("x-forwarded-for", "9.9.9.9, 203.0.113.50, 10.0.0.9")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(socket_addr));
+
+        assert_eq!(client_identity(&req, true), "203.0.113.50");
     }
 
     #[test]
@@ -340,5 +409,39 @@ mod tests {
         let inner = limiter.inner.lock().unwrap();
         // Expired items should be pruned down
         assert!(inner.windows.len() <= 2);
+    }
+
+    #[tokio::test]
+    async fn test_middleware_blocks_after_limit() {
+        use axum::{Router, middleware, routing::post};
+        use tower::ServiceExt;
+
+        if let Ok(url) = std::env::var("REDIS_URL") {
+            let cfg = crate::config::CacheConfig {
+                valkey_url: url,
+                key_prefix: format!("rl-test-{}", uuid::Uuid::now_v7()),
+                ttl: Duration::from_secs(5),
+                connect_timeout: Duration::from_secs(2),
+            };
+            assert!(cache::init(&cfg).await.is_some());
+        }
+        let limiter = RateLimiter::new(2, Duration::from_secs(60), false).shared("test:login");
+        let app = Router::new().route(
+            "/login",
+            post(|| async { "ok" })
+                .route_layer(middleware::from_fn_with_state(limiter, rate_limit)),
+        );
+        let addr: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let mut codes = vec![];
+        for _ in 0..4 {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(addr));
+            codes.push(app.clone().oneshot(req).await.unwrap().status().as_u16());
+        }
+        assert_eq!(codes, vec![200, 200, 429, 429]);
     }
 }
