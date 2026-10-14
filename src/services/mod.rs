@@ -7,6 +7,7 @@ pub mod exchange_rate;
 pub mod guild;
 pub mod guild_channel;
 pub mod holding;
+pub mod market_quote;
 pub mod notification;
 pub mod openrouter;
 pub mod post;

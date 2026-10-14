@@ -37,6 +37,10 @@ impl From<HoldingError> for AppError {
                 AppError::BadRequest("Cannot duplicate holdings into the same month".to_string())
             }
             HoldingError::InvalidRange => AppError::BadRequest("Invalid monthly range".to_string()),
+            HoldingError::Quote(err) => {
+                tracing::error!(error = %err, "market quote fetch failed");
+                AppError::InternalServerError("Failed to sync prices".to_string())
+            }
         }
     }
 }
@@ -293,7 +297,7 @@ pub async fn sync_prices(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
 ) -> Result<Json<ApiResponse<HoldingSyncResponse>>, AppError> {
-    let result = services::holding::sync_prices(&pool, auth_user.id).await;
+    let result = services::holding::sync_prices(&pool, auth_user.id).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Prices synced successfully for current month",
         result,
