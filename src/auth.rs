@@ -10,12 +10,18 @@ use jsonwebtoken::{DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// echobackend tokens only carry `user_id`, `iat` and `exp`, so every other
+/// claim must tolerate being absent or the shared token is rejected.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     pub user_id: Uuid,
+    #[serde(default)]
     pub username: Option<String>,
+    #[serde(default)]
     pub email: String,
+    #[serde(default)]
     pub is_super_admin: Option<bool>,
+    #[serde(default)]
     pub iat: usize,
     pub exp: usize,
 }
