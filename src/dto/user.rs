@@ -42,6 +42,10 @@ pub struct UserListQuery {
     pub limit: Option<i64>,
     #[garde(skip)]
     pub deleted: Option<String>,
+    #[garde(skip)]
+    pub order_by: Option<String>,
+    #[garde(skip)]
+    pub order_direction: Option<String>,
 }
 
 #[derive(Deserialize, Validate)]

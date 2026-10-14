@@ -116,6 +116,8 @@ pub async fn get_users(
     offset: i64,
     limit: i64,
     deleted_filter: UserDeletedFilter,
+    order_by: Option<&str>,
+    order_desc: bool,
 ) -> Result<(Vec<UserResponse>, i64), DbErr> {
     let query = users::Entity::find().filter(match deleted_filter {
         UserDeletedFilter::Active => Condition::all().add(users::Column::DeletedAt.is_null()),
@@ -123,12 +125,22 @@ pub async fn get_users(
         UserDeletedFilter::All => Condition::all(),
     });
     let total = query.clone().count(db).await? as i64;
-    let user_models = query
-        .order_by_desc(users::Column::CreatedAt)
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
-        .all(db)
-        .await?;
+    let order_column = match order_by {
+        Some("last_logged_at") => users::Column::LastLoggedAt,
+        Some("username") => users::Column::Username,
+        Some("email") => users::Column::Email,
+        _ => users::Column::CreatedAt,
+    };
+    let mut query = query.limit(limit.max(0) as u64).offset(offset.max(0) as u64);
+    // NULLS LAST so users who never logged in stay at the bottom
+    // regardless of asc/desc (Postgres defaults to NULLS FIRST on DESC).
+    let nulls = sea_orm::sea_query::NullOrdering::Last;
+    query = if order_desc {
+        query.order_by_with_nulls(order_column, sea_orm::Order::Desc, nulls)
+    } else {
+        query.order_by_with_nulls(order_column, sea_orm::Order::Asc, nulls)
+    };
+    let user_models = query.all(db).await?;
 
     let responses = user_models
         .into_iter()

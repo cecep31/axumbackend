@@ -61,7 +61,19 @@ pub async fn get_users(
     let limit = query.limit.unwrap_or(10);
     let deleted_filter =
         UserDeletedFilter::parse(query.deleted.as_deref()).map_err(AppError::BadRequest)?;
-    let (users, total) = services::user::get_users(&pool, offset, limit, deleted_filter).await?;
+    let order_desc = !matches!(
+        query.order_direction.as_deref().map(str::to_ascii_lowercase).as_deref(),
+        Some("asc")
+    );
+    let (users, total) = services::user::get_users(
+        &pool,
+        offset,
+        limit,
+        deleted_filter,
+        query.order_by.as_deref(),
+        order_desc,
+    )
+    .await?;
 
     Ok(Json(ApiResponse::with_meta_message(
         "Successfully retrieved users",
