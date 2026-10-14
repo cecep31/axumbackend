@@ -60,9 +60,16 @@ pub async fn register(
     ),
     AppError,
 > {
-    let user = services::auth::register(&pool, req.email, req.username, req.password)
-        .await
-        .map_err(|err| map_auth_error("Registration failed", err))?;
+    let user = services::auth::register(
+        &pool,
+        req.email,
+        req.username,
+        req.password,
+        req.first_name,
+        req.last_name,
+    )
+    .await
+    .map_err(|err| map_auth_error("Registration failed", err))?;
 
     Ok((
         StatusCode::CREATED,

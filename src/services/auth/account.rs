@@ -37,6 +37,8 @@ pub async fn register(
     email: String,
     username: String,
     password: String,
+    first_name: String,
+    last_name: String,
 ) -> Result<RegisterResponse, AuthError> {
     let existing = users::Entity::find()
         .filter(
@@ -57,6 +59,8 @@ pub async fn register(
         email: Set(email),
         username: Set(Some(username)),
         password: Set(Some(hashed)),
+        first_name: Set(Some(first_name)),
+        last_name: Set(Some(last_name)),
         created_at: Set(Some(Utc::now().into())),
         updated_at: Set(Some(Utc::now().into())),
         ..Default::default()
@@ -80,6 +84,8 @@ pub async fn register(
         id: user.id,
         email: user.email,
         username: user.username,
+        first_name: user.first_name,
+        last_name: user.last_name,
     })
 }
 

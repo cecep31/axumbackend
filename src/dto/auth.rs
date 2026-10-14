@@ -9,6 +9,10 @@ pub struct RegisterRequest {
     pub username: String,
     #[garde(length(chars, min = 8))]
     pub password: String,
+    #[garde(length(chars, min = 1, max = 100))]
+    pub first_name: String,
+    #[garde(length(chars, min = 1, max = 100))]
+    pub last_name: String,
 }
 
 #[derive(Deserialize, Validate)]
@@ -123,6 +127,8 @@ mod tests {
             email: "user@example.com".into(),
             username: "johndoe".into(),
             password: "supersecret123".into(),
+            first_name: "John".into(),
+            last_name: "Doe".into(),
         };
         assert!(req.validate().is_ok());
     }
@@ -133,6 +139,8 @@ mod tests {
             email: "not-an-email".into(),
             username: "johndoe".into(),
             password: "supersecret123".into(),
+            first_name: "John".into(),
+            last_name: "Doe".into(),
         };
         assert!(req.validate().is_err());
     }
@@ -143,6 +151,8 @@ mod tests {
             email: "user@example.com".into(),
             username: "ab".into(),
             password: "supersecret123".into(),
+            first_name: "John".into(),
+            last_name: "Doe".into(),
         };
         assert!(req.validate().is_err());
     }
@@ -153,6 +163,20 @@ mod tests {
             email: "user@example.com".into(),
             username: "johndoe".into(),
             password: "short".into(),
+            first_name: "John".into(),
+            last_name: "Doe".into(),
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_register_request_missing_names() {
+        let req = RegisterRequest {
+            email: "user@example.com".into(),
+            username: "johndoe".into(),
+            password: "supersecret123".into(),
+            first_name: "".into(),
+            last_name: "".into(),
         };
         assert!(req.validate().is_err());
     }

@@ -19,6 +19,8 @@ pub struct RegisterResponse {
     pub id: Uuid,
     pub email: String,
     pub username: Option<String>,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
 }
 
 #[derive(Serialize)]
