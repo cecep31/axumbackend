@@ -119,7 +119,6 @@ pub struct UserStatsResponse {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct PostReportGroup {
     pub post_id: Uuid,
     pub post_title: Option<String>,
@@ -132,16 +131,13 @@ pub struct PostReportGroup {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct UserBrief {
     pub id: Uuid,
     pub username: Option<String>,
-    pub first_name: Option<String>,
-    pub last_name: Option<String>,
+    pub image: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ModerationActionResponse {
     pub id: Uuid,
     pub post_id: Option<Uuid>,
@@ -152,7 +148,6 @@ pub struct ModerationActionResponse {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct SinglePostReportResponse {
     pub id: Uuid,
     pub post_id: Uuid,

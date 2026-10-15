@@ -43,8 +43,7 @@ fn brief_from_user(u: Option<users::Model>) -> Option<UserBrief> {
     u.map(|u| UserBrief {
         id: u.id,
         username: u.username,
-        first_name: u.first_name,
-        last_name: u.last_name,
+        image: u.image,
     })
 }
 
@@ -57,7 +56,7 @@ fn action_to_response(
         post_id: a.post_id,
         action: a.action,
         note: a.note,
-        created_at: a.created_at.to_string(),
+        created_at: a.created_at.to_rfc3339(),
         admin: brief_from_user(admin),
     }
 }
@@ -138,7 +137,7 @@ pub async fn list_reported_posts(
     let distinct: Vec<GroupRow> = GroupRow::find_by_statement(Statement::from_string(
         DbBackend::Postgres,
         format!(
-            "SELECT posts.id AS post_id, posts.title AS post_title, posts.slug AS post_slug, users.username AS author_username, posts.hidden_at::text AS hidden_at, COUNT(*)::bigint AS report_count, MODE() WITHIN GROUP (ORDER BY post_reports.reason) AS top_reason, MAX(post_reports.created_at)::text AS last_reported_at FROM post_reports JOIN posts ON posts.id = post_reports.post_id LEFT JOIN users ON users.id = posts.created_by AND users.deleted_at IS NULL WHERE post_reports.status = '{}' GROUP BY posts.id, posts.title, posts.slug, users.username, posts.hidden_at ORDER BY COUNT(*) DESC, MAX(post_reports.created_at) DESC LIMIT {} OFFSET {}",
+            "SELECT posts.id AS post_id, posts.title AS post_title, posts.slug AS post_slug, users.username AS author_username, to_char(posts.hidden_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS hidden_at, COUNT(*)::bigint AS report_count, MODE() WITHIN GROUP (ORDER BY post_reports.reason) AS top_reason, to_char(MAX(post_reports.created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS last_reported_at FROM post_reports JOIN posts ON posts.id = post_reports.post_id LEFT JOIN users ON users.id = posts.created_by AND users.deleted_at IS NULL WHERE post_reports.status = '{}' GROUP BY posts.id, posts.title, posts.slug, users.username, posts.hidden_at ORDER BY COUNT(*) DESC, MAX(post_reports.created_at) DESC LIMIT {} OFFSET {}",
             status.replace('\'', "''"),
             limit,
             offset
@@ -232,7 +231,7 @@ pub async fn list_post_reports(
             reason: r.reason,
             details: r.details,
             status: r.status,
-            created_at: r.created_at.to_string(),
+            created_at: r.created_at.to_rfc3339(),
             reporter: brief_from_user(reporter),
             resolution,
         });
