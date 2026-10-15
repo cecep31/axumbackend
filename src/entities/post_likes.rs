@@ -8,7 +8,6 @@ pub struct Model {
     pub post_id: Uuid,
     pub user_id: Uuid,
     pub created_at: Option<DateTimeWithTimeZone>,
-    pub updated_at: Option<DateTimeWithTimeZone>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

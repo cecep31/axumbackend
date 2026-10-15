@@ -77,7 +77,6 @@ pub async fn like_post(
         post_id: Set(post_id),
         user_id: Set(user_id),
         created_at: Set(Some(now.into())),
-        updated_at: Set(Some(now.into())),
     }
     .insert(db)
     .await?;
