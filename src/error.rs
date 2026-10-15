@@ -14,6 +14,8 @@ pub enum AppError {
     Unauthorized(String),
     Forbidden(String),
     Conflict(String),
+    /// Upload body exceeds the size cap (`413`).
+    PayloadTooLarge(String),
     /// Validation failure (`422`) carrying structured field errors, mirroring
     /// echobackend's `response.FromValidateError` envelope.
     UnprocessableEntity {
@@ -40,6 +42,7 @@ impl IntoResponse for AppError {
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg, None),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg, None),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg, None),
+            AppError::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg, None),
             AppError::UnprocessableEntity { error, errors } => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "Validation failed".to_string(),

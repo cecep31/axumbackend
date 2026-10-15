@@ -19,6 +19,12 @@ use axum::{
     routing::{delete, get, post},
 };
 
+/// Maximum avatar file size. The route body limit adds multipart framing
+/// slack on top (see `crate::upload::max_body_bytes`) so files exactly at
+/// the cap still stream fully and are judged by the handler, not cut off
+/// mid-stream by the limiter.
+const MAX_AVATAR_SIZE: u64 = 5 * 1024 * 1024;
+
 impl From<services::user::UserError> for AppError {
     fn from(err: services::user::UserError) -> Self {
         match err {
@@ -281,25 +287,29 @@ fn detect_allowed_avatar(data: &[u8]) -> bool {
 
 pub async fn upload_avatar(
     _auth_user: AuthUser,
+    headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    const MAX_AVATAR_SIZE: usize = 5 * 1024 * 1024;
+    // Same fail-fast rationale as post image uploads (see handlers::post):
+    // without this, oversized bodies die mid-stream with a generic parse error.
+    crate::upload::reject_oversized_body(&headers, MAX_AVATAR_SIZE, "Avatar")?;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|err| AppError::BadRequest(format!("Failed to upload image: {err}")))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|err| {
+        tracing::warn!(error = ?err, "avatar: multipart field error");
+        AppError::BadRequest(format!("Failed to upload image: {err}"))
+    })? {
         if field.name() != Some("avatar") {
             continue;
         }
 
-        let data = field
-            .bytes()
-            .await
-            .map_err(|err| AppError::BadRequest(format!("Failed to read image: {err}")))?;
-        if data.len() > MAX_AVATAR_SIZE {
-            return Err(AppError::BadRequest("File is too large".to_string()));
+        let data = field.bytes().await.map_err(|err| {
+            tracing::warn!(error = ?err, "avatar: multipart read error");
+            AppError::BadRequest(format!("Failed to read image: {err}"))
+        })?;
+        if data.len() as u64 > MAX_AVATAR_SIZE {
+            return Err(AppError::PayloadTooLarge(
+                "Avatar is too large (max 5 MB)".to_string(),
+            ));
         }
         if !detect_allowed_avatar(&data) {
             return Err(AppError::BadRequest("Invalid file type".to_string()));
@@ -399,7 +409,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/users/me", get(get_me))
         .route(
             "/api/users/me/image",
-            post(upload_avatar).route_layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
+            post(upload_avatar).route_layer(DefaultBodyLimit::max(crate::upload::max_body_bytes(
+                MAX_AVATAR_SIZE,
+            ))),
         )
         .route("/api/users/username/{username}", get(get_by_username))
         .route("/api/users/follow", post(follow_user))

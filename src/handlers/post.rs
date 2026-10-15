@@ -28,6 +28,12 @@ use axum::{
 use std::time::Duration;
 use uuid::Uuid;
 
+/// Maximum post image file size. The route body limit adds multipart framing
+/// slack on top (see `crate::upload::max_body_bytes`) so files exactly at
+/// the cap still stream fully and are judged by the handler, not cut off
+/// mid-stream by the limiter.
+const MAX_POST_IMAGE_SIZE: u64 = 1024 * 1024;
+
 impl From<PostReportError> for AppError {
     fn from(err: PostReportError) -> Self {
         match err {
@@ -265,25 +271,30 @@ fn detect_allowed_image(data: &[u8]) -> bool {
 
 pub async fn upload_image_posts(
     _auth_user: AuthUser,
+    headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    const MAX_POST_IMAGE_SIZE: usize = 1024 * 1024;
+    // Fail fast on oversized bodies: without this the route's body limit
+    // kills the stream mid-field and multer reports a generic "Error parsing
+    // multipart/form-data request" instead of a clear 413.
+    crate::upload::reject_oversized_body(&headers, MAX_POST_IMAGE_SIZE, "Image")?;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|err| AppError::BadRequest(format!("Failed to upload image: {err}")))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|err| {
+        tracing::warn!(error = ?err, "post image: multipart field error");
+        AppError::BadRequest(format!("Failed to upload image: {err}"))
+    })? {
         if field.name() != Some("image") {
             continue;
         }
 
-        let data = field
-            .bytes()
-            .await
-            .map_err(|err| AppError::BadRequest(format!("Failed to read image: {err}")))?;
-        if data.len() > MAX_POST_IMAGE_SIZE {
-            return Err(AppError::BadRequest("File is too large".to_string()));
+        let data = field.bytes().await.map_err(|err| {
+            tracing::warn!(error = ?err, "post image: multipart read error");
+            AppError::BadRequest(format!("Failed to read image: {err}"))
+        })?;
+        if data.len() as u64 > MAX_POST_IMAGE_SIZE {
+            return Err(AppError::PayloadTooLarge(
+                "Image is too large (max 1 MB)".to_string(),
+            ));
         }
         if !detect_allowed_image(&data) {
             return Err(AppError::BadRequest("Invalid file type".to_string()));
@@ -874,7 +885,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/posts/feed/for-you", get(get_posts_for_you))
         .route(
             "/api/posts/image",
-            post(upload_image_posts).route_layer(DefaultBodyLimit::max(1024 * 1024)),
+            post(upload_image_posts).route_layer(DefaultBodyLimit::max(
+                crate::upload::max_body_bytes(MAX_POST_IMAGE_SIZE),
+            )),
         )
         .route("/api/posts/sitemap", get(get_posts_for_sitemap))
         .route("/api/posts/username/{username}", get(get_posts_by_username))
