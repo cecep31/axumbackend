@@ -1,6 +1,6 @@
 use axumbackend::{
     cache, config, database, email::ResendMailer, handlers, rate_limit::RateLimiter, realtime,
-    state::AppState,
+    state::AppState, storage,
 };
 use std::{net::SocketAddr, sync::Arc};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -54,6 +54,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(cache) = cache::init(&config.cache).await {
         realtime::hub().start_relay(cache);
     }
+
+    // Optional: without S3, image uploads report "Storage is not configured".
+    storage::init(&config.s3);
 
     let limiter = if config.rate_limit.max_requests == 0 {
         tracing::info!("Rate limiter disabled");

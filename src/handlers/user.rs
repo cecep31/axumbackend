@@ -24,6 +24,8 @@ use axum::{
 /// the cap still stream fully and are judged by the handler, not cut off
 /// mid-stream by the limiter.
 const MAX_AVATAR_SIZE: u64 = 5 * 1024 * 1024;
+/// Object key prefix for avatars; matches echobackend.
+const AVATAR_PREFIX: &str = "users/avatars";
 
 impl From<services::user::UserError> for AppError {
     fn from(err: services::user::UserError) -> Self {
@@ -68,7 +70,11 @@ pub async fn get_users(
     let deleted_filter =
         UserDeletedFilter::parse(query.deleted.as_deref()).map_err(AppError::BadRequest)?;
     let order_desc = !matches!(
-        query.order_direction.as_deref().map(str::to_ascii_lowercase).as_deref(),
+        query
+            .order_direction
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
         Some("asc")
     );
     let (users, total) = services::user::get_users(
@@ -277,16 +283,24 @@ pub async fn get_mutual_follows(
     )))
 }
 
-fn detect_allowed_avatar(data: &[u8]) -> bool {
-    let is_jpeg = data.len() >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF;
-    let is_png = data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1a\n";
-    let is_gif = data.len() >= 6 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a");
-    let is_webp = data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP";
-    is_jpeg || is_png || is_gif || is_webp
+/// Returns `(content_type, extension)` for allowed avatar images.
+fn detect_allowed_avatar(data: &[u8]) -> Option<(&'static str, &'static str)> {
+    if data.len() >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+        Some(("image/jpeg", ".jpg"))
+    } else if data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
+        Some(("image/png", ".png"))
+    } else if data.len() >= 6 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a") {
+        Some(("image/gif", ".gif"))
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        Some(("image/webp", ".webp"))
+    } else {
+        None
+    }
 }
 
 pub async fn upload_avatar(
-    _auth_user: AuthUser,
+    State(pool): State<DbPool>,
+    auth_user: AuthUser,
     headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
@@ -311,13 +325,29 @@ pub async fn upload_avatar(
                 "Avatar is too large (max 5 MB)".to_string(),
             ));
         }
-        if !detect_allowed_avatar(&data) {
+        let Some((content_type, ext)) = detect_allowed_avatar(&data) else {
             return Err(AppError::BadRequest("Invalid file type".to_string()));
-        }
+        };
+        let Some(storage) = crate::storage::get() else {
+            return Err(AppError::BadRequest(
+                "Storage is not configured".to_string(),
+            ));
+        };
 
-        return Err(AppError::BadRequest(
-            "Storage is not configured".to_string(),
-        ));
+        let key = crate::storage::random_object_key(AVATAR_PREFIX, ext);
+        storage
+            .save(&key, data.to_vec(), content_type)
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, key = %key, "avatar: upload failed");
+                AppError::InternalServerError("Failed to upload image".to_string())
+            })?;
+        services::user::set_image(&pool, auth_user.id, &key).await?;
+
+        return Ok(Json(ApiResponse::success_with_message(
+            "Profile picture updated successfully",
+            serde_json::json!({ "image": key }),
+        )));
     }
 
     Err(AppError::BadRequest("No file uploaded".to_string()))

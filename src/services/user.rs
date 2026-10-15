@@ -281,6 +281,21 @@ pub async fn create_user(
     Ok(hydrate_user(db, new_user, UserView::Admin).await?)
 }
 
+/// Points the user's profile image at an uploaded object key.
+pub async fn set_image(db: &DatabaseConnection, id: Uuid, image: &str) -> Result<(), UserError> {
+    let user = users::Entity::find_by_id(id)
+        .filter(users::Column::DeletedAt.is_null())
+        .one(db)
+        .await?
+        .ok_or(UserError::NotFound)?;
+
+    let mut active = user.into_active_model();
+    active.image = Set(Some(image.to_string()));
+    active.updated_at = Set(Some(Utc::now().into()));
+    active.update(db).await?;
+    Ok(())
+}
+
 pub async fn update_user(
     db: &DatabaseConnection,
     id: Uuid,

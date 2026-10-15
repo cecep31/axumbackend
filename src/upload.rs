@@ -40,10 +40,7 @@ pub fn reject_oversized_body(
     max_file_bytes: u64,
     label: &str,
 ) -> Result<(), AppError> {
-    if content_length_exceeds(
-        headers,
-        max_file_bytes + MULTIPART_OVERHEAD_SLACK_BYTES,
-    ) {
+    if content_length_exceeds(headers, max_file_bytes + MULTIPART_OVERHEAD_SLACK_BYTES) {
         return Err(AppError::PayloadTooLarge(format!(
             "{label} is too large (max {} MB)",
             max_file_bytes / (1024 * 1024)

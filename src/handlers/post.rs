@@ -33,6 +33,8 @@ use uuid::Uuid;
 /// the cap still stream fully and are judged by the handler, not cut off
 /// mid-stream by the limiter.
 const MAX_POST_IMAGE_SIZE: u64 = 1024 * 1024;
+/// Object key prefix for post images; matches echobackend.
+const POST_IMAGE_PREFIX: &str = "posts/images";
 
 impl From<PostReportError> for AppError {
     fn from(err: PostReportError) -> Self {
@@ -262,18 +264,24 @@ pub async fn get_posts_for_you(
     )))
 }
 
-fn detect_allowed_image(data: &[u8]) -> bool {
-    let is_jpeg = data.len() >= 3 && data[0..3] == [0xff, 0xd8, 0xff];
-    let is_png = data.len() >= 8 && data[0..8] == [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
-    let is_webp = data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP";
-    is_jpeg || is_png || is_webp
+/// Returns `(content_type, extension)` for allowed post images.
+fn detect_allowed_image(data: &[u8]) -> Option<(&'static str, &'static str)> {
+    if data.len() >= 3 && data[0..3] == [0xff, 0xd8, 0xff] {
+        Some(("image/jpeg", ".jpg"))
+    } else if data.len() >= 8 && data[0..8] == [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a] {
+        Some(("image/png", ".png"))
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        Some(("image/webp", ".webp"))
+    } else {
+        None
+    }
 }
 
 pub async fn upload_image_posts(
     _auth_user: AuthUser,
     headers: axum::http::HeaderMap,
     mut multipart: Multipart,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<(axum::http::StatusCode, Json<ApiResponse<serde_json::Value>>), AppError> {
     // Fail fast on oversized bodies: without this the route's body limit
     // kills the stream mid-field and multer reports a generic "Error parsing
     // multipart/form-data request" instead of a clear 413.
@@ -296,12 +304,30 @@ pub async fn upload_image_posts(
                 "Image is too large (max 1 MB)".to_string(),
             ));
         }
-        if !detect_allowed_image(&data) {
+        let Some((content_type, ext)) = detect_allowed_image(&data) else {
             return Err(AppError::BadRequest("Invalid file type".to_string()));
-        }
+        };
+        let Some(storage) = crate::storage::get() else {
+            return Err(AppError::BadRequest(
+                "Storage is not configured".to_string(),
+            ));
+        };
 
-        return Err(AppError::BadRequest(
-            "Storage is not configured".to_string(),
+        let key = crate::storage::random_object_key(POST_IMAGE_PREFIX, ext);
+        storage
+            .save(&key, data.to_vec(), content_type)
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, key = %key, "post image: upload failed");
+                AppError::InternalServerError("Failed to upload image".to_string())
+            })?;
+
+        return Ok((
+            axum::http::StatusCode::CREATED,
+            Json(ApiResponse::success_with_message(
+                "Successfully uploaded image",
+                serde_json::json!({ "path": key, "url": key }),
+            )),
         ));
     }
 

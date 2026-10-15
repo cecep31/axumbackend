@@ -17,4 +17,5 @@ pub mod response;
 pub mod services;
 pub mod slug;
 pub mod state;
+pub mod storage;
 pub mod upload;
