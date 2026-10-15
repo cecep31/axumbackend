@@ -183,7 +183,9 @@ fn parse_quote_response(body: &[u8]) -> HashMap<String, f64> {
 }
 
 fn non_empty(value: Option<&Value>) -> Option<&Vec<Value>> {
-    value.and_then(Value::as_array).filter(|items| !items.is_empty())
+    value
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty())
 }
 
 fn extract_quote_item(item: &Value, quotes: &mut HashMap<String, f64>) {

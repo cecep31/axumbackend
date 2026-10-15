@@ -898,7 +898,10 @@ pub async fn sync_prices(
             )
             .col_expr(
                 holdings::Column::CurrentValue,
-                Expr::value(parse_decimal(&format!("{current_value:.2}"), "current_value")?),
+                Expr::value(parse_decimal(
+                    &format!("{current_value:.2}"),
+                    "current_value",
+                )?),
             )
             .col_expr(holdings::Column::LastUpdated, Expr::value(now))
             .col_expr(holdings::Column::UpdatedAt, Expr::value(now))

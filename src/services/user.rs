@@ -131,7 +131,9 @@ pub async fn get_users(
         Some("email") => users::Column::Email,
         _ => users::Column::CreatedAt,
     };
-    let mut query = query.limit(limit.max(0) as u64).offset(offset.max(0) as u64);
+    let mut query = query
+        .limit(limit.max(0) as u64)
+        .offset(offset.max(0) as u64);
     // NULLS LAST so users who never logged in stay at the bottom
     // regardless of asc/desc (Postgres defaults to NULLS FIRST on DESC).
     let nulls = sea_orm::sea_query::NullOrdering::Last;
