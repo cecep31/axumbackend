@@ -650,9 +650,13 @@ pub async fn update_post(
     }
     active.updated_at = Set(Some(Utc::now().into()));
 
-    // echobackend's UpdatePost repository never touches posts_to_tags — the
-    // `tags` field on the update request is intentionally a no-op here too.
     let post = active.update(db).await?;
+
+    // Mirrors echobackend's UpdatePostWithTags: `None` leaves tags untouched,
+    // `Some(..)` (even empty) replaces the whole association set.
+    if let Some(tag_names) = &input.tags {
+        replace_post_tags(db, post.id, tag_names).await?;
+    }
 
     let user = post.find_related(users::Entity).one(db).await?;
     let tags = post.find_related(tags::Entity).all(db).await?;
