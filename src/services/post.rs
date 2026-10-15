@@ -354,6 +354,13 @@ pub async fn get_trending_posts(db: &DatabaseConnection, limit: i64) -> Result<V
     let post_models = posts::Entity::find()
         .filter(posts::Column::Published.eq(true))
         .filter(posts::Column::HiddenAt.is_null())
+        // Promotional posts stay published and discoverable via search, tags
+        // and profiles — they just never trend. Values come from the shared
+        // anti-spam constants, so the list cannot drift from echobackend's.
+        .filter(Expr::cust(format!(
+            "NOT EXISTS (SELECT 1 FROM posts_to_tags ptt INNER JOIN tags t ON t.id = ptt.tag_id WHERE ptt.post_id = posts.id AND LOWER(t.name) IN ({}))",
+            crate::antispam::promo_tags_sql_in()
+        )))
         .order_by(
             sea_orm::sea_query::Expr::cust("like_count * 2 + bookmark_count * 2 + view_count"),
             Order::Desc,
@@ -544,11 +551,32 @@ pub struct UpdatePostInput {
     pub tags: Option<Vec<String>>,
 }
 
+/// Writing a post can fail for a policy reason, not just a database error.
+#[derive(Debug)]
+pub enum PostWriteError {
+    /// Content tripped the anti-spam guard (`crate::antispam`); carries the
+    /// user-facing reason surfaced through the 422 envelope.
+    SpamRejected(String),
+    Db(DbErr),
+}
+
+impl From<DbErr> for PostWriteError {
+    fn from(err: DbErr) -> Self {
+        Self::Db(err)
+    }
+}
+
 pub async fn create_post(
     db: &DatabaseConnection,
     input: CreatePostInput,
     creator_id: uuid::Uuid,
-) -> Result<Post, DbErr> {
+) -> Result<Post, PostWriteError> {
+    // Proactive spam guard: marketing spam is rejected with a 422 that tells
+    // the author the rule, instead of polluting feeds until someone reports it.
+    if let Some(reason) = crate::antispam::reject_reason(&input.title, &input.body) {
+        return Err(PostWriteError::SpamRejected(reason));
+    }
+
     let now = Utc::now();
     let post = posts::ActiveModel {
         id: Set(uuid::Uuid::now_v7()),
@@ -571,7 +599,9 @@ pub async fn create_post(
     replace_post_tags(db, post.id, &input.tags).await?;
     let user = post.find_related(users::Entity).one(db).await?;
     let tags = post.find_related(tags::Entity).all(db).await?;
-    hydrate_post(&post, user, tags, false).await
+    hydrate_post(&post, user, tags, false)
+        .await
+        .map_err(PostWriteError::from)
 }
 
 pub async fn is_author(
@@ -588,7 +618,16 @@ pub async fn update_post(
     db: &DatabaseConnection,
     post_id: uuid::Uuid,
     input: UpdatePostInput,
-) -> Result<Option<Post>, DbErr> {
+) -> Result<Option<Post>, PostWriteError> {
+    // Same guard as creation; only submitted fields are checked (absent
+    // fields behave as empty strings, which never trigger any rule).
+    if let Some(reason) = crate::antispam::reject_reason(
+        input.title.as_deref().unwrap_or(""),
+        input.body.as_deref().unwrap_or(""),
+    ) {
+        return Err(PostWriteError::SpamRejected(reason));
+    }
+
     let Some(post) = posts::Entity::find_by_id(post_id).one(db).await? else {
         return Ok(None);
     };

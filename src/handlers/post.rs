@@ -51,6 +51,22 @@ impl From<PostReportError> for AppError {
     }
 }
 
+impl From<services::post::PostWriteError> for AppError {
+    fn from(err: services::post::PostWriteError) -> Self {
+        match err {
+            services::post::PostWriteError::SpamRejected(reason) => AppError::UnprocessableEntity {
+                error: "Post rejected by anti-spam policy".to_string(),
+                errors: vec![crate::extract::FieldError {
+                    field: "body".to_string(),
+                    message: reason,
+                    tag: Some("spam".to_string()),
+                }],
+            },
+            services::post::PostWriteError::Db(e) => AppError::from(e),
+        }
+    }
+}
+
 pub async fn create_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
@@ -825,8 +841,21 @@ pub fn routes() -> Router<AppState> {
         std::panic::catch_unwind(|| crate::config::HttpConfig::get().trust_proxy).unwrap_or(false);
     let report_limiter =
         RateLimiter::new(10, Duration::from_secs(3600), trust_proxy).shared("posts:report");
+    // Creating posts shares the 10/hour budget of reporting: cheap enough for
+    // legitimate authors, expensive enough to stop spam floods. Registered as
+    // a separate same-path route so the limit applies to POST only — axum
+    // merges the two `/api/posts` routes into one.
+    let create_post_limiter =
+        RateLimiter::new(10, Duration::from_secs(3600), trust_proxy).shared("posts:create");
     Router::new()
-        .route("/api/posts", get(get_posts).post(create_post))
+        .route("/api/posts", get(get_posts))
+        .route(
+            "/api/posts",
+            post(create_post).route_layer(middleware::from_fn_with_state(
+                create_post_limiter,
+                rate_limit::rate_limit,
+            )),
+        )
         .route("/api/posts/stats", get(get_post_stats))
         .route("/api/posts/stats/engagement", get(get_post_engagement))
         .route("/api/posts/reports", get(list_reported_posts))
