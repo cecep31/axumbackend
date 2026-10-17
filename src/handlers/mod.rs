@@ -8,7 +8,6 @@ mod health;
 mod holding;
 mod notification;
 mod post;
-mod report;
 mod tag;
 mod user;
 
@@ -33,7 +32,6 @@ pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<AppStat
         .merge(holding::routes())
         .merge(notification::routes())
         .merge(post::routes())
-        .merge(report::routes())
         .merge(tag::routes())
         .merge(user::routes())
         .layer(TimeoutLayer::with_status_code(

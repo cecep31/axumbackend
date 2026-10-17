@@ -1,5 +1,5 @@
-use crate::entities::{post_comments, post_likes, post_views, posts, users};
-use crate::models::report::*;
+use crate::entities::{post_comments, posts, users};
+use crate::models::stats::*;
 use chrono::{Duration, NaiveDate, Utc};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait,
@@ -31,60 +31,11 @@ async fn scalar_i64(db: &DatabaseConnection, sql: &str) -> Result<i64, DbErr> {
     row.try_get("", "value")
 }
 
-pub async fn overview(db: &DatabaseConnection) -> Result<OverviewStatsResponse, DbErr> {
-    let today = Utc::now().date_naive();
-    let week_ago = today - Duration::days(7);
-
-    let total_users = users::Entity::find().count(db).await? as i64;
-    let total_posts = posts::Entity::find()
-        .filter(posts::Column::Published.eq(true))
-        .count(db)
-        .await? as i64;
-    let total_views = post_views::Entity::find().count(db).await? as i64;
-    let total_likes = post_likes::Entity::find().count(db).await? as i64;
-    let total_comments = post_comments::Entity::find().count(db).await? as i64;
-    let new_users_today = scalar_i64(
-        db,
-        &format!(
-            "SELECT COUNT(*)::bigint AS value FROM users WHERE DATE(created_at) >= '{}'",
-            today
-        ),
-    )
-    .await?;
-    let new_posts_today = scalar_i64(
-        db,
-        &format!(
-            "SELECT COUNT(*)::bigint AS value FROM posts WHERE published = true AND DATE(created_at) >= '{}'",
-            today
-        ),
-    )
-    .await?;
-    let active_users_this_week = scalar_i64(
-        db,
-        &format!(
-            "SELECT COUNT(DISTINCT user_id)::bigint AS value FROM post_views WHERE user_id IS NOT NULL AND DATE(created_at) >= '{}'",
-            week_ago
-        ),
-    )
-    .await?;
-
-    Ok(OverviewStatsResponse {
-        total_users,
-        total_posts,
-        total_views,
-        total_likes,
-        total_comments,
-        new_users_today,
-        new_posts_today,
-        active_users_this_week,
-    })
-}
-
-pub async fn user_report(
+pub async fn user_stats(
     db: &DatabaseConnection,
     range: DateRange<'_>,
     limit: i64,
-) -> Result<UserReportResponse, DbErr> {
+) -> Result<UserStatsResponse, DbErr> {
     #[derive(FromQueryResult)]
     struct ContributorRow {
         id: Uuid,
@@ -160,7 +111,7 @@ pub async fn user_report(
         })
         .collect();
 
-    Ok(UserReportResponse {
+    Ok(UserStatsResponse {
         total_users,
         new_users_this_period,
         active_users,
@@ -314,12 +265,12 @@ pub async fn engagement(
     })
 }
 
-pub async fn post_report(
+pub async fn post_stats(
     db: &DatabaseConnection,
     range: DateRange<'_>,
     limit: i64,
     tag_id: Option<i32>,
-) -> Result<PostReportResponse, DbErr> {
+) -> Result<PostStatsResponse, DbErr> {
     #[derive(FromQueryResult)]
     struct PostRow {
         id: Uuid,
@@ -333,14 +284,6 @@ pub async fn post_report(
         author_first_name: Option<String>,
         author_last_name: Option<String>,
         created_at: Option<String>,
-    }
-    #[derive(FromQueryResult)]
-    struct TagRow {
-        id: i32,
-        name: String,
-        post_count: i64,
-        total_views: i64,
-        total_likes: i64,
     }
 
     let start_clause = range
@@ -426,29 +369,13 @@ pub async fn post_report(
             }
         })
         .collect();
-    let tag_rows = TagRow::find_by_statement(Statement::from_string(
-        DbBackend::Postgres,
-        "SELECT tags.id, tags.name, COUNT(ptt.post_id)::bigint AS post_count, COALESCE(SUM(p.view_count), 0)::bigint AS total_views, COALESCE(SUM(p.like_count), 0)::bigint AS total_likes FROM tags INNER JOIN posts_to_tags ptt ON tags.id = ptt.tag_id INNER JOIN posts p ON ptt.post_id = p.id WHERE p.published = true GROUP BY tags.id, tags.name ORDER BY COUNT(ptt.post_id) DESC LIMIT 10".to_string(),
-    ))
-    .all(db)
-    .await?;
-    let tag_performance = tag_rows
-        .into_iter()
-        .map(|row| TagPerformance {
-            id: row.id,
-            name: row.name,
-            post_count: row.post_count,
-            total_views: row.total_views,
-            total_likes: row.total_likes,
-        })
-        .collect();
     let avg_engagement_rate = if total_views > 0 {
         round2(((total_likes + total_comments) as f64 / total_views as f64) * 100.0)
     } else {
         0.0
     };
 
-    Ok(PostReportResponse {
+    Ok(PostStatsResponse {
         total_posts,
         new_posts_this_period,
         total_views,
@@ -457,7 +384,6 @@ pub async fn post_report(
         new_posts_today,
         avg_engagement_rate,
         top_posts,
-        tag_performance,
     })
 }
 

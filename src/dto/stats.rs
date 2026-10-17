@@ -1,10 +1,10 @@
-use crate::models::report::{EngagementMetricsResponse, OverviewStatsResponse};
+use crate::services::stats::DateRange;
 use garde::Validate;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 #[derive(Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
-pub struct ReportQuery {
+pub struct StatsQuery {
     #[garde(skip)]
     pub start_date: Option<String>,
     #[garde(skip)]
@@ -21,7 +21,14 @@ pub struct ReportQuery {
     pub tag_id: Option<String>,
 }
 
-impl ReportQuery {
+impl StatsQuery {
+    pub fn date_range(&self) -> DateRange<'_> {
+        DateRange {
+            start_date: self.start_date.as_deref(),
+            end_date: self.end_date.as_deref(),
+        }
+    }
+
     pub fn tag_id(&self) -> Option<i32> {
         self.tag_id.as_deref()?.parse().ok()
     }
@@ -41,18 +48,5 @@ impl ReportQuery {
             limit = 100;
         }
         limit
-    }
-}
-
-#[derive(Serialize)]
-pub struct OverviewReport {
-    pub overview: OverviewStatsResponse,
-    pub engagement: EngagementMetricsResponse,
-}
-
-pub fn date_range(query: &ReportQuery) -> crate::services::report::DateRange<'_> {
-    crate::services::report::DateRange {
-        start_date: query.start_date.as_deref(),
-        end_date: query.end_date.as_deref(),
     }
 }

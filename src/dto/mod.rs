@@ -9,7 +9,7 @@ pub mod holding;
 pub mod notification;
 pub mod post;
 pub mod post_report;
-pub mod report;
+pub mod stats;
 pub mod tag;
 pub mod user;
 pub mod validation;

@@ -1,5 +1,5 @@
 use crate::entities::{post_moderation_actions, post_reports, posts, users};
-use crate::models::report::{
+use crate::models::post_report::{
     ModerationActionResponse, PostReportGroup, SinglePostReportResponse, UserBrief,
 };
 use sea_orm::{

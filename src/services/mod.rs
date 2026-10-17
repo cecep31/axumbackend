@@ -14,7 +14,7 @@ pub mod post;
 pub mod post_like;
 pub mod post_report;
 pub mod post_view;
-pub mod report;
+pub mod stats;
 pub mod tag;
 pub mod user;
 pub mod user_follow;

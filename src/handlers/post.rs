@@ -7,13 +7,14 @@ use crate::dto::post::{
     post_pagination_params,
 };
 use crate::dto::post_report::{CreatePostReportRequest, ModeratePostRequest, ReportStatusQuery};
-use crate::dto::report::{ReportQuery, date_range};
+use crate::dto::stats::StatsQuery;
 use crate::error::AppError;
 use crate::extract::{VJson, VPath, VQuery};
 use crate::models::post::{Post, SitemapPost};
-use crate::models::report::{
-    ModerationActionResponse, PostStatsResponse, SinglePostReportResponse,
+use crate::models::post_report::{
+    ModerationActionResponse, PostReportGroup, SinglePostReportResponse,
 };
+use crate::models::stats::{EngagementMetricsResponse, PostStatsResponse};
 use crate::rate_limit::{self, RateLimiter};
 use crate::response::ApiResponse;
 use crate::services;
@@ -732,32 +733,23 @@ pub async fn get_post_by_username_and_slug(
 pub async fn get_post_stats(
     State(pool): State<DbPool>,
     _admin: AdminUser,
-    VQuery(query): VQuery<ReportQuery>,
+    VQuery(query): VQuery<StatsQuery>,
 ) -> Result<Json<ApiResponse<PostStatsResponse>>, AppError> {
-    let report =
-        services::report::post_report(&pool, date_range(&query), query.limit(), query.tag_id())
+    let stats =
+        services::stats::post_stats(&pool, query.date_range(), query.limit(), query.tag_id())
             .await?;
     Ok(Json(ApiResponse::success_with_message(
         "Post stats fetched successfully",
-        PostStatsResponse {
-            total_posts: report.total_posts,
-            new_posts_this_period: report.new_posts_this_period,
-            total_views: report.total_views,
-            total_likes: report.total_likes,
-            total_comments: report.total_comments,
-            new_posts_today: report.new_posts_today,
-            avg_engagement_rate: report.avg_engagement_rate,
-            top_posts: report.top_posts,
-        },
+        stats,
     )))
 }
 
 pub async fn get_post_engagement(
     State(pool): State<DbPool>,
     _admin: AdminUser,
-    VQuery(query): VQuery<ReportQuery>,
-) -> Result<Json<ApiResponse<crate::models::report::EngagementMetricsResponse>>, AppError> {
-    let metrics = services::report::engagement(&pool, date_range(&query)).await?;
+    VQuery(query): VQuery<StatsQuery>,
+) -> Result<Json<ApiResponse<EngagementMetricsResponse>>, AppError> {
+    let metrics = services::stats::engagement(&pool, query.date_range()).await?;
     Ok(Json(ApiResponse::success_with_message(
         "Engagement metrics fetched successfully",
         metrics,
@@ -788,7 +780,7 @@ pub async fn list_reported_posts(
     State(pool): State<DbPool>,
     _admin: AdminUser,
     VQuery(query): VQuery<ReportStatusQuery>,
-) -> Result<Json<ApiResponse<Vec<crate::models::report::PostReportGroup>>>, AppError> {
+) -> Result<Json<ApiResponse<Vec<PostReportGroup>>>, AppError> {
     let status = query.status_or_default();
     let (groups, total) = services::post_report::list_reported_posts(
         &pool,
