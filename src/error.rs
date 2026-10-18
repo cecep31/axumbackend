@@ -148,6 +148,34 @@ mod tests {
         );
     }
 
+    /// The frontend reads the rejection reason from `errors[].tag == "spam"`;
+    /// this pins the envelope it depends on (shared with echobackend).
+    #[tokio::test]
+    async fn spam_rejected_envelope_carries_reason() {
+        let response = AppError::spam_rejected(
+            "Content rejected by anti-spam policy",
+            "text",
+            "contains banned keyword \"gacor\"".to_string(),
+        )
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(body["message"], "Validation failed");
+        assert_eq!(body["error"], "Content rejected by anti-spam policy");
+        assert_eq!(
+            body["errors"],
+            serde_json::json!([{
+                "field": "text",
+                "message": "contains banned keyword \"gacor\"",
+                "tag": "spam",
+            }])
+        );
+    }
+
     #[test]
     fn test_from_db_err() {
         let db_err = DbErr::RecordNotFound("not found".into());
