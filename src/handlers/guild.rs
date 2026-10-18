@@ -45,6 +45,9 @@ fn map_guild_error(err: GuildError) -> AppError {
         GuildError::AlreadyMember => {
             AppError::Conflict("Already a member of this guild".to_string())
         }
+        GuildError::SpamRejected(reason) => {
+            AppError::spam_rejected("Content rejected by anti-spam policy", "name", reason)
+        }
         other => AppError::BadRequest(other.to_string()),
     }
 }

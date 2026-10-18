@@ -15,6 +15,17 @@ pub enum CommentError {
     PostNotFound,
     CommentNotFound,
     NotOwner,
+    /// Text tripped the anti-spam guard (`crate::antispam`); carries the
+    /// user-facing reason surfaced through the 422 envelope.
+    SpamRejected(String),
+}
+
+/// Runs before any database access so rejected text never costs a query.
+fn reject_spam(text: &str) -> Result<(), CommentError> {
+    match crate::antispam::text_reject_reason(&[text]) {
+        Some(reason) => Err(CommentError::SpamRejected(reason)),
+        None => Ok(()),
+    }
 }
 
 impl From<DbErr> for CommentError {
@@ -54,6 +65,7 @@ pub async fn create_comment(
     text: String,
     created_by: Uuid,
 ) -> Result<CommentResponse, CommentError> {
+    reject_spam(&text)?;
     if !post_exists(db, post_id).await? {
         return Err(CommentError::PostNotFound);
     }
@@ -106,6 +118,7 @@ pub async fn update_comment(
     text: String,
     user_id: Uuid,
 ) -> Result<CommentResponse, CommentError> {
+    reject_spam(&text)?;
     let Some(comment) = post_comments::Entity::find_by_id(comment_id)
         .filter(post_comments::Column::PostId.eq(post_id))
         .filter(post_comments::Column::DeletedAt.is_null())

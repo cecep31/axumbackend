@@ -44,12 +44,16 @@ pub enum GuildError {
     MessageEmpty,
     MessageReplyNotFound,
     InvalidMessageCursor,
+    /// Name or description tripped the anti-spam guard (`crate::antispam`);
+    /// carries the user-facing reason surfaced through the 422 envelope.
+    SpamRejected(String),
 }
 
 impl std::fmt::Display for GuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
             GuildError::Db(err) => return write!(f, "{err}"),
+            GuildError::SpamRejected(reason) => reason,
             GuildError::GuildNotFound => "guild not found",
             GuildError::SlugExists => "guild slug already taken",
             GuildError::SlugInvalid => "guild name must contain at least one letter or digit",
@@ -78,6 +82,15 @@ impl std::fmt::Display for GuildError {
 impl From<DbErr> for GuildError {
     fn from(err: DbErr) -> Self {
         Self::Db(err)
+    }
+}
+
+/// Runs before any database access so rejected text never costs a query.
+/// Absent optional fields are passed as empty text, which never trips a rule.
+fn reject_spam(texts: &[&str]) -> Result<(), GuildError> {
+    match crate::antispam::text_reject_reason(texts) {
+        Some(reason) => Err(GuildError::SpamRejected(reason)),
+        None => Ok(()),
     }
 }
 
@@ -174,6 +187,12 @@ pub async fn create_guild(
     owner_id: Uuid,
     input: CreateGuildInput,
 ) -> Result<GuildResponse, GuildError> {
+    reject_spam(&[
+        &input.name,
+        input.slug.as_deref().unwrap_or(""),
+        input.description.as_deref().unwrap_or(""),
+    ])?;
+
     let desired = input
         .slug
         .as_deref()
@@ -342,6 +361,11 @@ pub async fn update_guild(
     user_id: Uuid,
     input: UpdateGuildInput,
 ) -> Result<GuildResponse, GuildError> {
+    reject_spam(&[
+        input.name.as_deref().unwrap_or(""),
+        input.description.as_deref().unwrap_or(""),
+    ])?;
+
     let guild = find_guild_by_slug(db, guild_slug).await?;
     let member = lookup_membership(db, guild.id, Some(user_id)).await?;
     if !member.as_ref().is_some_and(|m| is_guild_manager(&m.role)) {

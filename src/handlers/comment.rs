@@ -24,6 +24,9 @@ impl From<CommentError> for AppError {
             CommentError::NotOwner => {
                 AppError::Forbidden("You are not the comment author".to_string())
             }
+            CommentError::SpamRejected(reason) => {
+                AppError::spam_rejected("Content rejected by anti-spam policy", "text", reason)
+            }
         }
     }
 }

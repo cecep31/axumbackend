@@ -63,14 +63,9 @@ impl From<PostReportError> for AppError {
 impl From<services::post::PostWriteError> for AppError {
     fn from(err: services::post::PostWriteError) -> Self {
         match err {
-            services::post::PostWriteError::SpamRejected(reason) => AppError::UnprocessableEntity {
-                error: "Post rejected by anti-spam policy".to_string(),
-                errors: vec![crate::extract::FieldError {
-                    field: "body".to_string(),
-                    message: reason,
-                    tag: Some("spam".to_string()),
-                }],
-            },
+            services::post::PostWriteError::SpamRejected(reason) => {
+                AppError::spam_rejected("Post rejected by anti-spam policy", "body", reason)
+            }
             services::post::PostWriteError::Db(e) => AppError::from(e),
         }
     }

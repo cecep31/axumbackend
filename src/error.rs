@@ -25,6 +25,21 @@ pub enum AppError {
     InternalServerError(String),
 }
 
+impl AppError {
+    /// `422` for content rejected by `crate::antispam`. `reason` is attached
+    /// to `field` so the author learns which rule tripped.
+    pub fn spam_rejected(error: &str, field: &str, reason: String) -> Self {
+        AppError::UnprocessableEntity {
+            error: error.to_string(),
+            errors: vec![crate::extract::FieldError {
+                field: field.to_string(),
+                message: reason,
+                tag: Some("spam".to_string()),
+            }],
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, error_message, errors) = match self {

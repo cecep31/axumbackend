@@ -573,7 +573,9 @@ pub async fn create_post(
 ) -> Result<Post, PostWriteError> {
     // Proactive spam guard: marketing spam is rejected with a 422 that tells
     // the author the rule, instead of polluting feeds until someone reports it.
-    if let Some(reason) = crate::antispam::reject_reason(&input.title, &input.body) {
+    if let Some(reason) =
+        crate::antispam::post_reject_reason(&input.title, &input.body, &input.tags)
+    {
         return Err(PostWriteError::SpamRejected(reason));
     }
 
@@ -621,9 +623,10 @@ pub async fn update_post(
 ) -> Result<Option<Post>, PostWriteError> {
     // Same guard as creation; only submitted fields are checked (absent
     // fields behave as empty strings, which never trigger any rule).
-    if let Some(reason) = crate::antispam::reject_reason(
+    if let Some(reason) = crate::antispam::post_reject_reason(
         input.title.as_deref().unwrap_or(""),
         input.body.as_deref().unwrap_or(""),
+        input.tags.as_deref().unwrap_or_default(),
     ) {
         return Err(PostWriteError::SpamRejected(reason));
     }
