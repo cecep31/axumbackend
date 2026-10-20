@@ -351,7 +351,10 @@ pub async fn get_trending_posts(db: &DatabaseConnection, limit: i64) -> Result<V
         return Ok(entry.posts);
     }
 
+    // Posts by soft-deleted users are hidden, like echobackend's `activePostUserJoin`.
     let post_models = posts::Entity::find()
+        .join(JoinType::InnerJoin, posts::Relation::Users.def())
+        .filter(users::Column::DeletedAt.is_null())
         .filter(posts::Column::Published.eq(true))
         .filter(posts::Column::HiddenAt.is_null())
         // Promotional posts stay published and discoverable via search, tags
@@ -361,10 +364,15 @@ pub async fn get_trending_posts(db: &DatabaseConnection, limit: i64) -> Result<V
             "NOT EXISTS (SELECT 1 FROM posts_to_tags ptt INNER JOIN tags t ON t.id = ptt.tag_id WHERE ptt.post_id = posts.id AND LOWER(t.name) IN ({}))",
             crate::domain::antispam::promo_tags_sql_in()
         )))
+        // The counters are nullable; without COALESCE a single NULL makes the
+        // whole score NULL, and Postgres sorts NULLs first under DESC.
         .order_by(
-            sea_orm::sea_query::Expr::cust("like_count * 2 + bookmark_count * 2 + view_count"),
+            Expr::cust(
+                "COALESCE(posts.like_count, 0) * 2 + COALESCE(posts.bookmark_count, 0) * 2 + COALESCE(posts.view_count, 0)",
+            ),
             Order::Desc,
         )
+        .order_by_desc(posts::Column::CreatedAt)
         .limit(Ord::max(limit, 0) as u64)
         .all(db)
         .await?;
