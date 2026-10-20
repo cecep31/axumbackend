@@ -15,14 +15,14 @@ pub enum CommentError {
     PostNotFound,
     CommentNotFound,
     NotOwner,
-    /// Text tripped the anti-spam guard (`crate::antispam`); carries the
+    /// Text tripped the anti-spam guard (`crate::domain::antispam`); carries the
     /// user-facing reason surfaced through the 422 envelope.
     SpamRejected(String),
 }
 
 /// Runs before any database access so rejected text never costs a query.
 fn reject_spam(text: &str) -> Result<(), CommentError> {
-    match crate::antispam::text_reject_reason(&[text]) {
+    match crate::domain::antispam::text_reject_reason(&[text]) {
         Some(reason) => Err(CommentError::SpamRejected(reason)),
         None => Ok(()),
     }

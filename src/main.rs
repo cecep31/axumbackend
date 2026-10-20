@@ -1,6 +1,8 @@
 use axumbackend::{
-    cache, config, database, email::ResendMailer, handlers, rate_limit::RateLimiter, realtime,
-    state::AppState, storage,
+    config, handlers,
+    http::rate_limit::RateLimiter,
+    infra::{cache, database, email::ResendMailer, realtime, storage},
+    state::AppState,
 };
 use std::{net::SocketAddr, sync::Arc};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

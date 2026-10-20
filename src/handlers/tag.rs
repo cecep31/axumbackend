@@ -1,12 +1,12 @@
-use crate::auth::{AdminUser, AuthUser};
-use crate::database::DbPool;
 use crate::dto::stats::StatsQuery;
 use crate::dto::tag::{CreateTagRequest, TagIdPath, UpdateTagRequest};
-use crate::error::AppError;
-use crate::extract::{VJson, VPath, VQuery};
+use crate::http::auth::{AdminUser, AuthUser};
+use crate::http::error::AppError;
+use crate::http::extract::{VJson, VPath, VQuery};
+use crate::http::response::ApiResponse;
+use crate::infra::database::DbPool;
 use crate::models::stats::TagPerformance;
 use crate::models::tag::{SitemapTag, Tag, TrendingTag};
-use crate::response::ApiResponse;
 use crate::services;
 use crate::state::AppState;
 use axum::{Json, Router, extract::State, routing::get};

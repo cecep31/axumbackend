@@ -1,17 +1,17 @@
-use crate::auth::{AdminUser, AuthUser};
 use crate::config::FrontendConfig;
-use crate::database::DbPool;
 use crate::dto::auth::{
     ActivityLogQuery, ChangePasswordRequest, CheckUsernameRequest, FailedLoginsQuery,
     ForgotPasswordRequest, GithubCallbackQuery, LoginRequest, LogoutRequest, OAuthExchangeRequest,
     RecentActivityQuery, RefreshTokenRequest, RegisterRequest, ResetPasswordRequest,
     RevokeAllSessionsRequest, UpdateProfileRequest,
 };
-use crate::email::Mailer;
-use crate::error::AppError;
-use crate::extract::{VJson, VPath, VQuery};
-use crate::rate_limit::{RateLimiter, rate_limit};
-use crate::response::ApiResponse;
+use crate::http::auth::{AdminUser, AuthUser};
+use crate::http::error::AppError;
+use crate::http::extract::{VJson, VPath, VQuery};
+use crate::http::rate_limit::{RateLimiter, rate_limit};
+use crate::http::response::ApiResponse;
+use crate::infra::database::DbPool;
+use crate::infra::email::Mailer;
 use crate::services::{self, auth::AuthError};
 use crate::state::AppState;
 use axum::{
@@ -253,7 +253,7 @@ pub async fn recent_activity(
 
 pub async fn failed_logins(
     State(pool): State<DbPool>,
-    _admin_user: crate::auth::AdminUser,
+    _admin_user: crate::http::auth::AdminUser,
     VQuery(query): VQuery<FailedLoginsQuery>,
 ) -> Result<Json<ApiResponse<Vec<services::auth::AuthActivityLogResponse>>>, AppError> {
     let limit = query.limit.unwrap_or(20);

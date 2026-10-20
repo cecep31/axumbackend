@@ -4,13 +4,6 @@ use chrono::{DateTime, FixedOffset, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Deserialize, Clone, Copy)]
-#[serde(rename_all = "camelCase")]
-pub enum OrderDirection {
-    Asc,
-    Desc,
-}
-
 #[derive(Serialize, Deserialize)]
 pub struct SitemapPost {
     pub username: Option<String>,

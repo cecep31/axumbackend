@@ -12,17 +12,17 @@
 //! `services::guild`. Every request starts with a single [`resolve_access`]
 //! query that yields the guild, the caller's role and the channel together.
 
+use crate::domain::slug;
 use crate::entities::{guild_channel_messages, guild_channels, guild_members};
+use crate::infra::realtime::{self, Subscription};
 use crate::models::guild::{
     GUILD_EVENT_CHANNEL_CREATED, GUILD_EVENT_CHANNEL_DELETED, GUILD_EVENT_CHANNEL_UPDATED,
     GUILD_EVENT_MESSAGE_CREATED, GUILD_EVENT_MESSAGE_DELETED, GUILD_EVENT_MESSAGE_UPDATED,
     GuildChannelResponse, GuildEvent, GuildMessageCursorMeta, GuildMessageReply,
     GuildMessageResponse, is_guild_manager,
 };
-use crate::realtime::{self, Subscription};
 use crate::services::guild::{GuildError, is_unique_violation};
 use crate::services::user_hydration::load_user_brief_map;
-use crate::slug;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait,

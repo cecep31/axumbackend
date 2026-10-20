@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::StreamExt;
 
-use crate::cache::Cache;
+use crate::infra::cache::Cache;
 
 /// How many undelivered events a subscriber may lag behind before it is
 /// dropped.
@@ -89,7 +89,7 @@ impl Hub {
 
     /// Routes events through Redis pub/sub from now on. Spawns the publisher
     /// and subscriber tasks on the current Tokio runtime; call it once, at
-    /// startup, after [`crate::cache::init`] succeeded.
+    /// startup, after [`crate::infra::cache::init`] succeeded.
     pub fn start_relay(&self, cache: &'static Cache) {
         let prefix = format!("{}:", cache.build_key(&["realtime"]));
         let (outgoing, rx) = mpsc::unbounded_channel();

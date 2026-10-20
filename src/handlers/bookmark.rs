@@ -1,13 +1,13 @@
-use crate::auth::AuthUser;
-use crate::database::DbPool;
 use crate::dto::bookmark::{
     BookmarkPath, BookmarkQuery, CreateBookmarkFolderRequest, FolderIdPath, MoveBookmarkRequest,
     ToggleBookmarkRequest, UpdateBookmarkFolderRequest, UpdateBookmarkRequest,
 };
-use crate::error::AppError;
-use crate::extract::{VJson, VPath, VQuery};
+use crate::http::auth::AuthUser;
+use crate::http::error::AppError;
+use crate::http::extract::{VJson, VPath, VQuery};
+use crate::http::response::ApiResponse;
+use crate::infra::database::DbPool;
 use crate::models::bookmark::{BookmarkFolderResponse, BookmarkResponse, ToggleBookmarkResponse};
-use crate::response::ApiResponse;
 use crate::services::{self, bookmark::BookmarkError};
 use crate::state::AppState;
 use axum::{

@@ -1,10 +1,10 @@
+use crate::domain::slug;
 use crate::entities::{guild_channels, guild_members, guilds};
 use crate::models::guild::{
     GUILD_DEFAULT_CHANNEL_NAME, GUILD_ROLE_MEMBER, GUILD_ROLE_OWNER, GuildMemberResponse,
     GuildResponse, is_guild_manager,
 };
 use crate::services::user_hydration::load_user_brief_map;
-use crate::slug;
 use chrono::Utc;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
@@ -44,7 +44,7 @@ pub enum GuildError {
     MessageEmpty,
     MessageReplyNotFound,
     InvalidMessageCursor,
-    /// Name or description tripped the anti-spam guard (`crate::antispam`);
+    /// Name or description tripped the anti-spam guard (`crate::domain::antispam`);
     /// carries the user-facing reason surfaced through the 422 envelope.
     SpamRejected(String),
 }
@@ -88,7 +88,7 @@ impl From<DbErr> for GuildError {
 /// Runs before any database access so rejected text never costs a query.
 /// Absent optional fields are passed as empty text, which never trips a rule.
 fn reject_spam(texts: &[&str]) -> Result<(), GuildError> {
-    match crate::antispam::text_reject_reason(texts) {
+    match crate::domain::antispam::text_reject_reason(texts) {
         Some(reason) => Err(GuildError::SpamRejected(reason)),
         None => Ok(()),
     }

@@ -11,7 +11,11 @@ mod post;
 mod tag;
 mod user;
 
-use crate::{config::HttpConfig, middleware as mw, rate_limit, state::AppState};
+use crate::{
+    config::HttpConfig,
+    http::{middleware as mw, rate_limit},
+    state::AppState,
+};
 use axum::{Router, extract::DefaultBodyLimit, http::StatusCode, middleware};
 use tower_http::{
     timeout::TimeoutLayer,

@@ -6,7 +6,7 @@
 //! - validation failures -> `422` with `errors: [{field, message, tag}]`,
 //!   mirroring echobackend's `response.FromValidateError` envelope.
 
-use crate::error::AppError;
+use crate::http::error::AppError;
 use axum::{
     Json,
     extract::{FromRequest, FromRequestParts, Path, Query, Request},

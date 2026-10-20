@@ -103,13 +103,17 @@ docker run -p 8080:8080 --env-file .env axumbackend
 ```
 src/
 ├── main.rs         # Entry point
-├── config.rs       # Configuration
-├── database.rs     # Database setup
-├── error.rs        # Error handling
-├── response.rs     # API responses
-├── models/         # Data models
-├── handlers/       # HTTP handlers
-└── services/       # Business logic
+├── state.rs        # Shared AppState
+├── config/         # Env-based configuration
+├── handlers/       # Routes + HTTP handlers (per domain)
+├── services/       # Business logic
+├── dto/            # Request/query input types
+├── models/         # Response types
+├── entities/       # SeaORM entities
+├── http/           # Extractors, responses, errors, middleware, rate limit
+├── infra/          # Database, cache, storage, email, realtime
+├── clients/        # Third-party API clients
+└── domain/         # Slug, antispam
 ```
 
 ## Tech Stack

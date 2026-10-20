@@ -1,17 +1,17 @@
-use crate::auth::{AdminUser, AuthUser};
-use crate::database::DbPool;
 use crate::dto::common::{PaginationQuery, UsernamePath};
 use crate::dto::stats::StatsQuery;
 use crate::dto::user::{
     CreateUserRequest, FollowRequest, UpdateUserRequest, UserDeletedFilter, UserDetailQuery,
     UserIdPath, UserListQuery,
 };
-use crate::error::AppError;
-use crate::extract::{VJson, VPath, VQuery};
+use crate::http::auth::{AdminUser, AuthUser};
+use crate::http::error::AppError;
+use crate::http::extract::{VJson, VPath, VQuery};
+use crate::http::response::ApiResponse;
+use crate::infra::database::DbPool;
 use crate::models::stats::UserStatsResponse;
 use crate::models::user::UserResponse;
 use crate::models::user_follow::{FollowResponse, FollowStats};
-use crate::response::ApiResponse;
 use crate::services;
 use crate::state::AppState;
 use axum::{
@@ -22,7 +22,7 @@ use axum::{
 };
 
 /// Maximum avatar file size. The route body limit adds multipart framing
-/// slack on top (see `crate::upload::max_body_bytes`) so files exactly at
+/// slack on top (see `crate::http::upload::max_body_bytes`) so files exactly at
 /// the cap still stream fully and are judged by the handler, not cut off
 /// mid-stream by the limiter.
 const MAX_AVATAR_SIZE: u64 = 5 * 1024 * 1024;
@@ -308,7 +308,7 @@ pub async fn upload_avatar(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     // Same fail-fast rationale as post image uploads (see handlers::post):
     // without this, oversized bodies die mid-stream with a generic parse error.
-    crate::upload::reject_oversized_body(&headers, MAX_AVATAR_SIZE, "Avatar")?;
+    crate::http::upload::reject_oversized_body(&headers, MAX_AVATAR_SIZE, "Avatar")?;
 
     while let Some(field) = multipart.next_field().await.map_err(|err| {
         tracing::warn!(error = ?err, "avatar: multipart field error");
@@ -330,13 +330,13 @@ pub async fn upload_avatar(
         let Some((content_type, ext)) = detect_allowed_avatar(&data) else {
             return Err(AppError::BadRequest("Invalid file type".to_string()));
         };
-        let Some(storage) = crate::storage::get() else {
+        let Some(storage) = crate::infra::storage::get() else {
             return Err(AppError::BadRequest(
                 "Storage is not configured".to_string(),
             ));
         };
 
-        let key = crate::storage::random_object_key(AVATAR_PREFIX, ext);
+        let key = crate::infra::storage::random_object_key(AVATAR_PREFIX, ext);
         storage
             .save(&key, data.to_vec(), content_type)
             .await
@@ -411,9 +411,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/users/me", get(get_me))
         .route(
             "/api/users/me/image",
-            post(upload_avatar).route_layer(DefaultBodyLimit::max(crate::upload::max_body_bytes(
-                MAX_AVATAR_SIZE,
-            ))),
+            post(upload_avatar).route_layer(DefaultBodyLimit::max(
+                crate::http::upload::max_body_bytes(MAX_AVATAR_SIZE),
+            )),
         )
         .route("/api/users/username/{username}", get(get_by_username))
         .route("/api/users/follow", post(follow_user))

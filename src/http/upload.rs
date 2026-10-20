@@ -7,7 +7,7 @@
 //! These helpers reject oversized uploads up front with a clear 413, and size
 //! route body limits so legitimate files always stream fully.
 
-use crate::error::AppError;
+use crate::http::error::AppError;
 
 /// Framing overhead (boundaries + part headers) tolerated on top of a file
 /// cap when sizing route body limits and pre-checking `Content-Length`.

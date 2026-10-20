@@ -1,18 +1,18 @@
-use crate::auth::AuthUser;
-use crate::database::DbPool;
 use crate::dto::holding::{
     CalendarQuery, CompareQuery, CreateHoldingRequest, DuplicateHoldingRequest, HoldingPath,
     HoldingQuery, MonthlyQuery, SummaryQuery, TrendsQuery, UpdateHoldingRequest,
 };
-use crate::error::AppError;
-use crate::extract::{VJson, VPath, VQuery};
+use crate::http::auth::AuthUser;
+use crate::http::error::AppError;
+use crate::http::extract::{VJson, VPath, VQuery};
+use crate::http::response::ApiResponse;
+use crate::infra::database::DbPool;
 use crate::models::corporate_action::CorporateActionCalendarResponse;
 use crate::models::holding::{
     DuplicateResultItem, HoldingMonthComparisonResponse, HoldingMonthlyDataResponse,
     HoldingResponse, HoldingSummaryResponse, HoldingSyncResponse, HoldingTrendResponse,
     HoldingTypeResponse,
 };
-use crate::response::ApiResponse;
 use crate::services::{self, holding::HoldingError};
 use crate::state::AppState;
 use axum::{

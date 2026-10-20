@@ -5,7 +5,7 @@
 //! from Redis (`quote:<SYMBOL>`, 15 minute TTL), and misses are fetched in
 //! batches of up to 50 symbols.
 
-use crate::cache;
+use crate::infra::cache;
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};

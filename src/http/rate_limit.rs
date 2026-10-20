@@ -13,7 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::{cache, response::ApiResponse};
+use crate::{http::response::ApiResponse, infra::cache};
 
 const MAX_RATE_LIMITER_ENTRIES: usize = 20_000;
 

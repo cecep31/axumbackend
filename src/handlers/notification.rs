@@ -1,10 +1,10 @@
-use crate::auth::AuthUser;
-use crate::database::DbPool;
 use crate::dto::notification::{NotificationPath, NotificationQuery};
-use crate::error::AppError;
-use crate::extract::{VPath, VQuery};
+use crate::http::auth::AuthUser;
+use crate::http::error::AppError;
+use crate::http::extract::{VPath, VQuery};
+use crate::http::response::ApiResponse;
+use crate::infra::database::DbPool;
 use crate::models::notification::{MarkAllReadResponse, NotificationResponse, UnreadCountResponse};
-use crate::response::ApiResponse;
 use crate::services;
 use crate::state::AppState;
 use axum::{

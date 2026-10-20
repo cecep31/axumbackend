@@ -1,4 +1,4 @@
-use crate::{database::DbPool, email::Mailer};
+use crate::infra::{database::DbPool, email::Mailer};
 use axum::extract::FromRef;
 use std::sync::Arc;
 

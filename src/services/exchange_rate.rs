@@ -1,4 +1,4 @@
-use crate::dto::exchange_rate::ExchangeRateResponse;
+use crate::models::exchange_rate::ExchangeRateResponse;
 use chrono::Utc;
 use serde::Deserialize;
 use std::collections::HashMap;

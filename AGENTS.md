@@ -22,21 +22,35 @@ Recommended order: `cargo fmt && cargo clippy && cargo test`
 
 **Stack**: Axum 0.8 + SeaORM 2.0 + Tokio + PostgreSQL. Edition 2024.
 
-**Layered flow**: `handlers/` (HTTP, extraction, validation) → `services/` (business logic, DB queries via SeaORM) → `entities/` (SeaORM entity definitions) / `models/` (app-level DTOs and response types).
+**Layered flow**: `handlers/` (HTTP, extraction, validation) → `services/` (business logic, DB queries via SeaORM) → `entities/` (SeaORM entity definitions) / `models/` (response types).
 
+```
+src/
+├── handlers/   # routes + HTTP handlers, one module per domain (large domains are folders, e.g. handlers/post/)
+├── services/   # business logic; large services are folders that re-export their public API from mod.rs
+├── dto/        # INPUT only: request bodies, query/path params (garde-validated)
+├── models/     # OUTPUT only: response shapes / view models mapped from entity rows
+├── entities/   # SeaORM entities mirroring DB tables
+├── http/       # HTTP plumbing: auth extractors, extract, response, error, middleware, rate_limit, upload
+├── infra/      # infrastructure: database, cache, storage (S3), email, realtime
+├── clients/    # third-party API clients without their own endpoint (openrouter, market_quote)
+├── domain/     # pure domain helpers: slug, antispam
+└── config/
+```
+
+- `dto/` vs `models/`: request/query types go in `dto/`, anything serialized back to the client goes in `models/`. Services may take a request DTO as input but return `models/` types.
 - `src/entities/` — SeaORM `DeriveEntityModel` structs mirroring DB tables. Do not confuse with `models/`.
-- `src/models/` — Application-level types (response shapes, view models) that map from entity rows.
-- `src/auth.rs` — `AuthUser` (JWT Bearer) and `AdminUser` (super-admin guard) Axum extractors.
-- `src/response.rs` — `ApiResponse<T>` wrapper: `{ success, message, data, error, meta }`. Use `ApiResponse::error(message, error)` for failure envelopes.
-- `src/middleware.rs` — security headers and CORS layer; routing itself stays in `handlers/mod.rs`.
-- `src/error.rs` — `AppError` enum implementing `IntoResponse`; all errors flow through this.
-- `src/rate_limit.rs` — Fixed-window rate limiter. In-memory by default; limiters built with `.shared(name)` (the auth routes) count in Redis when it is available.
-- `src/cache.rs` — Optional, fail-open Redis/Valkey client (`cache::get()` returns `None` when `REDIS_URL` is empty or unreachable). Every caller must keep an in-memory/DB fallback. Keys are `<CACHE_KEY_PREFIX>:<parts>` and match echobackend's layout, so keep key names and cached JSON shapes compatible.
-- `src/realtime.rs` — SSE fan-out hub; relays through Redis pub/sub (`<prefix>:realtime:<topic>`) when the cache is enabled.
+- `src/http/auth.rs` — `AuthUser` (JWT Bearer) and `AdminUser` (super-admin guard) Axum extractors. Auth business logic lives in `services/auth/`.
+- `src/http/response.rs` — `ApiResponse<T>` wrapper: `{ success, message, data, error, meta }`. Use `ApiResponse::error(message, error)` for failure envelopes.
+- `src/http/middleware.rs` — security headers and CORS layer; routing itself stays in `handlers/mod.rs`.
+- `src/http/error.rs` — `AppError` enum implementing `IntoResponse`; all errors flow through this.
+- `src/http/rate_limit.rs` — Fixed-window rate limiter. In-memory by default; limiters built with `.shared(name)` (the auth routes) count in Redis when it is available.
+- `src/infra/cache.rs` — Optional, fail-open Redis/Valkey client (`cache::get()` returns `None` when `REDIS_URL` is empty or unreachable). Every caller must keep an in-memory/DB fallback. Keys are `<CACHE_KEY_PREFIX>:<parts>` and match echobackend's layout, so keep key names and cached JSON shapes compatible.
+- `src/infra/realtime.rs` — SSE fan-out hub; relays through Redis pub/sub (`<prefix>:realtime:<topic>`) when the cache is enabled.
 
 ## Conventions
 
-- Every handler accepting input uses `VJson<T>` / `VQuery<T>` / `VPath<T>` (`src/extract.rs`) with `garde::Validate` derive. garde requires an attribute on every field (`#[garde(skip)]` when unvalidated); use `length(chars, ...)` for strings (default mode counts bytes) and `inner(custom(...))` for custom rules on `Option` fields. Custom rules return `garde::Error::new("<tag>")`, which becomes the `tag` in the 422 envelope.
+- Every handler accepting input uses `VJson<T>` / `VQuery<T>` / `VPath<T>` (`src/http/extract.rs`) with `garde::Validate` derive. garde requires an attribute on every field (`#[garde(skip)]` when unvalidated); use `length(chars, ...)` for strings (default mode counts bytes) and `inner(custom(...))` for custom rules on `Option` fields. Custom rules return `garde::Error::new("<tag>")`, which becomes the `tag` in the 422 envelope.
 - Error propagation uses `?`; services return `Result<_, DbErr>` or a domain error enum (e.g. `BookmarkError`). Map a domain error to HTTP with `impl From<XError> for AppError` in the matching handler file, so handlers just use `?`. (Exceptions: `auth` takes a context message, and `guild` has separate guild/channel mappings.)
 - API responses always use `ApiResponse::success_with_message` or `ApiResponse::with_meta_message` for paginated data.
 - Route registration uses `Router::merge` per domain in `handlers/mod.rs`.

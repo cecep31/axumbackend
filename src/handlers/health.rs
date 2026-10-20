@@ -1,4 +1,4 @@
-use crate::database::DbPool;
+use crate::infra::database::DbPool;
 use crate::state::AppState;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};

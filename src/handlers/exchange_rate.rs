@@ -1,9 +1,9 @@
-use crate::auth::AuthUser;
-use crate::database::DbPool;
-use crate::dto::exchange_rate::ExchangeRateResponse;
-use crate::error::AppError;
-use crate::extract::VQuery;
-use crate::response::ApiResponse;
+use crate::http::auth::AuthUser;
+use crate::http::error::AppError;
+use crate::http::extract::VQuery;
+use crate::http::response::ApiResponse;
+use crate::infra::database::DbPool;
+use crate::models::exchange_rate::ExchangeRateResponse;
 use crate::services::exchange_rate::{self, ExchangeRateError};
 use crate::state::AppState;
 use axum::{Json, Router, extract::State, routing::get};

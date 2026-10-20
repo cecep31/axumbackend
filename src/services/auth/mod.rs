@@ -1,8 +1,8 @@
-use crate::auth::Claims;
-use crate::cache;
 use crate::config::{GitHubConfig, JwtConfig};
-use crate::email::Mailer;
 use crate::entities::{auth_activity_logs, password_reset_tokens, sessions, users};
+use crate::http::auth::Claims;
+use crate::infra::cache;
+use crate::infra::email::Mailer;
 use argon2::{
     Argon2, Params,
     password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},

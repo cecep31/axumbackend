@@ -1,11 +1,11 @@
-use crate::auth::AuthUser;
-use crate::database::DbPool;
 use crate::dto::comment::{CommentPath, CommentRequest};
 use crate::dto::common::PostIdPath;
-use crate::error::AppError;
-use crate::extract::{VJson, VPath};
+use crate::http::auth::AuthUser;
+use crate::http::error::AppError;
+use crate::http::extract::{VJson, VPath};
+use crate::http::response::ApiResponse;
+use crate::infra::database::DbPool;
 use crate::models::comment::CommentResponse;
-use crate::response::ApiResponse;
 use crate::services::{self, comment::CommentError};
 use crate::state::AppState;
 use axum::{

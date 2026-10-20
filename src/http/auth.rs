@@ -1,5 +1,5 @@
 use crate::config::JwtConfig;
-use crate::response::ApiResponse;
+use crate::http::response::ApiResponse;
 use axum::{
     Json,
     extract::FromRequestParts,

@@ -1,5 +1,5 @@
-use crate::cache;
 use crate::entities::{posts, posts_to_tags, tags, users};
+use crate::infra::cache;
 use crate::models::post::{Post, SitemapPost};
 use chrono::Utc;
 use sea_orm::sea_query::Expr;
@@ -359,7 +359,7 @@ pub async fn get_trending_posts(db: &DatabaseConnection, limit: i64) -> Result<V
         // anti-spam constants, so the list cannot drift from echobackend's.
         .filter(Expr::cust(format!(
             "NOT EXISTS (SELECT 1 FROM posts_to_tags ptt INNER JOIN tags t ON t.id = ptt.tag_id WHERE ptt.post_id = posts.id AND LOWER(t.name) IN ({}))",
-            crate::antispam::promo_tags_sql_in()
+            crate::domain::antispam::promo_tags_sql_in()
         )))
         .order_by(
             sea_orm::sea_query::Expr::cust("like_count * 2 + bookmark_count * 2 + view_count"),
@@ -554,7 +554,7 @@ pub struct UpdatePostInput {
 /// Writing a post can fail for a policy reason, not just a database error.
 #[derive(Debug)]
 pub enum PostWriteError {
-    /// Content tripped the anti-spam guard (`crate::antispam`); carries the
+    /// Content tripped the anti-spam guard (`crate::domain::antispam`); carries the
     /// user-facing reason surfaced through the 422 envelope.
     SpamRejected(String),
     Db(DbErr),
@@ -574,7 +574,7 @@ pub async fn create_post(
     // Proactive spam guard: marketing spam is rejected with a 422 that tells
     // the author the rule, instead of polluting feeds until someone reports it.
     if let Some(reason) =
-        crate::antispam::post_reject_reason(&input.title, &input.body, &input.tags)
+        crate::domain::antispam::post_reject_reason(&input.title, &input.body, &input.tags)
     {
         return Err(PostWriteError::SpamRejected(reason));
     }
@@ -623,7 +623,7 @@ pub async fn update_post(
 ) -> Result<Option<Post>, PostWriteError> {
     // Same guard as creation; only submitted fields are checked (absent
     // fields behave as empty strings, which never trigger any rule).
-    if let Some(reason) = crate::antispam::post_reject_reason(
+    if let Some(reason) = crate::domain::antispam::post_reject_reason(
         input.title.as_deref().unwrap_or(""),
         input.body.as_deref().unwrap_or(""),
         input.tags.as_deref().unwrap_or_default(),

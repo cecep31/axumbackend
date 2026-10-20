@@ -1,16 +1,17 @@
-use crate::auth::AuthUser;
-use crate::database::DbPool;
+use crate::clients::openrouter;
 use crate::dto::chat::{
     CreateChatConversationRequest, CreateChatConversationStreamRequest, CreateChatMessageRequest,
     UpdateChatConversationRequest,
 };
 use crate::dto::common::PaginationQuery;
-use crate::error::AppError;
-use crate::extract::{VJson, VPath, VQuery};
+use crate::http::auth::AuthUser;
+use crate::http::error::AppError;
+use crate::http::extract::{VJson, VPath, VQuery};
+use crate::http::response::ApiResponse;
+use crate::infra::database::DbPool;
 use crate::models::chat::{ChatConversationResponse, ChatMessageResponse};
-use crate::response::ApiResponse;
 use crate::services::chat::StreamOutcome;
-use crate::services::{self, chat::ChatError, openrouter};
+use crate::services::{self, chat::ChatError};
 use crate::state::AppState;
 use axum::{
     Json, Router,

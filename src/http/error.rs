@@ -1,4 +1,4 @@
-use crate::response::ApiResponse;
+use crate::http::response::ApiResponse;
 use axum::{
     Json,
     http::StatusCode,
@@ -20,18 +20,18 @@ pub enum AppError {
     /// echobackend's `response.FromValidateError` envelope.
     UnprocessableEntity {
         error: String,
-        errors: Vec<crate::extract::FieldError>,
+        errors: Vec<crate::http::extract::FieldError>,
     },
     InternalServerError(String),
 }
 
 impl AppError {
-    /// `422` for content rejected by `crate::antispam`. `reason` is attached
+    /// `422` for content rejected by `crate::domain::antispam`. `reason` is attached
     /// to `field` so the author learns which rule tripped.
     pub fn spam_rejected(error: &str, field: &str, reason: String) -> Self {
         AppError::UnprocessableEntity {
             error: error.to_string(),
-            errors: vec![crate::extract::FieldError {
+            errors: vec![crate::http::extract::FieldError {
                 field: field.to_string(),
                 message: reason,
                 tag: Some("spam".to_string()),
@@ -87,7 +87,7 @@ impl From<DbErr> for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extract::FieldError;
+    use crate::http::extract::FieldError;
 
     #[test]
     fn test_app_error_status_codes() {
