@@ -6,7 +6,7 @@
 mod links;
 mod normalize;
 
-pub use links::{blocked_link, count_external_links};
+pub use links::{blocked_link, count_links};
 use normalize::normalize;
 
 /// Tags that mark a post as promotional. Trending excludes these so
@@ -15,10 +15,10 @@ use normalize::normalize;
 /// ad as an aggravating signal, not a loophole.
 pub const PROMO_TAGS: [&str; 5] = ["promo", "iklan", "ads", "advertisement", "sponsored"];
 
-/// Caps outbound links in a single post body. Link stuffing is the most
-/// common shape of marketing spam; legitimate authors can put extra links in
-/// their profile instead.
-pub const MAX_EXTERNAL_LINKS_PER_POST: usize = 5;
+/// Caps links in a single post (title, body and tags together). Link
+/// stuffing is the most common shape of marketing spam; legitimate authors
+/// can put extra links in their profile instead.
+pub const MAX_LINKS_PER_POST: usize = 2;
 
 /// Phrases that almost never appear in legitimate content but are pervasive
 /// in gambling/fraud spam. Single generic words (e.g. "slot") are
@@ -66,17 +66,21 @@ pub fn banned_keyword(texts: &[&str]) -> Option<&'static str> {
 /// descriptions) looks fine, otherwise a short user-facing reason.
 pub fn text_reject_reason(texts: &[&str]) -> Option<String> {
     if let Some(keyword) = banned_keyword(texts) {
-        return Some(format!(
-            "contains banned keyword \"{keyword}\". Gambling/fraud spam is not allowed; honest promotions must use the \"promo\" tag and follow the community guidelines"
-        ));
+        return Some(keyword_reason(keyword));
     }
     texts.iter().find_map(|text| blocked_link(text))
 }
 
+fn keyword_reason(keyword: &str) -> String {
+    format!(
+        "contains banned keyword \"{keyword}\". Gambling/fraud spam is not allowed; honest promotions must use the \"promo\" tag and follow the community guidelines"
+    )
+}
+
 /// Returns `None` when a post looks fine, otherwise a short user-facing
 /// reason explaining why it was rejected. Tags go through the same keyword
-/// check as the text. Callers surface the reason through the 422 envelope so
-/// authors learn the rule instead of just hitting a wall.
+/// and link checks as the title and body. Callers surface the reason through
+/// the 422 envelope so authors learn the rule instead of just hitting a wall.
 pub fn post_reject_reason(title: &str, body: &str, tags: &[String]) -> Option<String> {
     let texts: Vec<&str> = [title, body]
         .into_iter()
@@ -86,10 +90,10 @@ pub fn post_reject_reason(title: &str, body: &str, tags: &[String]) -> Option<St
         return Some(reason);
     }
 
-    let links = count_external_links(body);
-    if links > MAX_EXTERNAL_LINKS_PER_POST {
+    let links = count_links(&texts);
+    if links > MAX_LINKS_PER_POST {
         return Some(format!(
-            "too many external links ({links}, max {MAX_EXTERNAL_LINKS_PER_POST}). Put extra links in your profile or tag the post \"promo\" instead of stuffing links into the body"
+            "too many links ({links}, max {MAX_LINKS_PER_POST}). Put extra links in your profile instead of stuffing them into the post"
         ));
     }
 
@@ -130,7 +134,7 @@ mod tests {
 
     #[test]
     fn clean_post_is_accepted() {
-        let body = "A genuine tutorial with a [docs link](https://example.com/docs).";
+        let body = "A genuine tutorial. Read user.id, java.io.File and logger.info, then see Node.js, ASP.NET and README.md.";
         assert_eq!(post_reject_reason("How to write Rust", body, &[]), None);
     }
 
@@ -142,16 +146,59 @@ mod tests {
     }
 
     #[test]
-    fn link_stuffing_is_rejected_at_limit_plus_one() {
-        let over: String = (0..=MAX_EXTERNAL_LINKS_PER_POST)
-            .map(|_| "https://example.com/item ")
-            .collect();
-        assert!(post_reject_reason("Buy now", &over, &[]).is_some());
+    fn link_limit_allows_up_to_max() {
+        for body in [
+            "See https://go.dev/doc",
+            "See [docs](https://go.dev/doc) and www.example.com",
+            "See https://a.example/x, and github.com",
+        ] {
+            assert_eq!(post_reject_reason("Title", body, &[]), None, "{body:?}");
+        }
+    }
 
-        let at_limit: String = (0..MAX_EXTERNAL_LINKS_PER_POST)
-            .map(|_| "https://example.com/item ")
-            .collect();
-        assert_eq!(post_reject_reason("Buy now", &at_limit, &[]), None);
+    #[test]
+    fn link_limit_rejects_over_max() {
+        for body in [
+            "https://a.example https://b.example https://c.example",
+            "[a](https://a.example) www.b.example c.example.com",
+            "<a href=\"https://a.example\">a</a> mailto:x@b.example t.me/c",
+            "https://a.example,https://b.example,https://c.example",
+        ] {
+            assert!(post_reject_reason("Title", body, &[]).is_some(), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn links_count_across_title_body_and_tags() {
+        let tags = ["c.example.com".to_string()];
+        assert!(post_reject_reason("https://a.example", "https://b.example", &tags).is_some());
+    }
+
+    #[test]
+    fn shortener_is_rejected_even_within_limit() {
+        assert!(post_reject_reason("Title", "Klik bit.ly/abc123", &[]).is_some());
+    }
+
+    #[test]
+    fn contains_link_avoids_false_positives() {
+        for text in [
+            "Plain text without links",
+            "Reading user.id and req.params.id",
+            "import java.io.File; logger.info(\"x\")",
+            "Node.js, Vue.js, ASP.NET and .NET Core",
+            "Edit README.md and main.go",
+            "Version 1.2.3 released.",
+            "Visit example.community or the awww.thing page",
+            "e.g. this, i.e. that. Done.Thanks",
+            "Meet at 10.30 in the time slot",
+            "Orbit.ly/ mission log",
+            "",
+        ] {
+            assert!(
+                !links::contains_link(text),
+                "{text:?} should not count as a link"
+            );
+        }
     }
 
     #[test]
