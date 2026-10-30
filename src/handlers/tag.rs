@@ -80,7 +80,7 @@ pub async fn update_tag(
 ) -> Result<Json<ApiResponse<Tag>>, AppError> {
     match services::tag::update_tag(&pool, params.id, req.name).await? {
         Some(tag) => Ok(Json(ApiResponse::success_with_message(
-            "Successfully updated tag",
+            "Tag updated successfully",
             tag,
         ))),
         None => Err(AppError::NotFound("Tag not found".to_string())),
@@ -93,10 +93,7 @@ pub async fn delete_tag(
     VPath(params): VPath<TagIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     match services::tag::delete_tag(&pool, params.id).await? {
-        true => Ok(Json(ApiResponse::success_with_message(
-            "Successfully deleted tag",
-            serde_json::Value::Null,
-        ))),
+        true => Ok(Json(ApiResponse::message("Tag deleted successfully"))),
         false => Err(AppError::NotFound("Tag not found".to_string())),
     }
 }

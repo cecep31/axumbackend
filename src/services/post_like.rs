@@ -1,4 +1,4 @@
-use crate::entities::{post_likes, posts};
+use crate::entities::post_likes;
 use crate::models::post_like::{
     LikeStatusResponse, PostLikeListResponse, PostLikeResponse, PostLikeStats,
 };
@@ -25,12 +25,16 @@ impl From<DbErr> for PostLikeError {
     }
 }
 
-async fn post_exists(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbErr> {
-    // Mirrors echobackend ensurePostInteractable: a hidden post is reported as
-    // missing so engagement endpoints do not confirm that it exists.
-    Ok(posts::Entity::find_by_id(post_id)
-        .filter(posts::Column::HiddenAt.is_null())
-        .one(db)
+/// echobackend `LikePost`: `GetPostByID` + `ensurePostInteractable`, so a
+/// hidden post or one whose author is soft-deleted is reported as missing.
+async fn post_interactable(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbErr> {
+    crate::services::post::interactable_post_exists(db, post_id).await
+}
+
+/// echobackend `UnlikePost`: only `GetPostByID` (author not soft-deleted).
+/// Hidden posts pass, so users can always undo a like on a moderated post.
+async fn post_active(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbErr> {
+    Ok(crate::services::post::find_active_post(db, post_id)
         .await?
         .is_some())
 }
@@ -64,7 +68,7 @@ pub async fn like_post(
     post_id: Uuid,
     user_id: Uuid,
 ) -> Result<(), PostLikeError> {
-    if !post_exists(db, post_id).await? {
+    if !post_interactable(db, post_id).await? {
         return Err(PostLikeError::PostNotFound);
     }
     if like_exists(db, post_id, user_id).await? {
@@ -89,7 +93,7 @@ pub async fn unlike_post(
     post_id: Uuid,
     user_id: Uuid,
 ) -> Result<(), PostLikeError> {
-    if !post_exists(db, post_id).await? {
+    if !post_active(db, post_id).await? {
         return Err(PostLikeError::PostNotFound);
     }
 
@@ -106,16 +110,15 @@ pub async fn unlike_post(
     Ok(())
 }
 
+/// Like echobackend's read endpoints (`GetLikesByPostID`, `GetLikeStats`,
+/// `HasUserLikedPost`), the post itself is not looked up: a missing or hidden
+/// post simply has no likes.
 pub async fn get_likes_by_post_id(
     db: &DatabaseConnection,
     post_id: Uuid,
     limit: i64,
     offset: i64,
 ) -> Result<PostLikeListResponse, PostLikeError> {
-    if !post_exists(db, post_id).await? {
-        return Err(PostLikeError::PostNotFound);
-    }
-
     let query = post_likes::Entity::find().filter(post_likes::Column::PostId.eq(post_id));
 
     let total = query.clone().count(db).await? as i64;
@@ -144,10 +147,6 @@ pub async fn get_like_stats(
     db: &DatabaseConnection,
     post_id: Uuid,
 ) -> Result<PostLikeStats, PostLikeError> {
-    if !post_exists(db, post_id).await? {
-        return Err(PostLikeError::PostNotFound);
-    }
-
     let total_likes = post_likes::Entity::find()
         .filter(post_likes::Column::PostId.eq(post_id))
         .count(db)
@@ -164,10 +163,6 @@ pub async fn has_user_liked_post(
     post_id: Uuid,
     user_id: Uuid,
 ) -> Result<LikeStatusResponse, PostLikeError> {
-    if !post_exists(db, post_id).await? {
-        return Err(PostLikeError::PostNotFound);
-    }
-
     Ok(LikeStatusResponse {
         has_liked: like_exists(db, post_id, user_id).await?,
         post_id,

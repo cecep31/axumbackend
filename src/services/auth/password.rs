@@ -82,28 +82,29 @@ pub async fn forgot_password(
     db: &DatabaseConnection,
     mailer: &dyn Mailer,
     email: &str,
-    user_agent: Option<String>,
+    client: ClientInfo,
 ) -> Result<(), AuthError> {
-    let user = users::Entity::find()
-        .filter(users::Column::Email.eq(email))
-        .filter(users::Column::DeletedAt.is_null())
-        .one(db)
-        .await?;
-
-    let Some(user) = user else {
+    let Some(user) = find_user_by_email(db, email).await? else {
         return Ok(());
     };
 
-    password_reset_tokens::Entity::delete_many()
+    // Best-effort cleanup of stale tokens, as in echobackend: a failure here
+    // does not block issuing a new one.
+    if let Err(err) = password_reset_tokens::Entity::delete_many()
         .filter(password_reset_tokens::Column::UserId.eq(user.id))
         .exec(db)
-        .await?;
+        .await
+    {
+        tracing::warn!(?err, user_id = %user.id, "failed to delete previous password reset tokens");
+    }
 
+    // Only the SHA-256 digest is stored (echobackend `tokenHash`), so a leaked
+    // table yields no usable tokens and any backend can redeem the link.
     let reset_token = generate_prefixed_token("pr");
     let token = password_reset_tokens::ActiveModel {
         id: Set(Uuid::now_v7()),
         user_id: Set(user.id),
-        token: Set(reset_token.clone()),
+        token: Set(token_hash(&reset_token)),
         created_at: Set(Utc::now().into()),
         expires_at: Set((Utc::now() + Duration::hours(1)).into()),
         used_at: Set(None),
@@ -112,20 +113,23 @@ pub async fn forgot_password(
 
     let reset_link = build_password_reset_link(&reset_token);
 
+    // Mirrors echobackend: delivery is queued for the background workers, so
+    // the request never waits on SMTP. The reset link is never written to
+    // the activity log (dev mode only records `devMode: true`).
     if mailer.is_configured() {
-        if let Err(err) = mailer.send_password_reset_email(email, &reset_link).await {
+        if let Err(err) = mailer.enqueue_password_reset_email(&user.email, &reset_link) {
             log_activity(
                 db,
                 Some(user.id),
                 "password_reset_request",
                 "failure",
-                None,
-                user_agent,
-                Some("Failed to send email".to_string()),
+                client.ip_address.clone(),
+                client.user_agent.clone(),
+                Some("Failed to queue email".to_string()),
                 None,
             )
             .await;
-            tracing::warn!(?err, user_id = %user.id, "failed to send password reset email");
+            tracing::error!(error = %err, user_id = %user.id, "failed to queue password reset email");
             return Ok(());
         }
 
@@ -134,10 +138,10 @@ pub async fn forgot_password(
             Some(user.id),
             "password_reset_request",
             "success",
+            client.ip_address.clone(),
+            client.user_agent.clone(),
             None,
-            user_agent,
-            None,
-            None,
+            Some(serde_json::json!({ "emailQueued": true })),
         )
         .await;
         return Ok(());
@@ -148,32 +152,68 @@ pub async fn forgot_password(
         Some(user.id),
         "password_reset_request",
         "success",
+        client.ip_address.clone(),
+        client.user_agent.clone(),
         None,
-        user_agent,
-        None,
-        Some(serde_json::json!({
-            "devMode": true,
-            "resetLink": reset_link,
-        })),
+        Some(serde_json::json!({ "devMode": true })),
     )
     .await;
     Ok(())
 }
 
 pub(super) fn build_password_reset_link(token: &str) -> String {
-    let base = &crate::config::EmailConfig::get().frontend_reset_password_url;
-    let separator = if base.contains('?') { '&' } else { '?' };
-    format!("{base}{separator}token={token}")
+    reset_link_with_base(
+        &crate::config::EmailConfig::get().frontend_reset_password_url,
+        token,
+    )
+}
+
+/// echobackend `buildPasswordResetLink`: sets the `token` query parameter
+/// (URL-encoded, replacing any existing one) and keeps the rest of the query.
+pub(super) fn reset_link_with_base(base: &str, token: &str) -> String {
+    let base = if base.is_empty() {
+        "http://localhost:3000/reset-password"
+    } else {
+        base
+    };
+    let Ok(mut url) = reqwest::Url::parse(base) else {
+        return format!("{base}?token={}", go_query_escape(token));
+    };
+    let mut pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "token")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    pairs.push(("token".to_string(), token.to_string()));
+    // Go's url.Values.Encode sorts by key.
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    url.query_pairs_mut().clear().extend_pairs(pairs);
+    url.to_string()
+}
+
+/// Go `url.QueryEscape`.
+fn go_query_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 pub async fn reset_password(
     db: &DatabaseConnection,
     token: &str,
     password: &str,
-    user_agent: Option<String>,
+    client: ClientInfo,
 ) -> Result<(), AuthError> {
     let reset_token = password_reset_tokens::Entity::find()
-        .filter(password_reset_tokens::Column::Token.eq(token))
+        .filter(password_reset_tokens::Column::Token.eq(token_hash(token)))
         .one(db)
         .await?
         .ok_or(AuthError::InvalidToken)?;
@@ -212,8 +252,8 @@ pub async fn reset_password(
         Some(user.id),
         "password_reset",
         "success",
-        None,
-        user_agent,
+        client.ip_address.clone(),
+        client.user_agent.clone(),
         None,
         None,
     )
@@ -226,13 +266,13 @@ pub async fn change_password(
     user_id: Uuid,
     current_password: &str,
     new_password: &str,
-    user_agent: Option<String>,
+    client: ClientInfo,
 ) -> Result<(), AuthError> {
     let user = users::Entity::find_by_id(user_id)
         .filter(users::Column::DeletedAt.is_null())
         .one(db)
         .await?
-        .ok_or(AuthError::InvalidCredentials)?;
+        .ok_or(AuthError::UserNotFound)?;
 
     let Some(hashed_password) = &user.password else {
         return Err(AuthError::InvalidCredentials);
@@ -245,8 +285,8 @@ pub async fn change_password(
             Some(user.id),
             "password_change",
             "failure",
-            None,
-            user_agent,
+            client.ip_address.clone(),
+            client.user_agent.clone(),
             None,
             None,
         )
@@ -275,8 +315,8 @@ pub async fn change_password(
         Some(user.id),
         "password_change",
         "success",
-        None,
-        user_agent,
+        client.ip_address.clone(),
+        client.user_agent.clone(),
         None,
         None,
     )

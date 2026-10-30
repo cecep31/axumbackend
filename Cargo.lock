@@ -415,6 +415,7 @@ dependencies = [
  "garde",
  "hex",
  "jsonwebtoken",
+ "lettre",
  "rand 0.10.3",
  "redis",
  "reqwest",
@@ -984,6 +985,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "email-encoding"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "420b9da095f052ea597503e39073b5b3c522f7db933fbac202d91d24492693fd"
+dependencies = [
+ "base64 0.23.1",
+ "memchr",
+]
+
+[[package]]
+name = "email_address"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1002,6 +1019,16 @@ name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
+
+[[package]]
+name = "errno"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
+]
 
 [[package]]
 name = "etcetera"
@@ -1313,6 +1340,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
 dependencies = [
  "digest 0.11.3",
+]
+
+[[package]]
+name = "hostname"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link",
 ]
 
 [[package]]
@@ -1757,6 +1795,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
+name = "lettre"
+version = "0.11.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2c646bd5cc763b1087b15493e29a64be6147ba8f19342004fa52048ee596eae"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "email-encoding",
+ "email_address",
+ "fastrand",
+ "futures-io",
+ "futures-util",
+ "hostname",
+ "httpdate",
+ "idna",
+ "mime",
+ "nom",
+ "percent-encoding",
+ "quoted_printable",
+ "rustls",
+ "socket2",
+ "tokio",
+ "tokio-rustls",
+ "url",
+ "webpki-roots",
+]
+
+[[package]]
 name = "lexical-core"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1964,6 +2030,15 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
+]
+
+[[package]]
+name = "nom"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -2308,6 +2383,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "quoted_printable"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "478e0585659a122aa407eb7e3c0e1fa51b1d8a870038bd29f0cf4a8551eea972"
+
+[[package]]
 name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2566,6 +2647,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -2978,6 +3060,16 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
 
 [[package]]
 name = "signature"
@@ -3408,6 +3500,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

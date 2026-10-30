@@ -26,7 +26,7 @@ pub async fn get_notifications(
             .await?;
 
     Ok(Json(ApiResponse::with_meta_message(
-        "Successfully retrieved notifications",
+        "Notifications fetched successfully",
         notifications,
         total,
         limit,
@@ -40,7 +40,7 @@ pub async fn get_unread_count(
 ) -> Result<Json<ApiResponse<UnreadCountResponse>>, AppError> {
     let count = services::notification::get_unread_count(&pool, auth_user.id).await?;
     Ok(Json(ApiResponse::success_with_message(
-        "Successfully retrieved unread count",
+        "Unread notification count fetched successfully",
         count,
     )))
 }
@@ -52,7 +52,7 @@ pub async fn mark_as_read(
 ) -> Result<Json<ApiResponse<NotificationResponse>>, AppError> {
     match services::notification::mark_as_read(&pool, params.id, auth_user.id).await? {
         Some(notification) => Ok(Json(ApiResponse::success_with_message(
-            "Notification marked as read",
+            "Notification marked as read successfully",
             notification,
         ))),
         None => Err(AppError::NotFound("Notification not found".to_string())),
@@ -65,7 +65,7 @@ pub async fn mark_all_as_read(
 ) -> Result<Json<ApiResponse<MarkAllReadResponse>>, AppError> {
     let result = services::notification::mark_all_as_read(&pool, auth_user.id).await?;
     Ok(Json(ApiResponse::success_with_message(
-        "All notifications marked as read",
+        "All notifications marked as read successfully",
         result,
     )))
 }

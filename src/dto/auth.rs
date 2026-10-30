@@ -3,11 +3,11 @@ use serde::Deserialize;
 
 #[derive(Deserialize, Validate)]
 pub struct RegisterRequest {
-    #[garde(email)]
+    #[garde(email, length(chars, max = 255))]
     pub email: String,
     #[garde(length(chars, min = 3, max = 30))]
     pub username: String,
-    #[garde(length(chars, min = 8))]
+    #[garde(length(chars, min = 8, max = 128))]
     pub password: String,
     #[garde(length(chars, min = 1, max = 100))]
     pub first_name: String,
@@ -17,7 +17,7 @@ pub struct RegisterRequest {
 
 #[derive(Deserialize, Validate)]
 pub struct LoginRequest {
-    #[garde(length(chars, min = 1))]
+    #[garde(length(chars, min = 1, max = 255))]
     pub identifier: String,
     #[garde(length(chars, min = 6))]
     pub password: String,
@@ -31,7 +31,7 @@ pub struct RefreshTokenRequest {
 
 #[derive(Deserialize, Validate)]
 pub struct ForgotPasswordRequest {
-    #[garde(email)]
+    #[garde(email, length(chars, max = 255))]
     pub email: String,
 }
 
@@ -39,7 +39,7 @@ pub struct ForgotPasswordRequest {
 pub struct ResetPasswordRequest {
     #[garde(length(chars, min = 1))]
     pub token: String,
-    #[garde(length(chars, min = 8))]
+    #[garde(length(chars, min = 8, max = 128))]
     pub password: String,
 }
 
@@ -47,7 +47,7 @@ pub struct ResetPasswordRequest {
 pub struct ChangePasswordRequest {
     #[garde(length(chars, min = 8))]
     pub current_password: String,
-    #[garde(length(chars, min = 8))]
+    #[garde(length(chars, min = 8, max = 128))]
     pub new_password: String,
 }
 
@@ -91,30 +91,58 @@ pub struct GithubCallbackQuery {
     pub state: Option<String>,
 }
 
+/// `limit`/`offset` are raw strings resolved leniently with
+/// `parse_pagination` (echobackend `ParsePaginationParams(20)`).
 #[derive(Deserialize, Validate)]
 pub struct ActivityLogQuery {
-    #[garde(range(min = 0, max = 10_000))]
-    pub offset: Option<i64>,
-    #[garde(range(min = 1, max = 100))]
-    pub limit: Option<i64>,
+    #[garde(skip)]
+    pub offset: Option<String>,
+    #[garde(skip)]
+    pub limit: Option<String>,
     #[garde(length(chars, min = 1, max = 50))]
     pub activity_type: Option<String>,
 }
 
 #[derive(Deserialize, Validate)]
 pub struct RecentActivityQuery {
-    #[garde(range(min = 1, max = 50))]
-    pub limit: Option<i64>,
+    #[garde(skip)]
+    pub limit: Option<String>,
 }
 
+impl RecentActivityQuery {
+    /// echobackend `GetRecentActivity`: only an integer in `1..=50` overrides
+    /// the default of 10 (out-of-range values are ignored, not clamped).
+    pub fn limit(&self) -> i64 {
+        self.limit
+            .as_deref()
+            .and_then(|raw| raw.parse::<i64>().ok())
+            .filter(|limit| (1..=50).contains(limit))
+            .unwrap_or(10)
+    }
+}
+
+/// `limit`/`offset` resolved like [`ActivityLogQuery`] (default 20).
 #[derive(Deserialize, Validate)]
 pub struct FailedLoginsQuery {
-    #[garde(range(min = 0, max = 10_000))]
-    pub offset: Option<i64>,
-    #[garde(range(min = 1, max = 100))]
-    pub limit: Option<i64>,
-    #[garde(range(min = 1, max = 8760))]
-    pub since_hours: Option<i64>,
+    #[garde(skip)]
+    pub offset: Option<String>,
+    #[garde(skip)]
+    pub limit: Option<String>,
+    /// Raw; resolved by [`FailedLoginsQuery::since_hours`].
+    #[garde(skip)]
+    pub since_hours: Option<String>,
+}
+
+impl FailedLoginsQuery {
+    /// echobackend `GetFailedLogins`: a positive integer, otherwise 24 (never
+    /// rejected; an oversized window is bounded by the service).
+    pub fn since_hours(&self) -> i64 {
+        self.since_hours
+            .as_deref()
+            .and_then(|raw| raw.parse::<i64>().ok())
+            .filter(|hours| *hours > 0)
+            .unwrap_or(24)
+    }
 }
 
 #[cfg(test)]
@@ -224,27 +252,86 @@ mod tests {
     }
 
     #[test]
-    fn test_activity_log_query_validation() {
-        let valid = ActivityLogQuery {
-            offset: Some(10),
-            limit: Some(25),
+    fn test_auth_request_max_lengths() {
+        // echobackend dto/auth.go: password max=128, identifier/email max=255.
+        let long_password = "a".repeat(129);
+        let long_email = format!("{}@example.com", "a".repeat(250));
+        let register = |email: &str, password: &str| RegisterRequest {
+            email: email.into(),
+            username: "testuser".into(),
+            password: password.into(),
+            first_name: "Test".into(),
+            last_name: "User".into(),
+        };
+        assert!(
+            register("a@example.com", &"a".repeat(128))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            register("a@example.com", &long_password)
+                .validate()
+                .is_err()
+        );
+        assert!(register(&long_email, "password123").validate().is_err());
+
+        let login = LoginRequest {
+            identifier: "a".repeat(256),
+            password: "password".into(),
+        };
+        assert!(login.validate().is_err());
+
+        let forgot = ForgotPasswordRequest {
+            email: long_email.clone(),
+        };
+        assert!(forgot.validate().is_err());
+
+        let reset = ResetPasswordRequest {
+            token: "pr_token".into(),
+            password: long_password.clone(),
+        };
+        assert!(reset.validate().is_err());
+
+        let change = ChangePasswordRequest {
+            current_password: "a".repeat(200),
+            new_password: long_password,
+        };
+        assert!(change.validate().is_err());
+    }
+
+    #[test]
+    fn test_activity_log_query_pagination_is_lenient() {
+        // echobackend never rejects pagination params: out-of-range or
+        // non-numeric values fall back to the default / are clamped.
+        let query = ActivityLogQuery {
+            offset: Some("-1".into()),
+            limit: Some("101".into()),
             activity_type: Some("LOGIN".into()),
         };
-        assert!(valid.validate().is_ok());
+        assert!(query.validate().is_ok());
+        assert_eq!(
+            crate::dto::validation::parse_pagination(
+                query.offset.as_deref(),
+                query.limit.as_deref(),
+                20
+            ),
+            (100, 0)
+        );
+    }
 
-        let limit_too_high = ActivityLogQuery {
-            offset: Some(0),
-            limit: Some(101),
-            activity_type: None,
+    #[test]
+    fn test_recent_activity_limit() {
+        let limit = |raw: Option<&str>| {
+            RecentActivityQuery {
+                limit: raw.map(Into::into),
+            }
+            .limit()
         };
-        assert!(limit_too_high.validate().is_err());
-
-        let offset_negative = ActivityLogQuery {
-            offset: Some(-1),
-            limit: Some(10),
-            activity_type: None,
-        };
-        assert!(offset_negative.validate().is_err());
+        assert_eq!(limit(None), 10);
+        assert_eq!(limit(Some("25")), 25);
+        assert_eq!(limit(Some("51")), 10);
+        assert_eq!(limit(Some("0")), 10);
+        assert_eq!(limit(Some("abc")), 10);
     }
 
     #[test]

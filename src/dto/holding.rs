@@ -1,4 +1,5 @@
 use crate::dto::validation::{parse_month, parse_year};
+use crate::services::holding::HoldingError;
 use garde::Validate;
 use serde::Deserialize;
 
@@ -36,20 +37,28 @@ impl HoldingQuery {
 }
 
 #[derive(Deserialize, Validate)]
+/// Required fields default when missing so a missing or zero value is a 422
+/// (echobackend `validate:"required"`), not a body-parse 400.
 pub struct CreateHoldingRequest {
+    #[serde(default)]
     #[garde(length(chars, min = 1))]
     pub name: String,
     #[garde(skip)]
     pub symbol: Option<String>,
+    #[serde(default)]
     #[garde(length(chars, min = 1))]
     pub platform: String,
-    #[garde(skip)]
+    #[serde(default)]
+    #[garde(range(min = 1))]
     pub holding_type_id: i16,
+    #[serde(default)]
     #[garde(length(chars, equal = 3))]
     pub currency: String,
-    #[garde(skip)]
+    #[serde(default)]
+    #[garde(length(min = 1))]
     pub invested_amount: String,
-    #[garde(skip)]
+    #[serde(default)]
+    #[garde(length(min = 1))]
     pub current_value: String,
     #[garde(skip)]
     pub units: Option<String>,
@@ -61,13 +70,15 @@ pub struct CreateHoldingRequest {
     pub last_updated: Option<String>,
     #[garde(skip)]
     pub notes: Option<String>,
+    #[serde(default)]
     #[garde(range(min = 1, max = 12))]
     pub month: i32,
+    #[serde(default)]
     #[garde(range(min = 2000))]
     pub year: i32,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Deserialize, Validate, Default)]
 pub struct UpdateHoldingRequest {
     #[garde(length(chars, min = 1))]
     pub name: Option<String>,
@@ -102,12 +113,18 @@ pub struct UpdateHoldingRequest {
 #[derive(Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct DuplicateHoldingRequest {
+    // Missing values default to 0, which the ranges reject with a 422 like
+    // echobackend's `required`.
+    #[serde(default)]
     #[garde(range(min = 1, max = 12))]
     pub from_month: i32,
+    #[serde(default)]
     #[garde(range(min = 1900, max = 2100))]
     pub from_year: i32,
+    #[serde(default)]
     #[garde(range(min = 1, max = 12))]
     pub to_month: i32,
+    #[serde(default)]
     #[garde(range(min = 1900, max = 2100))]
     pub to_year: i32,
     #[serde(default)]
@@ -197,8 +214,29 @@ impl MonthlyQuery {
         parse_month(self.end_month.as_deref())
     }
 
-    pub fn end_year(&self) -> Option<i32> {
-        parse_year(self.end_year.as_deref())
+    /// echobackend `parseMonthlyQuery`: an absent/empty year is `None`; any
+    /// other value must be an integer in `[1990, current year + 1]`.
+    pub fn start_year_bounded(&self) -> Result<Option<i32>, HoldingError> {
+        bounded_holding_year(self.start_year.as_deref())
+    }
+
+    pub fn end_year_bounded(&self) -> Result<Option<i32>, HoldingError> {
+        bounded_holding_year(self.end_year.as_deref())
+    }
+}
+
+/// echobackend `minHoldingYear`.
+const MIN_HOLDING_YEAR: i32 = 1990;
+
+fn bounded_holding_year(raw: Option<&str>) -> Result<Option<i32>, HoldingError> {
+    use chrono::Datelike;
+    let Some(raw) = raw.filter(|raw| !raw.is_empty()) else {
+        return Ok(None);
+    };
+    let max_year = chrono::Utc::now().year() + 1;
+    match raw.parse::<i32>() {
+        Ok(year) if (MIN_HOLDING_YEAR..=max_year).contains(&year) => Ok(Some(year)),
+        _ => Err(HoldingError::InvalidRange),
     }
 }
 
@@ -206,18 +244,69 @@ impl MonthlyQuery {
 /// mirroring echobackend's `CorporateActionHandler.GetCalendar`.
 #[derive(Deserialize, Validate)]
 pub struct CalendarQuery {
-    /// Month `1-12`. Defaults to the current month; invalid values also fall
-    /// back to the current month (handled by the service, like echobackend).
+    /// Raw: only an integer in `1..=12` is used, anything else (including
+    /// "" or a non-number) means the current month, never a 400.
     #[garde(skip)]
-    pub month: Option<i32>,
-    /// Four-digit year. Defaults to the current year.
+    pub month: Option<String>,
+    /// Raw: any integer, otherwise the current year.
     #[garde(skip)]
-    pub year: Option<i32>,
+    pub year: Option<String>,
+}
+
+impl CalendarQuery {
+    pub fn month(&self) -> Option<i32> {
+        parse_month(self.month.as_deref())
+    }
+
+    pub fn year(&self) -> Option<i32> {
+        parse_year(self.year.as_deref())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_create_and_duplicate_missing_fields_fail_validation() {
+        // Missing keys bind to zero values and then fail validation (422),
+        // like echobackend's `required`.
+        let create: CreateHoldingRequest = serde_json::from_str("{}").unwrap();
+        assert!(create.validate().is_err());
+        let duplicate: DuplicateHoldingRequest = serde_json::from_str("{}").unwrap();
+        assert!(duplicate.validate().is_err());
+    }
+
+    #[test]
+    fn test_monthly_year_bounds() {
+        let query = |year: &str| MonthlyQuery {
+            start_month: None,
+            start_year: Some(year.into()),
+            end_month: None,
+            end_year: None,
+        };
+        assert_eq!(query("").start_year_bounded().ok(), Some(None));
+        assert_eq!(query("2024").start_year_bounded().ok(), Some(Some(2024)));
+        assert!(query("1989").start_year_bounded().is_err());
+        assert!(query("2147483647").start_year_bounded().is_err());
+        assert!(query("abc").start_year_bounded().is_err());
+    }
+
+    #[test]
+    fn test_calendar_query_is_lenient() {
+        let query = CalendarQuery {
+            month: Some("13".into()),
+            year: Some("".into()),
+        };
+        assert_eq!(query.month(), None);
+        assert_eq!(query.year(), None);
+        let query = CalendarQuery {
+            month: Some("7".into()),
+            year: Some("2025".into()),
+        };
+        assert_eq!(query.month(), Some(7));
+        assert_eq!(query.year(), Some(2025));
+    }
 
     #[test]
     fn test_create_holding_request_valid() {

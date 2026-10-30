@@ -1,34 +1,3 @@
-/// `^[a-zA-Z0-9_-]+$`
-fn is_username(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
-/// `^[a-zA-Z0-9_-]+$`
-fn is_tag(value: &str) -> bool {
-    is_username(value)
-}
-
-/// Charset checks keep the `regex` tag so the 422 envelope is unchanged from
-/// the previous `validator` `regex(path = ...)` rules.
-fn charset(valid: bool) -> garde::Result {
-    if valid {
-        Ok(())
-    } else {
-        Err(garde::Error::new("regex"))
-    }
-}
-
-pub fn username_chars<T: AsRef<str>>(value: &T, _: &()) -> garde::Result {
-    charset(is_username(value.as_ref()))
-}
-
-pub fn tag_chars<T: AsRef<str>>(value: &T, _: &()) -> garde::Result {
-    charset(is_tag(value.as_ref()))
-}
-
 /// Mirrors echobackend's `ParsePaginationParams(defaultLimit)`: an invalid or
 /// missing value silently falls back to the default instead of failing the
 /// request, and `limit` is clamped to 100 while `offset` has no upper bound.
@@ -136,24 +105,5 @@ mod tests {
         assert_eq!(parse_year(None), None);
         assert_eq!(parse_year(Some("")), None);
         assert_eq!(parse_year(Some("year")), None);
-    }
-
-    #[test]
-    fn test_username_charset() {
-        assert!(is_username("user_123"));
-        assert!(is_username("test-user"));
-        assert!(is_username("Alice"));
-        assert!(!is_username("user with spaces"));
-        assert!(!is_username("user@email"));
-        assert!(!is_username(""));
-    }
-
-    #[test]
-    fn test_tag_charset() {
-        assert!(is_tag("rust_lang"));
-        assert!(is_tag("web-dev"));
-        assert!(is_tag("backend"));
-        assert!(!is_tag("tag with space"));
-        assert!(!is_tag("tag!"));
     }
 }

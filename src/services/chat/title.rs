@@ -201,7 +201,19 @@ fn truncate_words(words: &[&str], max_words: usize, max_chars: usize) -> String 
     if out.chars().count() <= max_chars {
         return out;
     }
-    let cutoff: String = out.chars().take(max_chars).collect();
+    // echobackend `truncateWords` scans for a space from index `max_chars`
+    // down, so a space right after the limit keeps all `max_chars` chars.
+    let chars: Vec<char> = out.chars().collect();
+    if chars[max_chars] == ' ' {
+        return chars[..max_chars]
+            .iter()
+            .collect::<String>()
+            .trim_end_matches([
+                ' ', '\t', '.', ',', ':', ';', '!', '?', '\u{2026}', '-', '\u{2013}', '\u{2014}',
+            ])
+            .to_string();
+    }
+    let cutoff: String = chars[..max_chars].iter().collect();
     match cutoff.rfind(' ') {
         Some(0) | None => cutoff,
         Some(i) => cutoff[..i]
@@ -245,6 +257,18 @@ mod tests {
             title("Apa itu inflasi? Jelaskan dampaknya ke pasar saham Indonesia secara detail"),
             "inflasi"
         );
+    }
+
+    #[test]
+    fn keeps_full_limit_when_next_char_is_space() {
+        // 6 words of 9 chars + 5 spaces = 59, plus "x" = 60 chars, then " next".
+        let words = ["abcdefghi"; 6];
+        let mut head = words.join(" ");
+        head.push('x');
+        assert_eq!(head.chars().count(), 60);
+        let input = format!("{head} next");
+        let parts: Vec<&str> = input.split(' ').collect();
+        assert_eq!(truncate_words(&parts, 8, 60), head);
     }
 
     #[test]

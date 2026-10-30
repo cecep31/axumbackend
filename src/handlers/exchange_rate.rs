@@ -23,20 +23,18 @@ pub struct ExchangeRateQuery {
 impl From<ExchangeRateError> for AppError {
     fn from(err: ExchangeRateError) -> Self {
         match err {
-            ExchangeRateError::InvalidCurrencyPair => {
-                AppError::BadRequest("Invalid currency pair".to_string())
-            }
-            ExchangeRateError::NotFound(from, to) => {
-                // Mirrors echobackend: a missing pair is a plain service error, not
-                // `ErrInvalidCurrencyPair`, so it falls through to a generic 500
-                // rather than a 404.
-                AppError::InternalServerError(format!("Exchange rate not found for {from}/{to}"))
-            }
-            ExchangeRateError::Request(err) => {
-                AppError::InternalServerError(format!("Failed to request exchange rate: {err}"))
-            }
+            ExchangeRateError::InvalidCurrencyPair => AppError::bad_request(
+                "Invalid currency pair",
+                Some("invalid currency pair".into()),
+            ),
+            // Mirrors echobackend: a missing pair is a plain service error, so it
+            // is a generic 500 ("Failed to get exchange rate", no `error` key).
+            ExchangeRateError::NotFound(from, to) => AppError::internal(
+                "Failed to get exchange rate",
+                format!("exchange rate not found for {from}/{to}"),
+            ),
             ExchangeRateError::Upstream(message) => {
-                AppError::InternalServerError(format!("Exchange rate upstream error: {message}"))
+                AppError::internal("Failed to get exchange rate", message)
             }
         }
     }

@@ -32,6 +32,8 @@ struct CorporateAction {
     name: String,
     action_type: String,
     date: NaiveDate,
+    cum_date: Option<NaiveDate>,
+    rec_date: Option<NaiveDate>,
     pay_date: Option<NaiveDate>,
     amount: Option<f64>,
     currency: Option<String>,
@@ -67,21 +69,40 @@ struct RupsEnvelopeInner {
     rups: Vec<RapidApiRupsItem>,
 }
 
+/// Go `encoding/json` into a `string`: a missing key or `null` leaves "".
+fn go_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Deserialize)]
 struct RapidApiDividendItem {
+    #[serde(default, deserialize_with = "go_string")]
     company_symbol: String,
+    #[serde(default, deserialize_with = "go_string")]
     dividend_exdate: String,
+    #[serde(default, deserialize_with = "go_string")]
+    dividend_cumdate: String,
+    #[serde(default, deserialize_with = "go_string")]
+    dividend_recdate: String,
+    #[serde(default, deserialize_with = "go_string")]
     dividend_paydate: String,
+    #[serde(default, deserialize_with = "go_string")]
     dividend_value: String,
+    #[serde(default, deserialize_with = "go_string")]
     dividend_currency: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct RapidApiRupsItem {
+    #[serde(default, deserialize_with = "go_string")]
     company_symbol: String,
+    #[serde(default, deserialize_with = "go_string")]
     company_name: String,
+    #[serde(default, deserialize_with = "go_string")]
     rups_date: String,
+    #[serde(default, deserialize_with = "go_string")]
     rups_time: String,
+    #[serde(default, deserialize_with = "go_string")]
     rups_venue: String,
 }
 
@@ -140,6 +161,8 @@ pub async fn get_calendar(
                 }),
                 r#type: Set(action.action_type),
                 event_date: Set(action.date),
+                cum_date: Set(action.cum_date),
+                rec_date: Set(action.rec_date),
                 pay_date: Set(action.pay_date),
                 amount: Set(action.amount.and_then(Decimal::from_f64_retain)),
                 currency: Set(action.currency.filter(|value| !value.is_empty())),
@@ -158,6 +181,8 @@ pub async fn get_calendar(
                     ])
                     .update_columns([
                         corporate_actions::Column::Name,
+                        corporate_actions::Column::CumDate,
+                        corporate_actions::Column::RecDate,
                         corporate_actions::Column::PayDate,
                         corporate_actions::Column::Amount,
                         corporate_actions::Column::Currency,
@@ -198,6 +223,12 @@ fn to_response(row: corporate_actions::Model) -> CorporateActionResponse {
         name: row.name.filter(|value| !value.is_empty()),
         action_type: row.r#type,
         date: row.event_date.format(DATE_FORMAT).to_string(),
+        cum_date: row
+            .cum_date
+            .map(|date| date.format(DATE_FORMAT).to_string()),
+        rec_date: row
+            .rec_date
+            .map(|date| date.format(DATE_FORMAT).to_string()),
         pay_date: row
             .pay_date
             .map(|date| date.format(DATE_FORMAT).to_string()),
@@ -248,6 +279,12 @@ fn dedupe_actions(actions: Vec<CorporateAction>) -> Vec<CorporateAction> {
         }
         if existing.amount.is_none() {
             existing.amount = action.amount;
+        }
+        if existing.cum_date.is_none() {
+            existing.cum_date = action.cum_date;
+        }
+        if existing.rec_date.is_none() {
+            existing.rec_date = action.rec_date;
         }
         if existing.pay_date.is_none() {
             existing.pay_date = action.pay_date;
@@ -300,6 +337,8 @@ async fn fetch_corporate_actions(
                     name: sym,
                     action_type: "dividend".to_string(),
                     date: ex_date,
+                    cum_date: parse_date(&d.dividend_cumdate),
+                    rec_date: parse_date(&d.dividend_recdate),
                     pay_date: parse_date(&d.dividend_paydate),
                     amount: d
                         .dividend_value
@@ -344,6 +383,8 @@ async fn fetch_corporate_actions(
                     name,
                     action_type: "rups".to_string(),
                     date: meeting_date,
+                    cum_date: None,
+                    rec_date: None,
                     pay_date: None,
                     amount: None,
                     currency: None,
@@ -445,5 +486,28 @@ fn truncate(s: &str, n: usize) -> String {
     } else {
         let truncated: String = s.chars().take(n).collect();
         format!("{truncated}...")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rapidapi_items_tolerate_null_and_missing_fields() {
+        let item: RapidApiDividendItem = serde_json::from_str(
+            r#"{"company_symbol":"BBCA","dividend_exdate":"2025-07-15","dividend_cumdate":"2025-07-14","dividend_recdate":null,"dividend_value":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parse_date(&item.dividend_cumdate),
+            NaiveDate::from_ymd_opt(2025, 7, 14)
+        );
+        assert_eq!(parse_date(&item.dividend_recdate), None);
+        assert!(item.dividend_value.is_empty());
+        assert!(item.dividend_paydate.is_empty());
+
+        let rups: RapidApiRupsItem = serde_json::from_str(r#"{"company_symbol":null}"#).unwrap();
+        assert!(rups.company_symbol.is_empty());
     }
 }

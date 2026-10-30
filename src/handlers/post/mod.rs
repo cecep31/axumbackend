@@ -3,6 +3,7 @@ mod engagement;
 mod moderation;
 mod stats;
 
+use crate::http::auth::require_auth;
 use crate::http::rate_limit::{self, RateLimiter};
 use crate::state::AppState;
 use axum::{
@@ -30,16 +31,22 @@ pub fn routes() -> Router<AppState> {
     // legitimate authors, expensive enough to stop spam floods. Registered as
     // a separate same-path route so the limit applies to POST only — axum
     // merges the two `/api/posts` routes into one.
+    //
+    // Like echobackend (`Auth()` before the limiter), `require_auth` is the
+    // outermost route layer on both limited routes (the layer added last runs
+    // first), so a 401 never consumes the budget.
     let create_post_limiter =
         RateLimiter::new(10, Duration::from_secs(3600), trust_proxy).shared("posts:create");
     Router::new()
         .route("/api/posts", get(crud::get_posts))
         .route(
             "/api/posts",
-            post(crud::create_post).route_layer(middleware::from_fn_with_state(
-                create_post_limiter,
-                rate_limit::rate_limit,
-            )),
+            post(crud::create_post)
+                .route_layer(middleware::from_fn_with_state(
+                    create_post_limiter,
+                    rate_limit::rate_limit,
+                ))
+                .route_layer(middleware::from_fn(require_auth)),
         )
         .route("/api/posts/stats", get(stats::get_post_stats))
         .route(
@@ -88,6 +95,7 @@ pub fn routes() -> Router<AppState> {
                     report_limiter,
                     rate_limit::rate_limit,
                 ))
+                .route_layer(middleware::from_fn(require_auth))
                 .get(moderation::list_post_reports),
         )
         .route(

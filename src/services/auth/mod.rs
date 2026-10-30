@@ -1,6 +1,6 @@
 use crate::config::{GitHubConfig, JwtConfig};
+pub use crate::domain::client::ClientInfo;
 use crate::entities::{auth_activity_logs, password_reset_tokens, sessions, users};
-use crate::http::auth::Claims;
 use crate::infra::cache;
 use crate::infra::email::Mailer;
 use argon2::{
@@ -11,7 +11,7 @@ use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use rand::distr::{Alphanumeric, SampleString};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, ExprTrait,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait,
     PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};

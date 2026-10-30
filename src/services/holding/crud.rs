@@ -30,14 +30,28 @@ async fn holding_type_exists(db: &DatabaseConnection, id: i16) -> Result<bool, D
         .is_some())
 }
 
+/// Redis key/TTL shared with echobackend's `GetHoldingTypes`
+/// (`<prefix>:holding-types`, a JSON array of `{id, code, name, notes}`).
+const HOLDING_TYPES_CACHE_KEY: [&str; 1] = ["holding-types"];
+const HOLDING_TYPES_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 pub async fn get_holding_types(
     db: &DatabaseConnection,
 ) -> Result<Vec<HoldingTypeResponse>, HoldingError> {
-    let types = holding_types::Entity::find()
+    if let Some(types) =
+        crate::infra::cache::read_json::<Vec<HoldingTypeResponse>>(&HOLDING_TYPES_CACHE_KEY).await
+    {
+        return Ok(types);
+    }
+    let types: Vec<HoldingTypeResponse> = holding_types::Entity::find()
         .order_by_asc(holding_types::Column::Id)
         .all(db)
-        .await?;
-    Ok(types.into_iter().map(Into::into).collect())
+        .await?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    crate::infra::cache::write_json(&HOLDING_TYPES_CACHE_KEY, &types, HOLDING_TYPES_TTL).await;
+    Ok(types)
 }
 
 pub async fn get_holdings(

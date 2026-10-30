@@ -1,6 +1,21 @@
+//! Rate limiters.
+//!
+//! - [`TokenBucketLimiter`] / [`global_rate_limit`]: the global
+//!   `HTTP_RATE_LIMIT_RPS` limiter, mirroring echobackend's Echo
+//!   `RateLimiter` memory store (token bucket per client IP, `rate = rps`,
+//!   `burst = 2 * rps`, idle buckets expire after `HTTP_RATE_LIMIT_WINDOW_SEC`
+//!   or 3 minutes). It sits inside the CORS layer, so preflights are answered
+//!   first and 429s carry CORS headers.
+//! - [`RateLimiter`] / [`rate_limit`]: fixed-window per-route limiters (auth,
+//!   post create/report). With [`RateLimiter::shared`] they count in Redis
+//!   under `rate_limit:<name>:<client>` like echobackend.
+//!
+//! Both answer 429 with `{success:false, message:"Too many attempts. Please
+//! try again later.", error:"Rate limit exceeded"}` and `Retry-After`.
+
 use std::{
     collections::HashMap,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -8,14 +23,147 @@ use std::{
 use axum::{
     Json,
     extract::{ConnectInfo, Request, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 
-use crate::{http::response::ApiResponse, infra::cache};
+use crate::{
+    http::{client_ip::resolve_client_ip, response::ApiResponse},
+    infra::cache,
+};
 
 const MAX_RATE_LIMITER_ENTRIES: usize = 20_000;
+
+/// The shared 429 envelope (echobackend `response.TooManyRequests`).
+pub fn too_many_requests(retry_after_secs: u64) -> Response {
+    let body = Json(ApiResponse::error(
+        "Too many attempts. Please try again later.",
+        "Rate limit exceeded",
+    ));
+    let mut response = (StatusCode::TOO_MANY_REQUESTS, body).into_response();
+    if let Ok(value) = retry_after_secs.max(1).to_string().parse() {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
+}
+
+/// Client key for limiters: the resolved client IP, or `"unknown"`.
+fn client_key(request: &Request, trust_proxy: bool) -> String {
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip());
+    resolve_client_ip(request.headers(), peer, trust_proxy)
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+// ============================================================================
+// Global token bucket (echobackend RateLimiterMemoryStore)
+// ============================================================================
+
+#[derive(Clone)]
+pub struct TokenBucketLimiter {
+    inner: Arc<Mutex<TokenBucketInner>>,
+    rate: f64,
+    burst: f64,
+    idle_expiry: Duration,
+    trust_proxy: bool,
+}
+
+struct TokenBucketInner {
+    visitors: HashMap<String, Bucket>,
+    last_cleanup: Instant,
+}
+
+struct Bucket {
+    tokens: f64,
+    updated_at: Instant,
+    last_seen: Instant,
+}
+
+impl TokenBucketLimiter {
+    /// `rps` tokens per second with a burst of `2 * rps`; an idle client's
+    /// bucket is dropped after `idle_expiry`.
+    pub fn new(rps: u32, idle_expiry: Duration, trust_proxy: bool) -> Self {
+        let rate = f64::from(rps.max(1));
+        Self {
+            inner: Arc::new(Mutex::new(TokenBucketInner {
+                visitors: HashMap::new(),
+                last_cleanup: Instant::now(),
+            })),
+            rate,
+            burst: rate * 2.0,
+            idle_expiry,
+            trust_proxy,
+        }
+    }
+
+    /// Takes one token for `client`; `Err(retry_after_secs)` when empty.
+    fn check(&self, client: &str, now: Instant) -> Result<(), u64> {
+        let mut inner = self.inner.lock().expect("rate limiter lock poisoned");
+
+        if now.duration_since(inner.last_cleanup) > self.idle_expiry
+            || inner.visitors.len() >= MAX_RATE_LIMITER_ENTRIES
+        {
+            let idle_expiry = self.idle_expiry;
+            inner
+                .visitors
+                .retain(|_, bucket| now.duration_since(bucket.last_seen) <= idle_expiry);
+            inner.last_cleanup = now;
+        }
+
+        if inner.visitors.len() >= MAX_RATE_LIMITER_ENTRIES
+            && !inner.visitors.contains_key(client)
+            && let Some(oldest) = inner
+                .visitors
+                .iter()
+                .min_by_key(|(_, bucket)| bucket.last_seen)
+                .map(|(key, _)| key.clone())
+        {
+            inner.visitors.remove(&oldest);
+        }
+
+        let burst = self.burst;
+        let bucket = inner
+            .visitors
+            .entry(client.to_owned())
+            .or_insert_with(|| Bucket {
+                tokens: burst,
+                updated_at: now,
+                last_seen: now,
+            });
+        let elapsed = now.duration_since(bucket.updated_at).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * self.rate).min(self.burst);
+        bucket.updated_at = now;
+        bucket.last_seen = now;
+
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            Ok(())
+        } else {
+            Err(((1.0 - bucket.tokens) / self.rate).ceil().max(1.0) as u64)
+        }
+    }
+}
+
+/// Global limiter middleware (`from_fn_with_state(TokenBucketLimiter, ..)`).
+pub async fn global_rate_limit(
+    State(limiter): State<TokenBucketLimiter>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let client = client_key(&request, limiter.trust_proxy);
+    match limiter.check(&client, Instant::now()) {
+        Ok(()) => next.run(request).await,
+        Err(retry_after) => too_many_requests(retry_after),
+    }
+}
+
+// ============================================================================
+// Fixed-window per-route limiter
+// ============================================================================
 
 #[derive(Clone)]
 pub struct RateLimiter {
@@ -60,8 +208,9 @@ impl RateLimiter {
 
     /// Keeps the counters in Redis, when it is available, under `name` (e.g.
     /// `auth:login`, as in echobackend), so the limit holds across instances.
-    /// The limit then applies per client for every path behind this limiter.
-    /// Falls back to the in-memory counters whenever Redis is off or failing.
+    /// The limit then applies per client for every path behind this limiter,
+    /// including the in-memory fallback used whenever Redis is off or failing
+    /// (so `/api/posts/{id}/reports` is limited per IP, not per post).
     pub fn shared(mut self, name: &str) -> Self {
         self.shared_name = Some(name.into());
         self
@@ -76,7 +225,8 @@ impl RateLimiter {
         match cache.increment_fixed_window(&key, self.window).await {
             Ok((0, _)) => None,
             Ok((count, _)) if count <= u64::from(self.max_requests) => Some(Ok(())),
-            Ok((_, remaining)) => Some(Err(remaining.as_secs_f64().ceil().max(1.0) as u64)),
+            // echobackend: `max(int(retryAfter.Seconds()), 1)` (floor, min 1).
+            Ok((_, remaining)) => Some(Err(remaining.as_secs().max(1))),
             Err(err) => {
                 tracing::warn!(name, error = %err, "rate limit: Redis unavailable, using in-memory counters");
                 None
@@ -149,206 +299,139 @@ pub async fn rate_limit(
     request: Request,
     next: Next,
 ) -> Response {
-    let client = client_identity(&request, limiter.trust_proxy);
+    let client = client_key(&request, limiter.trust_proxy);
     let result = match limiter.check_shared(&client).await {
         Some(result) => result,
         None => limiter.check(RateLimitKey {
-            path: request.uri().path().to_owned(),
+            // Shared limiters count per client across all their paths.
+            path: if limiter.shared_name.is_some() {
+                String::new()
+            } else {
+                request.uri().path().to_owned()
+            },
             client,
         }),
     };
 
     match result {
         Ok(()) => next.run(request).await,
-        Err(retry_after) => {
-            let body = Json(ApiResponse::error(
-                "Too many attempts. Please try again later.",
-                "Rate limit exceeded",
-            ));
-
-            let mut response = (StatusCode::TOO_MANY_REQUESTS, body).into_response();
-            if let Ok(value) = retry_after.to_string().parse() {
-                response.headers_mut().insert(header::RETRY_AFTER, value);
-            }
-            response
-        }
+        Err(retry_after) => too_many_requests(retry_after),
     }
-}
-
-/// Mirrors echobackend: with `trust_proxy`, `X-Forwarded-For` is only honoured
-/// when the direct peer is a trusted (loopback/private/link-local) proxy, and
-/// is walked right to left for the first untrusted hop. Taking the leftmost
-/// entry would let a client dodge the limit by sending a fresh fake IP.
-fn client_identity(request: &Request, trust_proxy: bool) -> String {
-    let peer = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip());
-
-    if trust_proxy && let Some(peer) = peer {
-        if !is_trusted_hop(peer) {
-            return peer.to_string();
-        }
-        if let Some(ip) = trusted_proxy_client_ip(request.headers()).or_else(|| {
-            request
-                .headers()
-                .get("x-real-ip")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.trim().parse().ok())
-                .filter(|ip| !is_trusted_hop(*ip))
-        }) {
-            return ip.to_string();
-        }
-        return peer.to_string();
-    }
-
-    if let Some(peer) = peer {
-        return peer.to_string();
-    }
-
-    forwarded_ip(request.headers())
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn is_trusted_hop(ip: IpAddr) -> bool {
-    match ip {
-        // 100.64.0.0/10 (CGNAT) is what Railway's edge proxies connect from.
-        IpAddr::V4(ip) => {
-            ip.is_loopback()
-                || ip.is_private()
-                || ip.is_link_local()
-                || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 64)
-        }
-        IpAddr::V6(ip) => {
-            ip.is_loopback()
-                || (ip.segments()[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
-                || (ip.segments()[0] & 0xffc0) == 0xfe80 // link local fe80::/10
-        }
-    }
-}
-
-/// Rightmost `X-Forwarded-For` entry that is not a trusted proxy hop.
-fn trusted_proxy_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
-    let hops: Vec<Option<IpAddr>> = headers
-        .get_all("x-forwarded-for")
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .map(|p| p.trim().parse().ok())
-        .collect();
-    for hop in hops.into_iter().rev() {
-        match hop {
-            Some(ip) if is_trusted_hop(ip) => continue,
-            other => return other,
-        }
-    }
-    None
-}
-
-fn forwarded_ip(headers: &HeaderMap) -> Option<IpAddr> {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .and_then(|value| value.trim().parse().ok())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.trim().parse().ok())
-        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::http::{HeaderValue, Request};
+    use axum::http::Request;
     use std::net::SocketAddr;
     use std::thread;
 
     #[test]
-    fn test_client_identity_trust_proxy_enabled() {
-        let socket_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let mut req = Request::builder()
-            .header("x-forwarded-for", "203.0.113.195, 70.41.3.18")
-            .body(Body::empty())
-            .unwrap();
-        req.extensions_mut().insert(ConnectInfo(socket_addr));
-
-        // Peer is a loopback proxy: walk XFF from the right.
-        assert_eq!(client_identity(&req, true), "70.41.3.18");
-    }
-
-    #[test]
-    fn test_client_identity_ignores_xff_from_untrusted_peer() {
-        let socket_addr: SocketAddr = "198.51.100.7:8080".parse().unwrap();
-        let mut req = Request::builder()
-            .header("x-forwarded-for", "1.2.3.4")
-            .body(Body::empty())
-            .unwrap();
-        req.extensions_mut().insert(ConnectInfo(socket_addr));
-
-        assert_eq!(client_identity(&req, true), "198.51.100.7");
-    }
-
-    #[test]
-    fn test_client_identity_railway_cgnat_peer() {
-        for peer in ["100.64.0.3:1", "100.127.9.9:1"] {
-            let mut req = Request::builder()
-                .header("x-forwarded-for", "203.0.113.50")
-                .body(Body::empty())
-                .unwrap();
-            req.extensions_mut()
-                .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
-            assert_eq!(client_identity(&req, true), "203.0.113.50");
+    fn test_token_bucket_burst_then_refill() {
+        let limiter = TokenBucketLimiter::new(2, Duration::from_secs(180), false);
+        let start = Instant::now();
+        // burst = 2 * rps
+        for _ in 0..4 {
+            assert!(limiter.check("1.1.1.1", start).is_ok());
         }
+        assert_eq!(limiter.check("1.1.1.1", start), Err(1));
+        // Other clients have their own bucket.
+        assert!(limiter.check("2.2.2.2", start).is_ok());
+        // rate = rps tokens per second.
+        let later = start + Duration::from_millis(500);
+        assert!(limiter.check("1.1.1.1", later).is_ok());
+        assert!(limiter.check("1.1.1.1", later).is_err());
     }
 
     #[test]
-    fn test_client_identity_cannot_spoof_leftmost_xff() {
-        let socket_addr: SocketAddr = "10.0.0.2:8080".parse().unwrap();
-        let mut req = Request::builder()
-            .header("x-forwarded-for", "9.9.9.9, 203.0.113.50, 10.0.0.9")
-            .body(Body::empty())
+    fn test_token_bucket_drops_idle_visitors() {
+        let limiter = TokenBucketLimiter::new(1, Duration::from_millis(50), false);
+        let start = Instant::now();
+        assert!(limiter.check("1.1.1.1", start).is_ok());
+        assert!(
+            limiter
+                .check("2.2.2.2", start + Duration::from_millis(100))
+                .is_ok()
+        );
+        let inner = limiter.inner.lock().unwrap();
+        assert_eq!(inner.visitors.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_global_limiter_returns_envelope_with_retry_after() {
+        use axum::{Router, middleware, routing::get};
+        use tower::ServiceExt;
+
+        let limiter = TokenBucketLimiter::new(1, Duration::from_secs(180), false);
+        let app = Router::new()
+            .route("/x", get(|| async { "ok" }))
+            .layer(middleware::from_fn_with_state(limiter, global_rate_limit));
+        let mut last = None;
+        for _ in 0..3 {
+            let mut req = Request::builder().uri("/x").body(Body::empty()).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo("10.0.0.1:1".parse::<SocketAddr>().unwrap()));
+            last = Some(app.clone().oneshot(req).await.unwrap());
+        }
+        let res = last.unwrap();
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(res.headers()[header::RETRY_AFTER], "1");
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
             .unwrap();
-        req.extensions_mut().insert(ConnectInfo(socket_addr));
-
-        assert_eq!(client_identity(&req, true), "203.0.113.50");
-    }
-
-    #[test]
-    fn test_client_identity_trust_proxy_disabled() {
-        let socket_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let mut req = Request::builder()
-            .header("x-forwarded-for", "203.0.113.195, 70.41.3.18")
-            .body(Body::empty())
-            .unwrap();
-        req.extensions_mut().insert(ConnectInfo(socket_addr));
-
-        assert_eq!(client_identity(&req, false), "127.0.0.1");
-    }
-
-    #[test]
-    fn test_forwarded_ip_x_real_ip_fallback() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.22"));
-
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
-            forwarded_ip(&headers),
-            Some("198.51.100.22".parse().unwrap())
+            body,
+            serde_json::json!({
+                "success": false,
+                "message": "Too many attempts. Please try again later.",
+                "error": "Rate limit exceeded",
+            })
         );
     }
 
-    #[test]
-    fn test_forwarded_ip_invalid_and_empty() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", HeaderValue::from_static("not-an-ip"));
-        assert_eq!(forwarded_ip(&headers), None);
+    /// echobackend order on `POST /api/posts` / `POST /api/posts/{id}/reports`:
+    /// `Auth()` runs before the limiter, so 401s never consume the budget.
+    #[tokio::test]
+    async fn test_auth_runs_before_route_limiter() {
+        use crate::http::auth::{AuthUser, require_auth};
+        use axum::{Router, middleware, routing::post};
+        use tower::ServiceExt;
 
-        let empty_headers = HeaderMap::new();
-        assert_eq!(forwarded_ip(&empty_headers), None);
+        let limiter = RateLimiter::new(1, Duration::from_secs(3600), false).shared("test:auth");
+        let app = Router::new().route(
+            "/x",
+            post(|_user: AuthUser| async { "ok" })
+                .route_layer(middleware::from_fn_with_state(limiter, rate_limit))
+                .route_layer(middleware::from_fn(require_auth)),
+        );
+        let request = |authenticated: bool| {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/x")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo("10.0.0.9:1".parse::<SocketAddr>().unwrap()));
+            if authenticated {
+                // Stands in for a verified Bearer token.
+                req.extensions_mut().insert(AuthUser {
+                    id: uuid::Uuid::now_v7(),
+                    is_super_admin: false,
+                });
+            }
+            req
+        };
+
+        for _ in 0..3 {
+            let res = app.clone().oneshot(request(false)).await.unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        }
+        let res = app.clone().oneshot(request(true)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app.clone().oneshot(request(true)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[test]

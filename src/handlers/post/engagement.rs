@@ -1,6 +1,7 @@
 use crate::dto::common::PostIdPath;
 use crate::dto::post::PostPaginationQuery;
-use crate::http::auth::AuthUser;
+use crate::http::auth::{AuthUser, is_super_admin};
+use crate::http::client_ip::RequestClient;
 use crate::http::error::AppError;
 use crate::http::extract::{VPath, VQuery};
 use crate::http::response::ApiResponse;
@@ -14,6 +15,12 @@ impl From<services::post_view::PostViewError> for AppError {
             services::post_view::PostViewError::Db(err) => AppError::from(err),
             services::post_view::PostViewError::PostNotFound => {
                 AppError::NotFound("Post not found".to_string())
+            }
+            services::post_view::PostViewError::NotAuthor => {
+                AppError::Forbidden("Failed to get post views".to_string())
+            }
+            services::post_view::PostViewError::DateRangeTooLarge => {
+                AppError::BadRequest("date range must not exceed 366 days".to_string())
             }
         }
     }
@@ -36,42 +43,43 @@ impl From<services::post_like::PostLikeError> for AppError {
     }
 }
 
-fn header_string(headers: &axum::http::HeaderMap, name: &'static str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned)
-}
-
 pub async fn record_view(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    headers: axum::http::HeaderMap,
+    RequestClient(client): RequestClient,
     VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    let ip_address =
-        header_string(&headers, "x-forwarded-for").or_else(|| header_string(&headers, "x-real-ip"));
-    let user_agent = header_string(&headers, "user-agent");
+    // echobackend stores `c.RealIP()` (trusted-proxy aware), never the raw
+    // X-Forwarded-For header.
+    services::post_view::record_view(
+        &pool,
+        params.id,
+        Some(auth_user.id),
+        client.ip_address,
+        client.user_agent,
+    )
+    .await?;
 
-    services::post_view::record_view(&pool, params.id, Some(auth_user.id), ip_address, user_agent)
-        .await?;
-
-    Ok(Json(ApiResponse::success_with_message(
-        "View recorded successfully",
-        serde_json::Value::Null,
-    )))
+    Ok(Json(ApiResponse::message("View recorded successfully")))
 }
 
 pub async fn get_post_views(
     State(pool): State<DbPool>,
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     VPath(params): VPath<PostIdPath>,
     VQuery(query): VQuery<PostPaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<crate::models::post_view::PostViewResponse>>>, AppError> {
-    let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(10);
-    let (views, total) =
-        services::post_view::get_views_by_post_id(&pool, params.id, limit, offset).await?;
+    let (limit, offset) = query.resolve(10);
+    let is_admin = is_super_admin(&pool, auth_user.id).await;
+    let (views, total) = services::post_view::get_views_by_post_id(
+        &pool,
+        params.id,
+        auth_user.id,
+        is_admin,
+        limit,
+        offset,
+    )
+    .await?;
 
     Ok(Json(ApiResponse::with_meta_message(
         "Successfully retrieved post views",
@@ -114,10 +122,7 @@ pub async fn like_post(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     services::post_like::like_post(&pool, params.id, auth_user.id).await?;
 
-    Ok(Json(ApiResponse::success_with_message(
-        "Post liked successfully",
-        serde_json::Value::Null,
-    )))
+    Ok(Json(ApiResponse::message("Post liked successfully")))
 }
 
 pub async fn unlike_post(
@@ -127,10 +132,7 @@ pub async fn unlike_post(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     services::post_like::unlike_post(&pool, params.id, auth_user.id).await?;
 
-    Ok(Json(ApiResponse::success_with_message(
-        "Post unliked successfully",
-        serde_json::Value::Null,
-    )))
+    Ok(Json(ApiResponse::message("Post unliked successfully")))
 }
 
 pub async fn get_post_likes(
@@ -138,9 +140,10 @@ pub async fn get_post_likes(
     VPath(params): VPath<PostIdPath>,
     VQuery(query): VQuery<PostPaginationQuery>,
 ) -> Result<Json<ApiResponse<crate::models::post_like::PostLikeListResponse>>, AppError> {
-    let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(10);
-    let likes = services::post_like::get_likes_by_post_id(&pool, params.id, limit, offset).await?;
+    let (limit, offset) = query.resolve(10);
+    let likes = services::post_like::get_likes_by_post_id(&pool, params.id, limit, offset)
+        .await
+        .map_err(|err| AppError::from(err).context("Failed to get post likes"))?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Post likes retrieved successfully",
@@ -152,7 +155,9 @@ pub async fn get_post_like_stats(
     State(pool): State<DbPool>,
     VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<crate::models::post_like::PostLikeStats>>, AppError> {
-    let stats = services::post_like::get_like_stats(&pool, params.id).await?;
+    let stats = services::post_like::get_like_stats(&pool, params.id)
+        .await
+        .map_err(|err| AppError::from(err).context("Failed to get like stats"))?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Like stats retrieved successfully",
@@ -165,7 +170,9 @@ pub async fn check_user_liked(
     auth_user: AuthUser,
     VPath(params): VPath<PostIdPath>,
 ) -> Result<Json<ApiResponse<crate::models::post_like::LikeStatusResponse>>, AppError> {
-    let status = services::post_like::has_user_liked_post(&pool, params.id, auth_user.id).await?;
+    let status = services::post_like::has_user_liked_post(&pool, params.id, auth_user.id)
+        .await
+        .map_err(|err| AppError::from(err).context("Failed to check like status"))?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Like status retrieved successfully",

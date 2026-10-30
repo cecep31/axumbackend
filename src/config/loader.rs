@@ -7,36 +7,41 @@ use super::types::*;
 // ============================================================================
 // Environment Parsing Helpers
 // ============================================================================
+//
+// These mirror echobackend's `config/env.go`: the FIRST set key among the
+// aliases wins, and when its value does not parse the default is returned
+// (later aliases are not consulted). Nothing here panics.
 
-/// Reads `key` and parses it as `T`, falling back to `default` when unset.
-///
-/// # Panics
-/// Panics if the variable is set but cannot be parsed as `T`.
+/// The first of `keys` that is set (even to an empty string), with its value.
+fn first_set<'a>(keys: &[&'a str]) -> Option<(&'a str, String)> {
+    keys.iter()
+        .find_map(|key| env::var(key).ok().map(|value| (*key, value)))
+}
+
+/// Reads `key` and parses it as `T`, falling back to `default` when unset or
+/// unparsable (echobackend `envInt`).
 pub fn parse_env<T: FromStr>(key: &str, default: T) -> T {
     parse_env_alias(&[key], default)
 }
 
-/// Like [`parse_env`], but reads the first of `keys` that is set.
-///
-/// # Panics
-/// Panics if the variable is set but cannot be parsed as `T`.
+/// Like [`parse_env`], but reads the first of `keys` that is set. An
+/// unparsable value logs a warning and yields `default`.
 pub fn parse_env_alias<T: FromStr>(keys: &[&str], default: T) -> T {
-    let Some(raw) = keys.iter().find_map(|key| env::var(key).ok()) else {
+    let Some((key, raw)) = first_set(keys) else {
         return default;
     };
-    raw.parse().unwrap_or_else(|_| {
-        panic!(
-            "{} must be a valid {} number",
-            keys.join(" or "),
-            std::any::type_name::<T>()
-        )
-    })
+    match raw.parse() {
+        Ok(value) => value,
+        Err(_) => {
+            tracing::warn!(key, value = %raw, "config: invalid number, using default");
+            default
+        }
+    }
 }
 
-/// Parse a human-readable duration string into std::time::Duration.
-///
-/// Supports Go-style duration formats such as "15m", "1h", "30s", "500ms", "1d", "1h30m",
-/// or plain numbers interpreted as seconds (e.g. "900").
+/// Lenient duration parser for axum-only keys: Go-style strings ("15m",
+/// "1h30m", "500ms", plus "1d") or plain numbers as seconds ("900").
+/// Keys shared with echobackend use the strict [`parse_go_duration`].
 pub fn parse_duration(raw: &str) -> Result<Duration, String> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -106,47 +111,133 @@ pub fn parse_duration(raw: &str) -> Result<Duration, String> {
     Ok(Duration::from_millis(total_millis))
 }
 
-pub fn parse_duration_alias(keys: &[&str], default: Duration) -> Duration {
-    for key in keys {
-        if let Ok(value) = env::var(key) {
-            let val = value.trim();
-            if !val.is_empty()
-                && let Ok(d) = parse_duration(val)
-            {
-                return d;
-            }
-        }
+/// Strict Go `time.ParseDuration`: `[-+]?(<number><unit>)+` or `"0"`, units
+/// `ns us µs μs ms s m h` (case-sensitive, no spaces, no days, no bare
+/// numbers). A negative value maps to `Duration::ZERO`, so the `> 0` checks
+/// in [`Config::validate`] reject it as echobackend does.
+pub fn parse_go_duration(raw: &str) -> Result<Duration, String> {
+    let invalid = || format!("time: invalid duration \"{raw}\"");
+    let (negative, mut rest) = match raw.as_bytes().first() {
+        Some(b'-') => (true, &raw[1..]),
+        Some(b'+') => (false, &raw[1..]),
+        _ => (false, raw),
+    };
+    if rest == "0" {
+        return Ok(Duration::ZERO);
     }
-    default
+    if rest.is_empty() {
+        return Err(invalid());
+    }
+
+    let mut total_nanos: f64 = 0.0;
+    while !rest.is_empty() {
+        let number_len = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(rest.len());
+        let number = &rest[..number_len];
+        if number.is_empty() || number == "." || number.matches('.').count() > 1 {
+            return Err(invalid());
+        }
+        let value: f64 = number.parse().map_err(|_| invalid())?;
+        rest = &rest[number_len..];
+
+        let unit_len = rest
+            .find(|c: char| c.is_ascii_digit() || c == '.')
+            .unwrap_or(rest.len());
+        let nanos_per_unit = match &rest[..unit_len] {
+            "ns" => 1.0,
+            "us" | "\u{b5}s" | "\u{3bc}s" => 1e3,
+            "ms" => 1e6,
+            "s" => 1e9,
+            "m" => 60e9,
+            "h" => 3600e9,
+            _ => return Err(invalid()),
+        };
+        rest = &rest[unit_len..];
+        total_nanos += value * nanos_per_unit;
+    }
+
+    if negative {
+        return Ok(Duration::ZERO);
+    }
+    Ok(Duration::from_nanos(
+        total_nanos.round().min(u64::MAX as f64) as u64,
+    ))
 }
 
+/// First set key among `keys`, parsed with [`parse_go_duration`]; an invalid
+/// value yields `default` (echobackend `envDuration`).
+pub fn parse_duration_alias(keys: &[&str], default: Duration) -> Duration {
+    let Some((key, raw)) = first_set(keys) else {
+        return default;
+    };
+    parse_go_duration(&raw).unwrap_or_else(|_| {
+        tracing::warn!(key, value = %raw, "config: invalid duration, using default");
+        default
+    })
+}
+
+/// echobackend `resolveJWTExpiry`: JWT_EXPIRY (Go duration), else the legacy
+/// JWT_EXPIRY_HOURS (whole hours), else `default_duration`.
 pub fn resolve_jwt_expiry(default_duration: Duration) -> Duration {
-    if let Ok(val) = env::var("JWT_EXPIRY")
-        && let Ok(d) = parse_duration(&val)
+    resolve_duration_with_legacy("JWT_EXPIRY", "JWT_EXPIRY_HOURS", 3600, default_duration)
+}
+
+/// echobackend `resolveRefreshTokenExpiry`: REFRESH_TOKEN_EXPIRY (Go
+/// duration, e.g. "72h"), else the legacy REFRESH_TOKEN_EXPIRY_DAYS (whole
+/// days), else `default_duration`.
+pub fn resolve_refresh_token_expiry(default_duration: Duration) -> Duration {
+    resolve_duration_with_legacy(
+        "REFRESH_TOKEN_EXPIRY",
+        "REFRESH_TOKEN_EXPIRY_DAYS",
+        24 * 3600,
+        default_duration,
+    )
+}
+
+fn resolve_duration_with_legacy(
+    key: &str,
+    legacy_key: &str,
+    legacy_unit_secs: u64,
+    default_duration: Duration,
+) -> Duration {
+    if let Ok(raw) = env::var(key)
+        && let Ok(duration) = parse_go_duration(&raw)
     {
-        return d;
+        return duration;
     }
-    if let Ok(val) = env::var("JWT_EXPIRY_HOURS")
-        && let Ok(hours) = val.trim().parse::<u64>()
+    if let Ok(raw) = env::var(legacy_key)
+        && let Ok(units) = raw.parse::<i64>()
     {
-        return Duration::from_secs(hours * 3600);
+        // A negative legacy value becomes zero and fails validation.
+        return Duration::from_secs(units.max(0) as u64 * legacy_unit_secs);
     }
     default_duration
+}
+
+/// Go `strconv.ParseBool`.
+pub fn go_parse_bool(raw: &str) -> Option<bool> {
+    match raw {
+        "1" | "t" | "T" | "TRUE" | "true" | "True" => Some(true),
+        "0" | "f" | "F" | "FALSE" | "false" | "False" => Some(false),
+        _ => None,
+    }
 }
 
 pub fn parse_bool(key: &str, default: bool) -> bool {
     parse_bool_alias(&[key], default)
 }
 
+/// echobackend `envBool`: the first set key is parsed with Go
+/// `strconv.ParseBool`; any other value yields `default`.
 pub fn parse_bool_alias(keys: &[&str], default: bool) -> bool {
-    keys.iter()
-        .find_map(|key| env::var(key).ok())
-        .map_or(default, |value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
+    let Some((key, raw)) = first_set(keys) else {
+        return default;
+    };
+    go_parse_bool(&raw).unwrap_or_else(|| {
+        tracing::warn!(key, value = %raw, "config: invalid boolean, using default");
+        default
+    })
 }
 
 pub fn env_string(key: &str, default: &str) -> String {
@@ -186,13 +277,11 @@ pub fn parse_origins(raw: &str) -> Vec<String> {
 impl Config {
     /// Load configuration from environment variables with sensible defaults.
     /// The primary keys are documented in `.env.example`; legacy aliases are the
-    /// extra names passed to the `*_alias` helpers below.
-    ///
-    /// # Panics
-    /// Panics if a numeric value is set but cannot be parsed.
+    /// extra names passed to the `*_alias` helpers below. Like echobackend,
+    /// an unparsable value falls back to its default instead of failing.
     pub fn from_env() -> Self {
         Self {
-            debug: parse_bool("APP_DEBUG", parse_bool("DEBUG", false)),
+            debug: parse_bool_alias(&["APP_DEBUG", "DEBUG"], false),
             port: parse_env("PORT", DEFAULT_PORT),
             database_url: env_string("DATABASE_URL", DEFAULT_DATABASE_URL),
             db_pool: PoolConfig::from_env(),
@@ -203,12 +292,37 @@ impl Config {
             frontend: FrontendConfig::from_env(),
             s3: S3Config::from_env(),
             cache: CacheConfig::from_env(),
-            queue: QueueConfig::from_env(),
             openrouter: OpenRouterConfig::from_env(),
             github: GitHubConfig::from_env(),
             market: MarketConfig::from_env(),
+            checks: EnvChecks {
+                cache_ttl_secs: cache_ttl_secs(),
+                cache_connect_timeout_ms: cache_connect_timeout_ms(),
+                smtp_port: smtp_port(),
+            },
         }
     }
+}
+
+fn cache_ttl_secs() -> i64 {
+    parse_env("CACHE_TTL_SECONDS", DEFAULT_CACHE_TTL_SECS as i64)
+}
+
+fn cache_connect_timeout_ms() -> i64 {
+    parse_env_alias(
+        &["REDIS_CONNECT_TIMEOUT_MS", "VALKEY_CONNECT_TIMEOUT_MS"],
+        DEFAULT_VALKEY_CONNECT_TIMEOUT_MS,
+    )
+}
+
+fn smtp_port() -> i64 {
+    parse_env("SMTP_PORT", DEFAULT_SMTP_PORT)
+}
+
+/// Seconds env value (echobackend `envInt(...) * time.Second`); negatives
+/// become zero here and are rejected by `validate` through [`EnvChecks`].
+fn non_negative_secs(raw: i64) -> Duration {
+    Duration::from_secs(raw.max(0) as u64)
 }
 
 impl PoolConfig {
@@ -222,10 +336,11 @@ impl PoolConfig {
                 &["DB_POOL_MAX_IDLE", "MAX_IDLE_CONNS", "DB_POOL_MIN_IDLE"],
                 DEFAULT_POOL_MAX_IDLE,
             ),
-            connection_timeout: parse_duration_alias(
-                &["DB_POOL_CONNECTION_TIMEOUT"],
-                Duration::from_secs(DEFAULT_CONNECTION_TIMEOUT_SECS),
-            ),
+            // axum-only key; accepts bare seconds ("30") as well.
+            connection_timeout: env::var("DB_POOL_CONNECTION_TIMEOUT")
+                .ok()
+                .and_then(|raw| parse_duration(&raw).ok())
+                .unwrap_or(Duration::from_secs(DEFAULT_CONNECTION_TIMEOUT_SECS)),
             max_lifetime: parse_duration_alias(
                 &[
                     "DB_POOL_CONN_LIFETIME",
@@ -254,10 +369,9 @@ impl JwtConfig {
             secret: env_string("JWT_SECRET", DEFAULT_JWT_SECRET),
             expiry,
             expiry_hours,
-            refresh_token_expiry_days: parse_env(
-                "REFRESH_TOKEN_EXPIRY_DAYS",
-                DEFAULT_REFRESH_TOKEN_EXPIRY_DAYS,
-            ),
+            refresh_token_expiry: resolve_refresh_token_expiry(Duration::from_secs(
+                DEFAULT_REFRESH_TOKEN_EXPIRY_SECS,
+            )),
             refresh_token_absolute_expiry: parse_duration_alias(
                 &["REFRESH_TOKEN_ABSOLUTE_EXPIRY"],
                 Duration::from_secs(DEFAULT_REFRESH_TOKEN_ABSOLUTE_EXPIRY_SECS),
@@ -280,17 +394,17 @@ impl EmailConfig {
                 DEFAULT_FRONTEND_RESET_PASSWORD_URL,
             ),
             smtp_host: env::var("SMTP_HOST").unwrap_or_default(),
-            smtp_port: parse_env("SMTP_PORT", DEFAULT_SMTP_PORT),
+            smtp_port: u16::try_from(smtp_port()).unwrap_or(0),
             smtp_username: env::var("SMTP_USERNAME").unwrap_or_default(),
             smtp_password: env::var("SMTP_PASSWORD").unwrap_or_default(),
             smtp_use_tls: parse_bool("SMTP_TLS", false),
-            smtp_timeout: Duration::from_secs(parse_env(
+            smtp_timeout: non_negative_secs(parse_env(
                 "SMTP_TIMEOUT_SECONDS",
-                DEFAULT_SMTP_TIMEOUT_SECS,
+                DEFAULT_SMTP_TIMEOUT_SECS as i64,
             )),
-            smtp_task_timeout: Duration::from_secs(parse_env(
+            smtp_task_timeout: non_negative_secs(parse_env(
                 "SMTP_TASK_TIMEOUT_SECONDS",
-                DEFAULT_SMTP_TASK_TIMEOUT_SECS,
+                DEFAULT_SMTP_TASK_TIMEOUT_SECS as i64,
             )),
         }
     }
@@ -298,23 +412,29 @@ impl EmailConfig {
 
 impl RateLimitConfig {
     pub fn from_env() -> Self {
+        let window_secs: i64 = parse_env_alias(
+            &[
+                "HTTP_RATE_LIMIT_WINDOW_SEC",
+                "RATE_LIMITER_TTL",
+                "RATE_LIMIT_WINDOW_SECS",
+            ],
+            0,
+        );
         Self {
-            max_requests: parse_env_alias(
+            rps: parse_env_alias(
                 &[
-                    "RATE_LIMIT_MAX_REQUESTS",
                     "HTTP_RATE_LIMIT_RPS",
                     "RATE_LIMITER_MAX",
+                    "RATE_LIMIT_MAX_REQUESTS",
                 ],
-                DEFAULT_RATE_LIMIT_MAX_REQUESTS,
+                DEFAULT_RATE_LIMIT_RPS,
             ),
-            window: Duration::from_secs(parse_env_alias(
-                &[
-                    "RATE_LIMIT_WINDOW_SECS",
-                    "HTTP_RATE_LIMIT_WINDOW_SEC",
-                    "RATE_LIMITER_TTL",
-                ],
-                DEFAULT_RATE_LIMIT_WINDOW_SECS,
-            )),
+            // Echo only overrides the memory store's ExpiresIn when > 0.
+            idle_expiry: if window_secs > 0 {
+                Duration::from_secs(window_secs as u64)
+            } else {
+                Duration::from_secs(DEFAULT_RATE_LIMIT_IDLE_EXPIRY_SECS)
+            },
         }
     }
 }
@@ -324,9 +444,9 @@ impl HttpConfig {
         Self {
             trust_proxy: parse_bool_alias(&["HTTP_TRUST_PROXY", "TRUST_PROXY"], false),
             allow_origins: parse_origins(&env_string("HTTP_ALLOW_ORIGINS", "*")),
-            request_timeout: Duration::from_secs(parse_env_alias(
+            request_timeout: non_negative_secs(parse_env_alias(
                 &["HTTP_REQUEST_TIMEOUT_SECS", "REQUEST_TIMEOUT_SECS"],
-                DEFAULT_HTTP_REQUEST_TIMEOUT_SECS,
+                DEFAULT_HTTP_REQUEST_TIMEOUT_SECS as i64,
             )),
         }
     }
@@ -372,40 +492,8 @@ impl CacheConfig {
         Self {
             valkey_url: env_string_alias(&["REDIS_URL", "VALKEY_URL"], ""),
             key_prefix: env_string("CACHE_KEY_PREFIX", DEFAULT_CACHE_KEY_PREFIX),
-            ttl: Duration::from_secs(parse_env("CACHE_TTL_SECONDS", DEFAULT_CACHE_TTL_SECS)),
-            connect_timeout: Duration::from_millis(parse_env_alias(
-                &["REDIS_CONNECT_TIMEOUT_MS", "VALKEY_CONNECT_TIMEOUT_MS"],
-                DEFAULT_VALKEY_CONNECT_TIMEOUT_MS,
-            )),
-        }
-    }
-}
-
-impl QueueConfig {
-    pub fn from_env() -> Self {
-        let default_redis_url = env_string_alias(&["REDIS_URL", "VALKEY_URL"], "");
-        Self {
-            redis_url: env_string_alias(
-                &[
-                    "QUEUE_REDIS_URL",
-                    "ASYNQ_REDIS_URL",
-                    "REDIS_URL",
-                    "VALKEY_URL",
-                ],
-                &default_redis_url,
-            ),
-            connect_timeout: Duration::from_millis(parse_env_alias(
-                &[
-                    "QUEUE_REDIS_TIMEOUT_MS",
-                    "ASYNQ_REDIS_TIMEOUT_MS",
-                    "REDIS_CONNECT_TIMEOUT_MS",
-                    "VALKEY_CONNECT_TIMEOUT_MS",
-                ],
-                DEFAULT_VALKEY_CONNECT_TIMEOUT_MS,
-            )),
-            default_queue: env_string("QUEUE_DEFAULT_NAME", DEFAULT_QUEUE_DEFAULT_NAME),
-            concurrency: parse_env("QUEUE_CONCURRENCY", DEFAULT_QUEUE_CONCURRENCY),
-            max_retry: parse_env("QUEUE_MAX_RETRY", DEFAULT_QUEUE_MAX_RETRY),
+            ttl: non_negative_secs(cache_ttl_secs()),
+            connect_timeout: Duration::from_millis(cache_connect_timeout_ms().max(0) as u64),
         }
     }
 }
@@ -418,9 +506,9 @@ impl OpenRouterConfig {
             default_model: env_string("OPENROUTER_DEFAULT_MODEL", DEFAULT_OPENROUTER_DEFAULT_MODEL),
             http_referer: env_string("OPENROUTER_HTTP_REFERER", DEFAULT_OPENROUTER_HTTP_REFERER),
             title: env_string("OPENROUTER_TITLE", DEFAULT_OPENROUTER_TITLE),
-            timeout: Duration::from_secs(parse_env(
+            timeout: non_negative_secs(parse_env(
                 "OPENROUTER_TIMEOUT_SECONDS",
-                DEFAULT_OPENROUTER_TIMEOUT_SECS,
+                DEFAULT_OPENROUTER_TIMEOUT_SECS as i64,
             )),
         }
     }
@@ -462,16 +550,34 @@ impl Config {
         if self.jwt.expiry.is_zero() {
             return Err("JWT_EXPIRY (or legacy JWT_EXPIRY_HOURS) must be > 0".to_string());
         }
-        if self.jwt.refresh_token_expiry_days <= 0 {
-            return Err("REFRESH_TOKEN_EXPIRY_DAYS must be > 0".to_string());
+        if self.jwt.refresh_token_expiry.is_zero() {
+            return Err(
+                "REFRESH_TOKEN_EXPIRY (or legacy REFRESH_TOKEN_EXPIRY_DAYS) must be > 0"
+                    .to_string(),
+            );
         }
         if self.jwt.refresh_token_absolute_expiry.is_zero() {
             return Err("REFRESH_TOKEN_ABSOLUTE_EXPIRY must be > 0".to_string());
         }
+        // An absolute cap below the sliding window would silently override it.
+        if self.jwt.refresh_token_absolute_expiry < self.jwt.refresh_token_expiry {
+            return Err(
+                "REFRESH_TOKEN_ABSOLUTE_EXPIRY must be >= REFRESH_TOKEN_EXPIRY".to_string(),
+            );
+        }
         if self.database_url.is_empty() {
             return Err("DATABASE_URL is required".to_string());
         }
-        if self.email.smtp_port == 0 {
+        if self.checks.cache_ttl_secs < 0 {
+            return Err("CACHE_TTL_SECONDS must be >= 0".to_string());
+        }
+        if self.checks.cache_connect_timeout_ms < 0 {
+            return Err("REDIS_CONNECT_TIMEOUT_MS must be >= 0".to_string());
+        }
+        if self.rate_limit.rps < 0 {
+            return Err("HTTP_RATE_LIMIT_RPS must be >= 0".to_string());
+        }
+        if !(1..=65535).contains(&self.checks.smtp_port) {
             return Err("SMTP_PORT must be between 1 and 65535".to_string());
         }
         if self.email.smtp_timeout.is_zero() {
@@ -547,13 +653,120 @@ mod tests {
         assert!(parse_duration("").is_err());
     }
 
+    fn valid_config() -> Config {
+        let mut cfg = Config::from_env();
+        cfg.database_url = "postgres://localhost/test".to_string();
+        cfg.jwt.secret = "this-is-a-valid-jwt-secret-with-at-least-32-chars".to_string();
+        cfg.jwt.expiry = Duration::from_secs(900);
+        cfg.jwt.refresh_token_expiry = Duration::from_secs(72 * 3600);
+        cfg.jwt.refresh_token_absolute_expiry = Duration::from_secs(720 * 3600);
+        cfg.checks = EnvChecks {
+            cache_ttl_secs: 60,
+            cache_connect_timeout_ms: 2000,
+            smtp_port: 587,
+        };
+        cfg.rate_limit.rps = 0;
+        cfg.email.smtp_timeout = Duration::from_secs(10);
+        cfg.email.smtp_task_timeout = Duration::from_secs(30);
+        cfg
+    }
+
     #[test]
     fn test_config_validate_jwt_secret_length() {
-        let mut cfg = Config::from_env();
+        let mut cfg = valid_config();
+        assert!(cfg.validate().is_ok());
+
         cfg.jwt.secret = "too-short".to_string();
         assert!(cfg.validate().is_err());
+    }
 
-        cfg.jwt.secret = "this-is-a-valid-jwt-secret-with-at-least-32-chars".to_string();
-        assert!(cfg.validate().is_ok());
+    #[test]
+    fn test_config_validate_matches_echobackend_rules() {
+        let mut cfg = valid_config();
+        cfg.database_url.clear();
+        assert_eq!(cfg.validate().unwrap_err(), "DATABASE_URL is required");
+
+        let mut cfg = valid_config();
+        cfg.jwt.refresh_token_absolute_expiry = Duration::from_secs(3600);
+        assert_eq!(
+            cfg.validate().unwrap_err(),
+            "REFRESH_TOKEN_ABSOLUTE_EXPIRY must be >= REFRESH_TOKEN_EXPIRY"
+        );
+
+        let mut cfg = valid_config();
+        cfg.jwt.refresh_token_expiry = Duration::ZERO;
+        assert_eq!(
+            cfg.validate().unwrap_err(),
+            "REFRESH_TOKEN_EXPIRY (or legacy REFRESH_TOKEN_EXPIRY_DAYS) must be > 0"
+        );
+
+        let mut cfg = valid_config();
+        cfg.checks.cache_ttl_secs = -1;
+        assert_eq!(
+            cfg.validate().unwrap_err(),
+            "CACHE_TTL_SECONDS must be >= 0"
+        );
+
+        let mut cfg = valid_config();
+        cfg.checks.cache_connect_timeout_ms = -1;
+        assert_eq!(
+            cfg.validate().unwrap_err(),
+            "REDIS_CONNECT_TIMEOUT_MS must be >= 0"
+        );
+
+        let mut cfg = valid_config();
+        cfg.rate_limit.rps = -1;
+        assert_eq!(
+            cfg.validate().unwrap_err(),
+            "HTTP_RATE_LIMIT_RPS must be >= 0"
+        );
+
+        for port in [0, 65536, -5] {
+            let mut cfg = valid_config();
+            cfg.checks.smtp_port = port;
+            assert_eq!(
+                cfg.validate().unwrap_err(),
+                "SMTP_PORT must be between 1 and 65535"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_go_duration() {
+        assert_eq!(
+            parse_go_duration("72h").unwrap(),
+            Duration::from_secs(72 * 3600)
+        );
+        assert_eq!(
+            parse_go_duration("1h30m").unwrap(),
+            Duration::from_secs(5400)
+        );
+        assert_eq!(
+            parse_go_duration("1.5s").unwrap(),
+            Duration::from_millis(1500)
+        );
+        assert_eq!(
+            parse_go_duration("500ms").unwrap(),
+            Duration::from_millis(500)
+        );
+        assert_eq!(parse_go_duration("0").unwrap(), Duration::ZERO);
+        assert_eq!(parse_go_duration("-5m").unwrap(), Duration::ZERO);
+        // Go rejects bare numbers, days, spaces and upper-case units.
+        for raw in ["", "900", "1d", "15 m", "15M", "h", "1.2.3s"] {
+            assert!(parse_go_duration(raw).is_err(), "{raw:?} should be invalid");
+        }
+    }
+
+    #[test]
+    fn test_go_parse_bool() {
+        for raw in ["1", "t", "T", "TRUE", "true", "True"] {
+            assert_eq!(go_parse_bool(raw), Some(true));
+        }
+        for raw in ["0", "f", "F", "FALSE", "false", "False"] {
+            assert_eq!(go_parse_bool(raw), Some(false));
+        }
+        for raw in ["yes", "on", " true", "tRUE", ""] {
+            assert_eq!(go_parse_bool(raw), None);
+        }
     }
 }

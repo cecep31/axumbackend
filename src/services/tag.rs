@@ -1,4 +1,5 @@
 use crate::entities::tags;
+use crate::infra::cache;
 use crate::models::tag::{SitemapTag, Tag, TrendingTag};
 use chrono::Utc;
 use sea_orm::{
@@ -28,7 +29,8 @@ pub async fn get_tags_for_sitemap(
         FROM tags t
         INNER JOIN posts_to_tags ptt ON ptt.tag_id = t.id
         INNER JOIN posts p ON p.id = ptt.post_id
-        WHERE p.published = true
+        INNER JOIN users u ON u.id = p.created_by AND u.deleted_at IS NULL
+        WHERE p.published = true AND p.hidden_at IS NULL
         GROUP BY t.id, t.name, t.created_at
         ORDER BY t.name ASC
         LIMIT $1
@@ -89,7 +91,26 @@ pub async fn delete_tag(db: &DatabaseConnection, id: i32) -> Result<bool, DbErr>
     Ok(result.rows_affected > 0)
 }
 
+/// Redis key and TTL shared with echobackend's `GetTrendingTags`
+/// (`<prefix>:tags:trending`, a JSON array of `TrendingTag`, no limit in the key).
+const TRENDING_TAGS_CACHE_KEY: [&str; 2] = ["tags", "trending"];
+const TRENDING_TAGS_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Top tags by the engagement of their visible posts (published, not hidden
+/// by moderation, author not deleted). Cached for 30 minutes when Redis is on.
 pub async fn get_trending_tags(
+    db: &DatabaseConnection,
+    limit: i64,
+) -> Result<Vec<TrendingTag>, DbErr> {
+    if let Some(tags) = cache::read_json::<Vec<TrendingTag>>(&TRENDING_TAGS_CACHE_KEY).await {
+        return Ok(tags);
+    }
+    let tags = query_trending_tags(db, limit).await?;
+    cache::write_json(&TRENDING_TAGS_CACHE_KEY, &tags, TRENDING_TAGS_TTL).await;
+    Ok(tags)
+}
+
+async fn query_trending_tags(
     db: &DatabaseConnection,
     limit: i64,
 ) -> Result<Vec<TrendingTag>, DbErr> {
@@ -115,7 +136,7 @@ pub async fn get_trending_tags(
         INNER JOIN posts_to_tags ptt ON ptt.tag_id = t.id
         INNER JOIN posts p ON p.id = ptt.post_id
         INNER JOIN users u ON u.id = p.created_by AND u.deleted_at IS NULL
-        WHERE p.published = true
+        WHERE p.published = true AND p.hidden_at IS NULL
         GROUP BY t.id, t.name
         ORDER BY trending_score DESC, post_count DESC, t.name ASC
         LIMIT $1

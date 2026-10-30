@@ -7,6 +7,40 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
+/// echobackend `NotificationService.CreateNotification`: stores `data` as a
+/// JSON text column (an empty object or `null` is stored as NULL, like Go's
+/// `len(req.Data) > 0` check).
+pub async fn create_notification(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+    kind: &str,
+    title: &str,
+    message: Option<String>,
+    data: Option<serde_json::Value>,
+) -> Result<notifications::Model, DbErr> {
+    let data = data
+        .filter(|value| match value {
+            serde_json::Value::Null => false,
+            serde_json::Value::Object(map) => !map.is_empty(),
+            _ => true,
+        })
+        .map(|value| value.to_string());
+    let now = Utc::now();
+    notifications::ActiveModel {
+        id: Set(Uuid::now_v7()),
+        user_id: Set(user_id),
+        r#type: Set(kind.to_string()),
+        title: Set(title.to_string()),
+        message: Set(message),
+        read: Set(false),
+        data: Set(data),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+    }
+    .insert(db)
+    .await
+}
+
 pub async fn get_notifications(
     db: &DatabaseConnection,
     user_id: Uuid,

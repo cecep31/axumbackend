@@ -28,6 +28,12 @@ macro_rules! global_config {
                         .get()
                         .expect(concat!(stringify!($ty), " not initialized"))
                 }
+
+                /// Like [`Self::get`], but `None` before `init` (unit tests
+                /// that build routers without loading the config).
+                pub fn try_get() -> Option<&'static $ty> {
+                    $cell.get()
+                }
             }
         )*
     };

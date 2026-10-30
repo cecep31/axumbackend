@@ -4,7 +4,7 @@ use crate::dto::holding::{
 };
 use crate::http::auth::AuthUser;
 use crate::http::error::AppError;
-use crate::http::extract::{VJson, VPath, VQuery};
+use crate::http::extract::{PJson, VJson, VPath, VQuery};
 use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
 use crate::models::corporate_action::CorporateActionCalendarResponse;
@@ -36,7 +36,14 @@ impl From<HoldingError> for AppError {
             HoldingError::DuplicateSameMonth => {
                 AppError::BadRequest("Cannot duplicate holdings into the same month".to_string())
             }
-            HoldingError::InvalidRange => AppError::BadRequest("Invalid monthly range".to_string()),
+            HoldingError::InvalidRange => AppError::bad_request(
+                "Invalid monthly range",
+                Some(INVALID_RANGE_ERROR.to_string()),
+            ),
+            HoldingError::RangeTooLarge => AppError::bad_request(
+                "Failed to get monthly data",
+                Some("requested month/year range is too large".to_string()),
+            ),
             HoldingError::Quote(err) => {
                 tracing::error!(error = %err, "market quote fetch failed");
                 AppError::InternalServerError("Failed to sync prices".to_string())
@@ -44,6 +51,9 @@ impl From<HoldingError> for AppError {
         }
     }
 }
+
+/// echobackend `ErrHoldingInvalidRange` text.
+const INVALID_RANGE_ERROR: &str = "end month/year must be on or before start month/year";
 
 fn parse_years(raw: Option<String>) -> Vec<i32> {
     raw.unwrap_or_default()
@@ -132,10 +142,10 @@ pub async fn update_holding(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(params): VPath<HoldingPath>,
-    // Uses the plain (unvalidated) JSON extractor: echobackend's UpdateHolding
-    // handler binds the body but never calls `c.Validate(req)`, so any value
-    // (including out-of-range month/year or short currency codes) is accepted.
-    Json(req): Json<UpdateHoldingRequest>,
+    // Unvalidated, like echobackend's UpdateHolding (it binds the body but
+    // never calls `c.Validate(req)`); a body that does not bind is a 400
+    // "Invalid request format" envelope.
+    PJson(req): PJson<UpdateHoldingRequest>,
 ) -> Result<Json<ApiResponse<Vec<HoldingResponse>>>, AppError> {
     let holding = services::holding::update_holding(
         &pool,
@@ -172,10 +182,7 @@ pub async fn delete_holding(
     VPath(params): VPath<HoldingPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     services::holding::delete_holding(&pool, params.id, auth_user.id).await?;
-    Ok(Json(ApiResponse::success_with_message(
-        "Holding deleted successfully",
-        serde_json::Value::Null,
-    )))
+    Ok(Json(ApiResponse::message("Holding deleted successfully")))
 }
 
 pub async fn get_holding_types(
@@ -255,13 +262,18 @@ pub async fn get_monthly_data(
     VQuery(query): VQuery<MonthlyQuery>,
 ) -> Result<Json<ApiResponse<Vec<HoldingMonthlyDataResponse>>>, AppError> {
     let (current_month, current_year) = services::holding::default_current_month_year();
+    // echobackend `parseMonthlyQuery`: a present year must be an integer in
+    // [1990, current year + 1], otherwise the range is rejected (months stay
+    // lenient).
+    let start_year = query.start_year_bounded()?;
+    let query_end_year = query.end_year_bounded()?;
     let start_month = query.start_month().unwrap_or(current_month);
-    let start_year = query.start_year().unwrap_or(current_year);
+    let start_year = start_year.unwrap_or(current_year);
 
     // Mirrors echobackend's parseMonthlyQuery: only derive End via
     // prevNMonths(Start, 11) when *both* endMonth and endYear are omitted;
     // if only one is missing, it's filled from Start's own value.
-    let (mut end_month, mut end_year) = match (query.end_month(), query.end_year()) {
+    let (mut end_month, mut end_year) = match (query.end_month(), query_end_year) {
         (None, None) => services::holding::prev_n_months(start_month, start_year, 11),
         (None, Some(end_year)) => (start_month, end_year),
         (Some(end_month), None) => (end_month, start_year),
@@ -343,8 +355,8 @@ pub async fn get_calendar(
     VQuery(query): VQuery<CalendarQuery>,
 ) -> Result<Json<ApiResponse<CorporateActionCalendarResponse>>, AppError> {
     let now = Utc::now();
-    let month = query.month.unwrap_or_else(|| now.month() as i32);
-    let year = query.year.unwrap_or_else(|| now.year());
+    let month = query.month().unwrap_or(now.month() as i32);
+    let year = query.year().unwrap_or(now.year());
 
     let result = services::corporate_action::get_calendar(&pool, year, month).await;
     Ok(Json(ApiResponse::success_with_message(

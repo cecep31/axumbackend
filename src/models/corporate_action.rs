@@ -13,6 +13,12 @@ pub struct CorporateActionResponse {
     pub action_type: String,
     /// ISO 8601 date, e.g. `"2025-07-15"`
     pub date: String,
+    /// Cum date (`YYYY-MM-DD`), dividends only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cum_date: Option<String>,
+    /// Recording date (`YYYY-MM-DD`), dividends only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rec_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pay_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -34,14 +34,52 @@ impl From<DbErr> for CommentError {
     }
 }
 
-async fn post_exists(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbErr> {
-    // Mirrors echobackend ensurePostInteractable: a hidden post is reported as
-    // missing so engagement endpoints do not confirm that it exists.
-    Ok(posts::Entity::find_by_id(post_id)
-        .filter(posts::Column::HiddenAt.is_null())
-        .one(db)
+/// echobackend `GetPostByID` + `ensurePostInteractable`: the post, unless it
+/// is missing, hidden or written by a soft-deleted author (all reported as
+/// "post not found" so engagement endpoints do not confirm it exists).
+async fn interactable_post(
+    db: &DatabaseConnection,
+    post_id: Uuid,
+) -> Result<Option<posts::Model>, DbErr> {
+    Ok(crate::services::post::find_active_post(db, post_id)
         .await?
-        .is_some())
+        .filter(|post| post.hidden_at.is_none()))
+}
+
+/// `notifications.data` for a new comment. Keys are in alphabetical order,
+/// matching Go's map marshaling in echobackend.
+fn comment_notification_data(actor_id: Uuid, comment_id: Uuid, post_id: Uuid) -> serde_json::Value {
+    serde_json::json!({
+        "actor_id": actor_id,
+        "comment_id": comment_id,
+        "post_id": post_id,
+    })
+}
+
+/// echobackend `CreateComment`: tells the post author someone commented.
+/// Best-effort, like echobackend (`_, _ = CreateNotification(..)`): a failure
+/// is logged and never fails the comment.
+async fn notify_post_author(
+    db: &DatabaseConnection,
+    post: &posts::Model,
+    comment: &post_comments::Model,
+) {
+    if post.created_by == comment.created_by {
+        return;
+    }
+    let data = comment_notification_data(comment.created_by, comment.id, post.id);
+    if let Err(err) = crate::services::notification::create_notification(
+        db,
+        post.created_by,
+        "comment",
+        "New comment",
+        Some("Someone commented on your post".to_string()),
+        Some(data),
+    )
+    .await
+    {
+        tracing::warn!(error = %err, post_id = %post.id, "failed to create comment notification");
+    }
 }
 
 fn hydrate_comment(
@@ -66,9 +104,9 @@ pub async fn create_comment(
     created_by: Uuid,
 ) -> Result<CommentResponse, CommentError> {
     reject_spam(&text)?;
-    if !post_exists(db, post_id).await? {
+    let Some(post) = interactable_post(db, post_id).await? else {
         return Err(CommentError::PostNotFound);
-    }
+    };
 
     let now = Utc::now();
     let comment = post_comments::ActiveModel {
@@ -85,6 +123,7 @@ pub async fn create_comment(
     .await?;
 
     let users_by_id = load_comment_user_map(db, std::slice::from_ref(&comment)).await?;
+    notify_post_author(db, &post, &comment).await;
     Ok(hydrate_comment(comment, &users_by_id))
 }
 
@@ -92,7 +131,7 @@ pub async fn get_comments_by_post_id(
     db: &DatabaseConnection,
     post_id: Uuid,
 ) -> Result<Vec<CommentResponse>, CommentError> {
-    if !post_exists(db, post_id).await? {
+    if interactable_post(db, post_id).await?.is_none() {
         return Err(CommentError::PostNotFound);
     }
 
@@ -141,11 +180,14 @@ pub async fn update_comment(
     Ok(hydrate_comment(updated, &users_by_id))
 }
 
+/// Soft-deletes a comment. Only its author may delete it, unless `is_admin`
+/// (a DB-verified super admin, echobackend `DeleteComment(.., isAdmin)`).
 pub async fn delete_comment(
     db: &DatabaseConnection,
     post_id: Uuid,
     comment_id: Uuid,
     user_id: Uuid,
+    is_admin: bool,
 ) -> Result<(), CommentError> {
     let Some(comment) = post_comments::Entity::find_by_id(comment_id)
         .filter(post_comments::Column::PostId.eq(post_id))
@@ -156,7 +198,7 @@ pub async fn delete_comment(
         return Err(CommentError::CommentNotFound);
     };
 
-    if comment.created_by != user_id {
+    if !is_admin && comment.created_by != user_id {
         return Err(CommentError::NotOwner);
     }
 
@@ -165,4 +207,22 @@ pub async fn delete_comment(
     active.updated_at = Set(Some(Utc::now().into()));
     active.update(db).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notification_data_matches_echobackend_json() {
+        let actor = Uuid::parse_str("0190a000-0000-7000-8000-000000000001").unwrap();
+        let comment = Uuid::parse_str("0190a000-0000-7000-8000-000000000002").unwrap();
+        let post = Uuid::parse_str("0190a000-0000-7000-8000-000000000003").unwrap();
+        assert_eq!(
+            comment_notification_data(actor, comment, post).to_string(),
+            "{\"actor_id\":\"0190a000-0000-7000-8000-000000000001\",\
+             \"comment_id\":\"0190a000-0000-7000-8000-000000000002\",\
+             \"post_id\":\"0190a000-0000-7000-8000-000000000003\"}"
+        );
+    }
 }

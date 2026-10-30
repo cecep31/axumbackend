@@ -1,4 +1,4 @@
-use crate::entities::{post_views, posts};
+use crate::entities::post_views;
 use crate::models::post_view::{
     MyPostPerformance, MyPostsAnalyticsResponse, MyPostsAnalyticsSummary, MyPostsLikesByMonthPoint,
     MyPostsLikesByMonthResponse, MyPostsViewTrendPoint, PostViewResponse, PostViewStats,
@@ -16,6 +16,38 @@ use uuid::Uuid;
 pub enum PostViewError {
     Db(DbErr),
     PostNotFound,
+    /// The requester is neither the post author nor a super admin
+    /// (echobackend `ErrNotAuthor`).
+    NotAuthor,
+    /// echobackend `ErrDateRangeTooLarge`.
+    DateRangeTooLarge,
+}
+
+/// echobackend `maxAnalyticsRange`: `view_trend` has one point per day, so
+/// the analytics window is bounded.
+const MAX_ANALYTICS_RANGE: chrono::Duration = chrono::Duration::days(366);
+
+/// echobackend `GetMyPostsAnalytics` window, compared on full timestamps:
+/// `start` is the parsed date (UTC midnight) or `now - 30d`, `end` the parsed
+/// date or `now`; reversed bounds are swapped, and a span over 366 days is
+/// rejected. Returns the `(start, end)` calendar days.
+fn analytics_window(
+    start_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+    now: chrono::DateTime<Utc>,
+) -> Result<(NaiveDate, NaiveDate), PostViewError> {
+    let midnight = |d: NaiveDate| d.and_hms_opt(0, 0, 0).expect("valid time").and_utc();
+    let mut start = start_date
+        .map(midnight)
+        .unwrap_or(now - chrono::Duration::days(30));
+    let mut end = end_date.map(midnight).unwrap_or(now);
+    if start > end {
+        std::mem::swap(&mut start, &mut end);
+    }
+    if end - start > MAX_ANALYTICS_RANGE {
+        return Err(PostViewError::DateRangeTooLarge);
+    }
+    Ok((start.date_naive(), end.date_naive()))
 }
 
 impl From<DbErr> for PostViewError {
@@ -25,13 +57,10 @@ impl From<DbErr> for PostViewError {
 }
 
 async fn post_exists(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbErr> {
-    // Mirrors echobackend ensurePostInteractable: a hidden post is reported as
-    // missing so engagement endpoints do not confirm that it exists.
-    Ok(posts::Entity::find_by_id(post_id)
-        .filter(posts::Column::HiddenAt.is_null())
-        .one(db)
-        .await?
-        .is_some())
+    // Mirrors echobackend GetPostByID + ensurePostInteractable: a hidden post,
+    // or one whose author is soft-deleted, is reported as missing so
+    // engagement endpoints do not confirm that it exists.
+    crate::services::post::interactable_post_exists(db, post_id).await
 }
 
 async fn has_user_viewed(
@@ -48,6 +77,12 @@ async fn has_user_viewed(
         .is_some())
 }
 
+/// TTL of echobackend's `post_view:<postID>:<userID>` "already viewed" marker.
+const VIEWED_MARKER_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Records a view. Mirrors echobackend `RecordView`: for a logged-in user the
+/// Redis marker `post_view:<post>:<user>` (JSON `true`, 24h) short-circuits
+/// repeat views with no DB access; it is set once a view is found or stored.
 pub async fn record_view(
     db: &DatabaseConnection,
     post_id: Uuid,
@@ -55,6 +90,17 @@ pub async fn record_view(
     ip_address: Option<String>,
     user_agent: Option<String>,
 ) -> Result<(), PostViewError> {
+    let post_key = post_id.to_string();
+    let user_key = user_id.map(|id| id.to_string());
+    let marker = user_key
+        .as_deref()
+        .map(|user| ["post_view", post_key.as_str(), user]);
+    if let Some(marker) = &marker
+        && crate::infra::cache::read_json::<bool>(marker).await == Some(true)
+    {
+        return Ok(());
+    }
+
     if !post_exists(db, post_id).await? {
         return Err(PostViewError::PostNotFound);
     }
@@ -62,6 +108,9 @@ pub async fn record_view(
     if let Some(user_id) = user_id
         && has_user_viewed(db, post_id, user_id).await?
     {
+        if let Some(marker) = &marker {
+            crate::infra::cache::write_json(marker, &true, VIEWED_MARKER_TTL).await;
+        }
         return Ok(());
     }
 
@@ -79,18 +128,34 @@ pub async fn record_view(
     .insert(db)
     .await?;
 
+    if let Some(marker) = &marker {
+        crate::infra::cache::write_json(marker, &true, VIEWED_MARKER_TTL).await;
+    }
     Ok(())
 }
 
+/// Lists the raw view records of a post. Mirrors echobackend
+/// `GetViewsByPostID`: only the post author or a super admin (`is_admin`,
+/// DB-verified by the caller) may see who viewed it; `limit` is clamped to
+/// `1..=100` (default 10) and `offset` to `>= 0`.
 pub async fn get_views_by_post_id(
     db: &DatabaseConnection,
     post_id: Uuid,
+    requester_id: Uuid,
+    is_admin: bool,
     limit: i64,
     offset: i64,
 ) -> Result<(Vec<PostViewResponse>, i64), PostViewError> {
-    if !post_exists(db, post_id).await? {
+    // echobackend GetPostByID: hidden posts are allowed, a soft-deleted
+    // author's post is missing.
+    let Some(post) = crate::services::post::find_active_post(db, post_id).await? else {
         return Err(PostViewError::PostNotFound);
+    };
+    if !is_admin && post.created_by != requester_id {
+        return Err(PostViewError::NotAuthor);
     }
+    let limit = if limit <= 0 { 10 } else { limit.min(100) };
+    let offset = offset.max(0);
 
     let query = post_views::Entity::find()
         .filter(post_views::Column::PostId.eq(post_id))
@@ -99,8 +164,8 @@ pub async fn get_views_by_post_id(
     let total = query.clone().count(db).await? as i64;
     let views = query
         .order_by_desc(post_views::Column::CreatedAt)
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
+        .limit(limit as u64)
+        .offset(offset as u64)
         .all(db)
         .await?
         .into_iter()
@@ -110,14 +175,12 @@ pub async fn get_views_by_post_id(
     Ok((views, total))
 }
 
+/// Like echobackend `GetViewStats`, the post itself is not looked up: a
+/// missing or hidden post simply has zero views.
 pub async fn get_view_stats(
     db: &DatabaseConnection,
     post_id: Uuid,
 ) -> Result<PostViewStats, PostViewError> {
-    if !post_exists(db, post_id).await? {
-        return Err(PostViewError::PostNotFound);
-    }
-
     #[derive(FromQueryResult)]
     struct ViewStatsRow {
         total_views: i64,
@@ -156,15 +219,12 @@ pub async fn get_view_stats(
     })
 }
 
+/// echobackend `HasUserViewedPost`: no post lookup (hidden posts included).
 pub async fn has_user_viewed_post(
     db: &DatabaseConnection,
     post_id: Uuid,
     user_id: Uuid,
 ) -> Result<ViewStatusResponse, PostViewError> {
-    if !post_exists(db, post_id).await? {
-        return Err(PostViewError::PostNotFound);
-    }
-
     Ok(ViewStatusResponse {
         has_viewed: has_user_viewed(db, post_id, user_id).await?,
     })
@@ -178,13 +238,8 @@ pub async fn get_my_posts_analytics(
     user_id: Uuid,
     start_date: Option<NaiveDate>,
     end_date: Option<NaiveDate>,
-) -> Result<MyPostsAnalyticsResponse, DbErr> {
-    let today = Utc::now().date_naive();
-    let mut start = start_date.unwrap_or_else(|| today - chrono::Duration::days(30));
-    let mut end = end_date.unwrap_or(today);
-    if start > end {
-        std::mem::swap(&mut start, &mut end);
-    }
+) -> Result<MyPostsAnalyticsResponse, PostViewError> {
+    let (start, end) = analytics_window(start_date, end_date, Utc::now())?;
 
     #[derive(FromQueryResult)]
     struct SummaryRow {
@@ -393,4 +448,46 @@ fn shift_months(first_of_month: NaiveDate, delta: i32) -> NaiveDate {
     let total = first_of_month.year() * 12 + (first_of_month.month() as i32 - 1) + delta;
     NaiveDate::from_ymd_opt(total.div_euclid(12), (total.rem_euclid(12) + 1) as u32, 1)
         .expect("a valid month always exists")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    fn now() -> chrono::DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn analytics_window_defaults_and_swaps() {
+        assert_eq!(
+            analytics_window(None, None, now()).unwrap(),
+            (date(2026, 9, 30), date(2026, 10, 30))
+        );
+        assert_eq!(
+            analytics_window(Some(date(2026, 10, 10)), Some(date(2026, 10, 1)), now()).unwrap(),
+            (date(2026, 10, 1), date(2026, 10, 10))
+        );
+    }
+
+    #[test]
+    fn analytics_window_caps_at_366_days() {
+        // exactly 366 days between midnights is allowed
+        assert!(analytics_window(Some(date(2025, 1, 1)), Some(date(2026, 1, 2)), now()).is_ok());
+        assert!(matches!(
+            analytics_window(Some(date(2025, 1, 1)), Some(date(2026, 1, 3)), now()),
+            Err(PostViewError::DateRangeTooLarge)
+        ));
+        // 366 days back plus the time of day of the default `now` end
+        assert!(matches!(
+            analytics_window(Some(date(2025, 10, 29)), None, now()),
+            Err(PostViewError::DateRangeTooLarge)
+        ));
+    }
 }

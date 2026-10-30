@@ -32,7 +32,9 @@ pub struct AuthActivityLogResponse {
     pub user_agent: Option<String>,
     pub status: String,
     pub error_message: Option<String>,
-    pub metadata: Option<serde_json::Value>,
+    /// The jsonb column as JSON text (echobackend scans it into `*string`),
+    /// e.g. `"{\"provider\": \"github\"}"`, or null.
+    pub metadata: Option<String>,
     pub created_at: chrono::DateTime<Utc>,
 }
 
@@ -56,6 +58,9 @@ pub struct ProfileResponse {
 pub enum AuthError {
     Db(DbErr),
     UserExists,
+    /// The authenticated user no longer exists or is soft-deleted
+    /// (echobackend `ErrUserNotFound`).
+    UserNotFound,
     InvalidCredentials,
     InvalidToken,
     TokenExpired,

@@ -1,6 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+/// Also the cached JSON shape under `exchange-rate:<FROM>:<TO>` (shared with
+/// echobackend's `dto.ExchangeRateResponse`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExchangeRateResponse {
     pub from: String,
     pub to: String,

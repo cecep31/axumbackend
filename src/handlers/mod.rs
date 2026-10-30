@@ -23,7 +23,11 @@ use tower_http::{
 };
 use tracing::Level;
 
-pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<AppState> {
+/// Builds the router. Layer order matches echobackend's `InitMiddleware`
+/// (outermost first): request logging (Trace), CORS, security headers, body
+/// limit, global rate limit. CORS therefore answers preflights before the
+/// limiter and decorates 413/429 responses.
+pub fn create_router(limiter: Option<rate_limit::TokenBucketLimiter>) -> Router<AppState> {
     let http_config = HttpConfig::get();
 
     let api_routes = Router::new()
@@ -44,10 +48,21 @@ pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<AppStat
         ));
 
     // Streaming (SSE) routes stay outside the request timeout.
-    let router = Router::new()
+    let mut router = Router::new()
         .merge(api_routes)
         .merge(chat::routes())
         .merge(guild::stream_routes())
+        .fallback(mw::route_not_found)
+        .method_not_allowed_fallback(mw::method_not_allowed);
+
+    if let Some(limiter) = limiter {
+        router = router.layer(middleware::from_fn_with_state(
+            limiter,
+            rate_limit::global_rate_limit,
+        ));
+    }
+
+    router
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn(mw::security_headers))
         .layer(mw::cors(http_config))
@@ -57,14 +72,31 @@ pub fn create_router(limiter: Option<rate_limit::RateLimiter>) -> Router<AppStat
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
-        );
+        )
+}
 
-    if let Some(limiter) = limiter {
-        router.layer(middleware::from_fn_with_state(
-            limiter,
-            rate_limit::rate_limit,
-        ))
-    } else {
-        router
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Building the full router used to panic in tower-http's CORS checks as
+    /// soon as `HTTP_ALLOW_ORIGINS` listed explicit origins; this also catches
+    /// conflicting fallbacks between merged routers.
+    #[test]
+    fn router_builds_with_explicit_origins_and_global_limiter() {
+        if HttpConfig::try_get().is_none() {
+            HttpConfig::init(HttpConfig {
+                trust_proxy: true,
+                allow_origins: vec![
+                    "https://pilput.net".to_string(),
+                    "https://admin.pilput.net".to_string(),
+                ],
+                request_timeout: std::time::Duration::from_secs(30),
+            });
+        }
+        let limiter =
+            rate_limit::TokenBucketLimiter::new(10, std::time::Duration::from_secs(180), true);
+        let _router = create_router(Some(limiter));
+        let _router = create_router(None);
     }
 }

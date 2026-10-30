@@ -4,8 +4,11 @@ use super::{
 use crate::models::holding::*;
 use chrono::{Datelike, Utc};
 use sea_orm::{DatabaseConnection, DbBackend, DbErr, FromQueryResult, Statement};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
+
+/// echobackend `maxMonthlyRangeMonths` (20 years).
+const MAX_MONTHLY_RANGE_MONTHS: i32 = 240;
 
 async fn summary_values(
     db: &DatabaseConnection,
@@ -219,7 +222,8 @@ fn compare_breakdown(
         .into_iter()
         .map(|item| (item.name.clone(), item))
         .collect();
-    let names: HashSet<String> = from_map.keys().chain(to_map.keys()).cloned().collect();
+    // Sorted byte-wise like echobackend's `sort.Strings`.
+    let names: BTreeSet<String> = from_map.keys().chain(to_map.keys()).cloned().collect();
     names
         .into_iter()
         .map(|name| {
@@ -312,6 +316,12 @@ pub async fn monthly_data(
     // the loop never terminates.
     if end_year > start_year || (end_year == start_year && end_month > start_month) {
         return Err(HoldingError::InvalidRange);
+    }
+
+    // echobackend `maxMonthlyRangeMonths`: cap the month-by-month walk.
+    let span_months = (start_year - end_year) * 12 + (start_month - end_month);
+    if span_months > MAX_MONTHLY_RANGE_MONTHS {
+        return Err(HoldingError::RangeTooLarge);
     }
 
     #[derive(FromQueryResult)]

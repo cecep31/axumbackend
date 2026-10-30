@@ -1,9 +1,9 @@
 use crate::entities::{post_comments, posts, users};
 use crate::models::stats::*;
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait,
-    FromQueryResult, PaginatorTrait, QueryFilter, Statement,
+    FromQueryResult, PaginatorTrait, QueryFilter, Statement, Value,
 };
 use uuid::Uuid;
 
@@ -13,8 +13,48 @@ pub struct DateRange<'a> {
     pub end_date: Option<&'a str>,
 }
 
+/// `YYYY-MM-DD`, trimmed. Empty, whitespace-only or unparsable values are
+/// absent: echobackend skips `""` filters, and a value Postgres would reject
+/// is never spliced into SQL (dates are only ever bound parameters).
 fn parse_date(value: Option<&str>) -> Option<NaiveDate> {
-    value.and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
+    value.and_then(|value| NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d").ok())
+}
+
+/// UTC midnight of `date`, like Go's `time.Parse("2006-01-02", ..)`.
+fn midnight_utc(date: NaiveDate) -> DateTime<Utc> {
+    date.and_hms_opt(0, 0, 0)
+        .expect("midnight is a valid time")
+        .and_utc()
+}
+
+/// `" AND DATE(created_at) >= $n AND DATE(created_at) <= $m"` for the parsed
+/// bounds of `range`, pushing the bound values onto `values`.
+fn date_bounds_clause(range: DateRange<'_>, values: &mut Vec<Value>) -> String {
+    let mut clause = String::new();
+    if let Some(start) = parse_date(range.start_date) {
+        values.push(start.into());
+        clause.push_str(&format!(" AND DATE(created_at) >= ${}", values.len()));
+    }
+    if let Some(end) = parse_date(range.end_date) {
+        values.push(end.into());
+        clause.push_str(&format!(" AND DATE(created_at) <= ${}", values.len()));
+    }
+    clause
+}
+
+/// Bounds of the engagement "previous period" (echobackend
+/// `GetEngagementMetrics`), on full timestamps: `now-60d..now-30d` by
+/// default; with a parsable `start_date`, the window of the same length
+/// right before it (`end` is `end_date` midnight, or `now`).
+fn previous_period(range: DateRange<'_>, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
+    match parse_date(range.start_date).map(midnight_utc) {
+        Some(start) => {
+            let end = parse_date(range.end_date).map(midnight_utc).unwrap_or(now);
+            let duration = end - start;
+            (start - duration, start)
+        }
+        None => (now - Duration::days(60), now - Duration::days(30)),
+    }
 }
 
 fn round2(value: f64) -> f64 {
@@ -22,8 +62,20 @@ fn round2(value: f64) -> f64 {
 }
 
 async fn scalar_i64(db: &DatabaseConnection, sql: &str) -> Result<i64, DbErr> {
+    scalar_i64_with(db, sql, Vec::new()).await
+}
+
+async fn scalar_i64_with(
+    db: &DatabaseConnection,
+    sql: &str,
+    values: Vec<Value>,
+) -> Result<i64, DbErr> {
     let Some(row) = db
-        .query_one_raw(Statement::from_string(DbBackend::Postgres, sql.to_string()))
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            values,
+        ))
         .await?
     else {
         return Ok(0);
@@ -47,21 +99,18 @@ pub async fn user_stats(
         total_likes: i64,
     }
 
-    let total_users = users::Entity::find().count(db).await? as i64;
-    let start_clause = range
-        .start_date
-        .map(|v| format!(" AND DATE(created_at) >= '{}'", v))
-        .unwrap_or_default();
-    let end_clause = range
-        .end_date
-        .map(|v| format!(" AND DATE(created_at) <= '{}'", v))
-        .unwrap_or_default();
-    let new_users_this_period = scalar_i64(
+    // echobackend counts through `Model(&model.User{})`, whose soft-delete
+    // scope adds `deleted_at IS NULL` to every user count.
+    let total_users = users::Entity::find()
+        .filter(users::Column::DeletedAt.is_null())
+        .count(db)
+        .await? as i64;
+    let mut values = Vec::new();
+    let bounds = date_bounds_clause(range, &mut values);
+    let new_users_this_period = scalar_i64_with(
         db,
-        &format!(
-            "SELECT COUNT(*)::bigint AS value FROM users WHERE 1=1{}{}",
-            start_clause, end_clause
-        ),
+        &format!("SELECT COUNT(*)::bigint AS value FROM users WHERE deleted_at IS NULL{bounds}"),
+        values,
     )
     .await?;
     let active_users = scalar_i64(
@@ -71,29 +120,23 @@ pub async fn user_stats(
     .await?;
     let today = Utc::now().date_naive();
     let week_ago = today - Duration::days(7);
-    let new_users_today = scalar_i64(
+    let new_users_today = scalar_i64_with(
         db,
-        &format!(
-            "SELECT COUNT(*)::bigint AS value FROM users WHERE DATE(created_at) >= '{}'",
-            today
-        ),
+        "SELECT COUNT(*)::bigint AS value FROM users WHERE deleted_at IS NULL AND DATE(created_at) >= $1",
+        vec![today.into()],
     )
     .await?;
-    let active_users_this_week = scalar_i64(
+    let active_users_this_week = scalar_i64_with(
         db,
-        &format!(
-            "SELECT COUNT(DISTINCT user_id)::bigint AS value FROM post_views WHERE user_id IS NOT NULL AND deleted_at IS NULL AND DATE(created_at) >= '{}'",
-            week_ago
-        ),
+        "SELECT COUNT(DISTINCT user_id)::bigint AS value FROM post_views WHERE user_id IS NOT NULL AND deleted_at IS NULL AND DATE(created_at) >= $1",
+        vec![week_ago.into()],
     )
     .await?;
 
-    let rows = ContributorRow::find_by_statement(Statement::from_string(
+    let rows = ContributorRow::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        format!(
-            "SELECT users.id, users.username, users.first_name, users.last_name, COUNT(posts.id)::bigint AS post_count, COALESCE(SUM(posts.view_count), 0)::bigint AS total_views, COALESCE(SUM(posts.like_count), 0)::bigint AS total_likes FROM users LEFT JOIN posts ON users.id = posts.created_by WHERE users.deleted_at IS NULL GROUP BY users.id, users.username, users.first_name, users.last_name ORDER BY COUNT(posts.id) DESC LIMIT {}",
-            limit
-        ),
+        "SELECT users.id, users.username, users.first_name, users.last_name, COUNT(posts.id)::bigint AS post_count, COALESCE(SUM(posts.view_count), 0)::bigint AS total_views, COALESCE(SUM(posts.like_count), 0)::bigint AS total_likes FROM users LEFT JOIN posts ON users.id = posts.created_by WHERE users.deleted_at IS NULL GROUP BY users.id, users.username, users.first_name, users.last_name ORDER BY COUNT(posts.id) DESC LIMIT $1",
+        vec![limit.into()],
     ))
     .all(db)
     .await?;
@@ -137,12 +180,12 @@ async fn user_growth_trend(
     let end = parse_date(range.end_date).unwrap_or_else(|| Utc::now().date_naive());
     let start = parse_date(range.start_date)
         .unwrap_or_else(|| Utc::now().date_naive() - Duration::days(30));
-    let rows = DayCount::find_by_statement(Statement::from_string(
+    // Both the per-day counts and the cumulative baseline skip soft-deleted
+    // users (echobackend `GetUserGrowthTrendData`).
+    let rows = DayCount::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        format!(
-            "SELECT DATE(created_at)::text AS date, COUNT(*)::bigint AS count FROM users WHERE DATE(created_at) >= '{}' AND DATE(created_at) <= '{}' GROUP BY DATE(created_at) ORDER BY DATE(created_at) ASC",
-            start, end
-        ),
+        "SELECT DATE(created_at)::text AS date, COUNT(*)::bigint AS count FROM users WHERE deleted_at IS NULL AND DATE(created_at) >= $1 AND DATE(created_at) <= $2 GROUP BY DATE(created_at) ORDER BY DATE(created_at) ASC",
+        vec![start.into(), end.into()],
     ))
     .all(db)
     .await?;
@@ -150,12 +193,10 @@ async fn user_growth_trend(
     for row in rows {
         counts.insert(row.date, row.count);
     }
-    let mut cumulative = scalar_i64(
+    let mut cumulative = scalar_i64_with(
         db,
-        &format!(
-            "SELECT COUNT(*)::bigint AS value FROM users WHERE DATE(created_at) < '{}'",
-            start
-        ),
+        "SELECT COUNT(*)::bigint AS value FROM users WHERE deleted_at IS NULL AND DATE(created_at) < $1",
+        vec![start.into()],
     )
     .await?;
     let mut result = Vec::new();
@@ -178,28 +219,32 @@ pub async fn engagement(
     db: &DatabaseConnection,
     range: DateRange<'_>,
 ) -> Result<EngagementMetricsResponse, DbErr> {
-    let start_clause = range
-        .start_date
-        .map(|v| format!(" AND created_at >= '{}'", v))
-        .unwrap_or_default();
-    let end_clause = range
-        .end_date
-        .map(|v| format!(" AND created_at <= ('{}'::date + INTERVAL '1 day')", v))
-        .unwrap_or_default();
-    let current_likes = scalar_i64(
+    // echobackend `GetEngagementCounts`: `created_at >= startDate` and, when
+    // `endDate` parses, `created_at <= endDate + 24h` (the whole end day).
+    // Both bounds are bound parameters, never spliced into the SQL.
+    let mut values: Vec<Value> = Vec::new();
+    let mut bounds = String::new();
+    if let Some(start) = parse_date(range.start_date) {
+        values.push(start.into());
+        bounds.push_str(&format!(" AND created_at >= ${}", values.len()));
+    }
+    if let Some(end) = parse_date(range.end_date) {
+        values.push((midnight_utc(end) + Duration::hours(24)).into());
+        bounds.push_str(&format!(" AND created_at <= ${}", values.len()));
+    }
+    let current_likes = scalar_i64_with(
         db,
-        &format!(
-            "SELECT COUNT(*)::bigint AS value FROM post_likes WHERE 1=1{}{}",
-            start_clause, end_clause
-        ),
+        &format!("SELECT COUNT(*)::bigint AS value FROM post_likes WHERE 1=1{bounds}"),
+        values.clone(),
     )
     .await?;
-    let current_comments = scalar_i64(
+    // `Model(&model.PostComment{})` carries the soft-delete scope.
+    let current_comments = scalar_i64_with(
         db,
         &format!(
-            "SELECT COUNT(*)::bigint AS value FROM post_comments WHERE 1=1{}{}",
-            start_clause, end_clause
+            "SELECT COUNT(*)::bigint AS value FROM post_comments WHERE deleted_at IS NULL{bounds}"
         ),
+        values,
     )
     .await?;
     let total_posts = posts::Entity::find()
@@ -211,27 +256,11 @@ pub async fn engagement(
         "SELECT COALESCE(SUM(view_count), 0)::bigint AS value FROM posts WHERE published = true",
     )
     .await?;
-    // Mirrors echobackend's GetEngagementMetrics: when `start_date` is given,
-    // the previous period is derived dynamically as the window immediately
-    // preceding it with the same duration; otherwise it falls back to the
-    // fixed now-60d..now-30d window.
-    let (prev_start, prev_end) = match parse_date(range.start_date) {
-        Some(start_date) => {
-            let end_date = parse_date(range.end_date).unwrap_or_else(|| Utc::now().date_naive());
-            let duration = end_date - start_date;
-            (start_date - duration, start_date)
-        }
-        None => (
-            Utc::now().date_naive() - Duration::days(60),
-            Utc::now().date_naive() - Duration::days(30),
-        ),
-    };
-    let previous_likes = scalar_i64(
+    let (prev_start, prev_end) = previous_period(range, Utc::now());
+    let previous_likes = scalar_i64_with(
         db,
-        &format!(
-            "SELECT COUNT(*)::bigint AS value FROM post_likes WHERE created_at >= '{}' AND created_at <= '{}'",
-            prev_start, prev_end
-        ),
+        "SELECT COUNT(*)::bigint AS value FROM post_likes WHERE created_at >= $1 AND created_at <= $2",
+        vec![prev_start.into(), prev_end.into()],
     )
     .await?;
     let change_percent = if previous_likes > 0 {
@@ -286,24 +315,16 @@ pub async fn post_stats(
         created_at: Option<String>,
     }
 
-    let start_clause = range
-        .start_date
-        .map(|v| format!(" AND DATE(created_at) >= '{}'", v))
-        .unwrap_or_default();
-    let end_clause = range
-        .end_date
-        .map(|v| format!(" AND DATE(created_at) <= '{}'", v))
-        .unwrap_or_default();
     let total_posts = posts::Entity::find()
         .filter(posts::Column::Published.eq(true))
         .count(db)
         .await? as i64;
-    let new_posts_this_period = scalar_i64(
+    let mut values = Vec::new();
+    let bounds = date_bounds_clause(range, &mut values);
+    let new_posts_this_period = scalar_i64_with(
         db,
-        &format!(
-            "SELECT COUNT(*)::bigint AS value FROM posts WHERE published = true{}{}",
-            start_clause, end_clause
-        ),
+        &format!("SELECT COUNT(*)::bigint AS value FROM posts WHERE published = true{bounds}"),
+        values,
     )
     .await?;
     let total_views = scalar_i64(
@@ -316,30 +337,38 @@ pub async fn post_stats(
         "SELECT COALESCE(SUM(like_count), 0)::bigint AS value FROM posts WHERE published = true",
     )
     .await?;
-    let total_comments = post_comments::Entity::find().count(db).await? as i64;
+    // `Model(&model.PostComment{})`: soft-deleted comments are not counted.
+    let total_comments = post_comments::Entity::find()
+        .filter(post_comments::Column::DeletedAt.is_null())
+        .count(db)
+        .await? as i64;
     let today = Utc::now().date_naive();
-    let new_posts_today = scalar_i64(
+    let new_posts_today = scalar_i64_with(
         db,
-        &format!(
-            "SELECT COUNT(*)::bigint AS value FROM posts WHERE published = true AND DATE(created_at) >= '{}'",
-            today
-        ),
+        "SELECT COUNT(*)::bigint AS value FROM posts WHERE published = true AND DATE(created_at) >= $1",
+        vec![today.into()],
     )
     .await?;
-    let tag_join = if tag_id.is_some() {
-        " INNER JOIN posts_to_tags filter_tags ON posts.id = filter_tags.post_id"
-    } else {
-        ""
+    let mut values: Vec<Value> = vec![limit.into()];
+    let (tag_join, tag_where) = match tag_id {
+        Some(id) => {
+            values.push(id.into());
+            (
+                " INNER JOIN posts_to_tags filter_tags ON posts.id = filter_tags.post_id",
+                " AND filter_tags.tag_id = $2",
+            )
+        }
+        None => ("", ""),
     };
-    let tag_where = tag_id
-        .map(|id| format!(" AND filter_tags.tag_id = {}", id))
-        .unwrap_or_default();
-    let rows = PostRow::find_by_statement(Statement::from_string(
+    // echobackend `GetTopPosts`: authors must not be soft-deleted; the
+    // per-post comment count is unscoped (`Table("post_comments")`), and
+    // `created_at` is RFC 3339 like Go's `time.Time` scanned into a string.
+    let rows = PostRow::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
         format!(
-            "SELECT posts.id, posts.title, posts.slug, COALESCE(posts.view_count, 0)::bigint AS views, COALESCE(posts.like_count, 0)::bigint AS likes, COUNT(post_comments.id)::bigint AS comments, users.id AS author_id, users.username AS author_username, users.first_name AS author_first_name, users.last_name AS author_last_name, posts.created_at::text AS created_at FROM posts INNER JOIN users ON posts.created_by = users.id LEFT JOIN post_comments ON post_comments.post_id = posts.id{} WHERE posts.published = true{} GROUP BY posts.id, posts.title, posts.slug, posts.view_count, posts.like_count, users.id, users.username, users.first_name, users.last_name, posts.created_at ORDER BY COALESCE(posts.view_count, 0) DESC LIMIT {}",
-            tag_join, tag_where, limit
+            "SELECT posts.id, posts.title, posts.slug, COALESCE(posts.view_count, 0)::bigint AS views, COALESCE(posts.like_count, 0)::bigint AS likes, COUNT(post_comments.id)::bigint AS comments, users.id AS author_id, users.username AS author_username, users.first_name AS author_first_name, users.last_name AS author_last_name, to_char(posts.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at FROM posts INNER JOIN users ON posts.created_by = users.id AND users.deleted_at IS NULL LEFT JOIN post_comments ON post_comments.post_id = posts.id{tag_join} WHERE posts.published = true{tag_where} GROUP BY posts.id, posts.title, posts.slug, posts.view_count, posts.like_count, users.id, users.username, users.first_name, users.last_name, posts.created_at ORDER BY COALESCE(posts.view_count, 0) DESC LIMIT $1"
         ),
+        values,
     ))
     .all(db)
     .await?;
@@ -396,12 +425,10 @@ pub async fn tag_stats(db: &DatabaseConnection, limit: i64) -> Result<Vec<TagPer
         total_views: i64,
         total_likes: i64,
     }
-    let rows = TagRow::find_by_statement(Statement::from_string(
+    let rows = TagRow::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        format!(
-            "SELECT tags.id, tags.name, COUNT(posts_to_tags.post_id)::bigint AS post_count, COALESCE(SUM(posts.view_count), 0)::bigint AS total_views, COALESCE(SUM(posts.like_count), 0)::bigint AS total_likes FROM tags INNER JOIN posts_to_tags ON tags.id = posts_to_tags.tag_id INNER JOIN posts ON posts_to_tags.post_id = posts.id WHERE posts.published = true GROUP BY tags.id, tags.name ORDER BY COUNT(posts_to_tags.post_id) DESC LIMIT {}",
-            limit
-        ),
+        "SELECT tags.id, tags.name, COUNT(posts_to_tags.post_id)::bigint AS post_count, COALESCE(SUM(posts.view_count), 0)::bigint AS total_views, COALESCE(SUM(posts.like_count), 0)::bigint AS total_likes FROM tags INNER JOIN posts_to_tags ON tags.id = posts_to_tags.tag_id INNER JOIN posts ON posts_to_tags.post_id = posts.id WHERE posts.published = true GROUP BY tags.id, tags.name ORDER BY COUNT(posts_to_tags.post_id) DESC LIMIT $1",
+        vec![limit.into()],
     ))
     .all(db)
     .await?;
@@ -415,4 +442,73 @@ pub async fn tag_stats(db: &DatabaseConnection, limit: i64) -> Result<Vec<TagPer
             total_likes: row.total_likes,
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn range<'a>(start: Option<&'a str>, end: Option<&'a str>) -> DateRange<'a> {
+        DateRange {
+            start_date: start,
+            end_date: end,
+        }
+    }
+
+    #[test]
+    fn parse_date_treats_empty_and_garbage_as_absent() {
+        assert_eq!(parse_date(None), None);
+        assert_eq!(parse_date(Some("")), None);
+        assert_eq!(parse_date(Some("   ")), None);
+        assert_eq!(parse_date(Some("2026-01-01' OR 1=1 --")), None);
+        assert_eq!(
+            parse_date(Some(" 2026-01-02 ")),
+            NaiveDate::from_ymd_opt(2026, 1, 2)
+        );
+    }
+
+    #[test]
+    fn date_bounds_are_bound_parameters() {
+        let mut values = Vec::new();
+        let clause = date_bounds_clause(
+            range(Some("2026-01-01"), Some("x'); DROP TABLE users; --")),
+            &mut values,
+        );
+        assert_eq!(clause, " AND DATE(created_at) >= $1");
+        assert_eq!(values.len(), 1);
+
+        let mut values = Vec::new();
+        let clause = date_bounds_clause(range(Some(""), Some("2026-02-01")), &mut values);
+        assert_eq!(clause, " AND DATE(created_at) <= $1");
+        assert_eq!(values.len(), 1);
+
+        let mut values = Vec::new();
+        let clause = date_bounds_clause(range(Some("2026-01-01"), Some("2026-02-01")), &mut values);
+        assert_eq!(
+            clause,
+            " AND DATE(created_at) >= $1 AND DATE(created_at) <= $2"
+        );
+        assert_eq!(values.len(), 2);
+    }
+
+    #[test]
+    fn previous_period_keeps_time_of_day() {
+        let now = DateTime::parse_from_rfc3339("2026-10-30T15:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (start, end) = previous_period(range(None, None), now);
+        assert_eq!(start, now - Duration::days(60));
+        assert_eq!(end, now - Duration::days(30));
+
+        // start parses, end defaults to now: duration carries the fraction.
+        let (start, end) = previous_period(range(Some("2026-10-20"), Some("")), now);
+        let start_midnight = midnight_utc(NaiveDate::from_ymd_opt(2026, 10, 20).unwrap());
+        assert_eq!(end, start_midnight);
+        assert_eq!(start, start_midnight - (now - start_midnight));
+
+        // both parse: whole days.
+        let (start, end) = previous_period(range(Some("2026-10-20"), Some("2026-10-30")), now);
+        assert_eq!(end, start_midnight);
+        assert_eq!(start, start_midnight - Duration::days(10));
+    }
 }

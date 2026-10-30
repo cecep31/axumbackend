@@ -4,6 +4,7 @@ use crate::dto::user::{
     CreateUserRequest, FollowRequest, UpdateUserRequest, UserDeletedFilter, UserDetailQuery,
     UserIdPath, UserListQuery,
 };
+use crate::dto::validation::parse_pagination;
 use crate::http::auth::{AdminUser, AuthUser};
 use crate::http::error::AppError;
 use crate::http::extract::{VJson, VPath, VQuery};
@@ -33,7 +34,7 @@ impl From<services::user::UserError> for AppError {
     fn from(err: services::user::UserError) -> Self {
         match err {
             services::user::UserError::Db(err) => AppError::from(err),
-            services::user::UserError::NotFound => AppError::NotFound("User not found".to_string()),
+            services::user::UserError::NotFound => AppError::NotFound("user not found".to_string()),
             services::user::UserError::UserExists => {
                 AppError::Conflict("Email or username already exists".to_string())
             }
@@ -42,24 +43,42 @@ impl From<services::user::UserError> for AppError {
     }
 }
 
+/// Carries echobackend's sentinel texts as the `error` detail; handlers add
+/// their message with [`AppError::context`] (echobackend `respondError`).
 impl From<services::user_follow::UserFollowError> for AppError {
     fn from(err: services::user_follow::UserFollowError) -> Self {
         match err {
             services::user_follow::UserFollowError::Db(err) => AppError::from(err),
             services::user_follow::UserFollowError::UserNotFound => {
-                AppError::NotFound("User not found".to_string())
+                AppError::NotFound("user not found".to_string())
             }
             services::user_follow::UserFollowError::CannotFollowSelf => {
-                AppError::BadRequest("You cannot follow yourself".to_string())
+                AppError::BadRequest("cannot follow yourself".to_string())
             }
             services::user_follow::UserFollowError::AlreadyFollowing => {
-                AppError::BadRequest("You are already following this user".to_string())
+                AppError::Conflict("already following this user".to_string())
             }
             services::user_follow::UserFollowError::NotFollowing => {
-                AppError::BadRequest("You are not following this user".to_string())
+                AppError::BadRequest("not following this user".to_string())
             }
         }
     }
+}
+
+/// echobackend `respondError(c, message, err)` for follow/user service errors.
+fn follow_error(
+    message: &'static str,
+) -> impl FnOnce(services::user_follow::UserFollowError) -> AppError {
+    move |err| AppError::from(err).context(message)
+}
+
+fn db_error(message: &'static str) -> impl FnOnce(sea_orm::DbErr) -> AppError {
+    move |err| AppError::from(err).context(message)
+}
+
+/// 404 of echobackend's user lookups: `respondError(c, message, ErrUserNotFound)`.
+fn user_not_found(message: &'static str) -> AppError {
+    AppError::not_found(message, Some("user not found".into()))
 }
 
 pub async fn get_users(
@@ -67,18 +86,11 @@ pub async fn get_users(
     _admin_user: AdminUser,
     VQuery(query): VQuery<UserListQuery>,
 ) -> Result<Json<ApiResponse<Vec<UserResponse>>>, AppError> {
-    let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(10);
+    let (limit, offset) = parse_pagination(query.offset.as_deref(), query.limit.as_deref(), 10);
     let deleted_filter =
         UserDeletedFilter::parse(query.deleted.as_deref()).map_err(AppError::BadRequest)?;
-    let order_desc = !matches!(
-        query
-            .order_direction
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("asc")
-    );
+    // echobackend `ParseUserOrderDesc`: only the exact string "asc" ascends.
+    let order_desc = query.order_direction.as_deref() != Some("asc");
     let (users, total) = services::user::get_users(
         &pool,
         offset,
@@ -87,7 +99,8 @@ pub async fn get_users(
         query.order_by.as_deref(),
         order_desc,
     )
-    .await?;
+    .await
+    .map_err(db_error("Failed to retrieve users"))?;
 
     Ok(Json(ApiResponse::with_meta_message(
         "Successfully retrieved users",
@@ -115,8 +128,8 @@ pub async fn get_by_id(
             "Successfully retrieved user",
             user,
         ))),
-        Ok(None) => Err(AppError::NotFound("User not found".to_string())),
-        Err(e) => Err(AppError::from(e)),
+        Ok(None) => Err(user_not_found("Failed to retrieve user")),
+        Err(e) => Err(AppError::from(e).context("Failed to retrieve user")),
     }
 }
 
@@ -129,8 +142,8 @@ pub async fn get_me(
             "Successfully retrieved current user",
             user,
         ))),
-        Ok(None) => Err(AppError::NotFound("User not found".to_string())),
-        Err(e) => Err(AppError::from(e)),
+        Ok(None) => Err(user_not_found("Failed to retrieve user")),
+        Err(e) => Err(AppError::from(e).context("Failed to retrieve user")),
     }
 }
 
@@ -140,12 +153,9 @@ pub async fn delete_user(
     VPath(params): VPath<UserIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     match services::user::soft_delete(&pool, params.id).await {
-        Ok(true) => Ok(Json(ApiResponse::success_with_message(
-            "Successfully deleted user",
-            serde_json::Value::Null,
-        ))),
-        Ok(false) => Err(AppError::NotFound("User not found".to_string())),
-        Err(e) => Err(AppError::from(e)),
+        Ok(true) => Ok(Json(ApiResponse::message("Successfully deleted user"))),
+        Ok(false) => Err(user_not_found("Failed to delete user")),
+        Err(e) => Err(AppError::from(e).context("Failed to delete user")),
     }
 }
 
@@ -160,13 +170,15 @@ pub async fn restore_user(
             user,
         ))),
         Err(services::user::RestoreError::NotFound) => {
-            Err(AppError::NotFound("User not found".to_string()))
+            Err(user_not_found("Deleted user not found"))
         }
-        Err(services::user::RestoreError::Conflict) => Err(AppError::Conflict(
-            "Cannot restore user: email or username already taken by another active user"
-                .to_string(),
+        Err(services::user::RestoreError::Conflict) => Err(AppError::conflict(
+            "Cannot restore user",
+            "Email or username already taken by another active user",
         )),
-        Err(services::user::RestoreError::Db(e)) => Err(AppError::from(e)),
+        Err(services::user::RestoreError::Db(e)) => {
+            Err(AppError::from(e).context("Failed to restore user"))
+        }
     }
 }
 
@@ -179,8 +191,8 @@ pub async fn get_by_username(
             "Successfully retrieved user",
             user,
         ))),
-        Ok(None) => Err(AppError::NotFound("User not found".to_string())),
-        Err(e) => Err(AppError::from(e)),
+        Ok(None) => Err(user_not_found("Failed to retrieve user")),
+        Err(e) => Err(AppError::from(e).context("Failed to retrieve user")),
     }
 }
 
@@ -189,7 +201,12 @@ pub async fn follow_user(
     auth_user: AuthUser,
     VJson(req): VJson<FollowRequest>,
 ) -> Result<Json<ApiResponse<FollowResponse>>, AppError> {
-    let response = services::user_follow::follow_user(&pool, auth_user.id, req.user_id).await?;
+    let target = req
+        .user_uuid()
+        .ok_or_else(|| AppError::BadRequest("Invalid request body".to_string()))?;
+    let response = services::user_follow::follow_user(&pool, auth_user.id, target)
+        .await
+        .map_err(follow_error("Failed to follow user"))?;
 
     Ok(Json(ApiResponse::success_with_message(
         response.message.clone(),
@@ -202,7 +219,9 @@ pub async fn unfollow_user(
     auth_user: AuthUser,
     VPath(params): VPath<UserIdPath>,
 ) -> Result<Json<ApiResponse<FollowResponse>>, AppError> {
-    let response = services::user_follow::unfollow_user(&pool, auth_user.id, params.id).await?;
+    let response = services::user_follow::unfollow_user(&pool, auth_user.id, params.id)
+        .await
+        .map_err(follow_error("Failed to unfollow user"))?;
 
     Ok(Json(ApiResponse::success_with_message(
         response.message.clone(),
@@ -215,7 +234,9 @@ pub async fn check_follow_status(
     auth_user: AuthUser,
     VPath(params): VPath<UserIdPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    let is_following = services::user_follow::is_following(&pool, auth_user.id, params.id).await?;
+    let is_following = services::user_follow::is_following(&pool, auth_user.id, params.id)
+        .await
+        .map_err(db_error("Failed to check follow status"))?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Successfully checked follow status",
@@ -230,7 +251,9 @@ pub async fn get_followers(
 ) -> Result<Json<ApiResponse<Vec<UserResponse>>>, AppError> {
     let (limit, offset) = query.resolve(10);
     let (followers, total) =
-        services::user_follow::get_followers(&pool, params.id, limit, offset, None).await?;
+        services::user_follow::get_followers(&pool, params.id, limit, offset, None)
+            .await
+            .map_err(db_error("Failed to get followers"))?;
 
     Ok(Json(ApiResponse::with_meta_message(
         "Successfully retrieved followers",
@@ -248,7 +271,9 @@ pub async fn get_following(
 ) -> Result<Json<ApiResponse<Vec<UserResponse>>>, AppError> {
     let (limit, offset) = query.resolve(10);
     let (following, total) =
-        services::user_follow::get_following(&pool, params.id, limit, offset, None).await?;
+        services::user_follow::get_following(&pool, params.id, limit, offset, None)
+            .await
+            .map_err(db_error("Failed to get following"))?;
 
     Ok(Json(ApiResponse::with_meta_message(
         "Successfully retrieved following",
@@ -263,12 +288,15 @@ pub async fn get_follow_stats(
     State(pool): State<DbPool>,
     VPath(params): VPath<UserIdPath>,
 ) -> Result<Json<ApiResponse<FollowStats>>, AppError> {
-    match services::user_follow::get_follow_stats(&pool, params.id).await? {
+    match services::user_follow::get_follow_stats(&pool, params.id)
+        .await
+        .map_err(db_error("Failed to get follow statistics"))?
+    {
         Some(stats) => Ok(Json(ApiResponse::success_with_message(
             "Successfully retrieved follow statistics",
             stats,
         ))),
-        None => Err(AppError::NotFound("User not found".to_string())),
+        None => Err(user_not_found("Failed to get follow statistics")),
     }
 }
 
@@ -277,7 +305,9 @@ pub async fn get_mutual_follows(
     auth_user: AuthUser,
     VPath(params): VPath<UserIdPath>,
 ) -> Result<Json<ApiResponse<Vec<UserResponse>>>, AppError> {
-    let users = services::user_follow::get_mutual_follows(&pool, auth_user.id, params.id).await?;
+    let users = services::user_follow::get_mutual_follows(&pool, auth_user.id, params.id)
+        .await
+        .map_err(db_error("Failed to get mutual follows"))?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Successfully retrieved mutual follows",
@@ -372,7 +402,14 @@ pub async fn create_user(
     _admin_user: AdminUser,
     VJson(req): VJson<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<UserResponse>>), AppError> {
-    let user = services::user::create_user(&pool, req).await?;
+    let user = services::user::create_user(&pool, req)
+        .await
+        .map_err(|err| match err {
+            services::user::UserError::UserExists => {
+                AppError::conflict("Failed to create user", "Email or username already exists")
+            }
+            other => AppError::from(other).context("Failed to create user"),
+        })?;
 
     Ok((
         StatusCode::CREATED,
@@ -393,9 +430,9 @@ pub async fn update_user(
         .await
         .map_err(|err| match err {
             services::user::UserError::UserExists => {
-                AppError::Conflict("Email or username already taken".to_string())
+                AppError::conflict("Failed to update user", "Email or username already taken")
             }
-            other => AppError::from(other),
+            other => AppError::from(other).context("Failed to update user"),
         })?;
 
     Ok(Json(ApiResponse::success_with_message(

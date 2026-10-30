@@ -27,6 +27,8 @@ pub struct ModerationActionResponse {
     pub action: String,
     pub note: Option<String>,
     pub created_at: String,
+    /// echobackend `admin,omitempty`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub admin: Option<UserBrief>,
 }
 
@@ -38,6 +40,10 @@ pub struct SinglePostReportResponse {
     pub details: Option<String>,
     pub status: String,
     pub created_at: String,
+    /// echobackend `reporter,omitempty` (absent for a soft-deleted reporter).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reporter: Option<UserBrief>,
+    /// echobackend `resolution,omitempty`: absent while pending.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<ModerationActionResponse>,
 }

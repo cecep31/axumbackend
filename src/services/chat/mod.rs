@@ -228,22 +228,28 @@ pub async fn update_conversation(
     req: UpdateChatConversationRequest,
 ) -> Result<ChatConversationResponse, ChatError> {
     let conversation = owned_conversation(db, id, user_id).await?;
-    let mut active = conversation.into_active_model();
-    if let Some(title) = req.title
-        && !title.trim().is_empty()
-    {
-        active.title = Set(title);
-    }
-    if let Some(is_pinned) = req.is_pinned {
-        active.is_pinned = Set(is_pinned);
-        active.pinned_at = Set(if is_pinned {
-            Some(Utc::now().into())
-        } else {
-            None
-        });
-    }
-    active.updated_at = Set(Utc::now().into());
-    let updated = active.update(db).await?;
+    // echobackend `UpdateConversation`: a non-empty title (untrimmed check)
+    // and/or `is_pinned`; with nothing to change no write happens, so
+    // `updated_at` (and the list order) stays put.
+    let title = req.title.filter(|title| !title.is_empty());
+    let updated = if title.is_none() && req.is_pinned.is_none() {
+        conversation
+    } else {
+        let mut active = conversation.into_active_model();
+        if let Some(title) = title {
+            active.title = Set(title);
+        }
+        if let Some(is_pinned) = req.is_pinned {
+            active.is_pinned = Set(is_pinned);
+            active.pinned_at = Set(if is_pinned {
+                Some(Utc::now().into())
+            } else {
+                None
+            });
+        }
+        active.updated_at = Set(Utc::now().into());
+        active.update(db).await?
+    };
     let count = chat_messages::Entity::find()
         .filter(chat_messages::Column::ConversationId.eq(updated.id))
         .count(db)

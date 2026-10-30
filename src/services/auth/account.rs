@@ -1,5 +1,41 @@
 use super::*;
 
+/// echobackend `normalizeEmail`: emails are stored trimmed and lowercased so
+/// addresses differing only in case or surrounding spaces map to one account.
+pub fn normalize_email(email: &str) -> String {
+    email.trim().to_lowercase()
+}
+
+/// `LOWER(email) = LOWER($1)` (echobackend `FindUserByEmail`), served by the
+/// `idx_users_email_lower` index so legacy mixed-case rows still match.
+pub fn email_matches(email: &str) -> sea_orm::sea_query::SimpleExpr {
+    sea_orm::sea_query::Expr::cust_with_values(
+        r#"LOWER("users"."email") = LOWER($1)"#,
+        [email.to_owned()],
+    )
+}
+
+/// Live (not soft-deleted) user whose email matches case-insensitively.
+pub(super) async fn find_user_by_email(
+    db: &DatabaseConnection,
+    email: &str,
+) -> Result<Option<users::Model>, DbErr> {
+    users::Entity::find()
+        .filter(email_matches(email))
+        .filter(users::Column::DeletedAt.is_null())
+        .one(db)
+        .await
+}
+
+/// SQLSTATE 23505 on insert (echobackend maps `gorm.ErrDuplicatedKey` to
+/// `ErrUserExists`).
+pub fn is_unique_violation(err: &DbErr) -> bool {
+    matches!(
+        err.sql_err(),
+        Some(sea_orm::SqlErr::UniqueConstraintViolation(_))
+    )
+}
+
 pub(super) fn make_user_brief(user: &users::Model) -> UserBrief {
     UserBrief {
         id: user.id,
@@ -39,22 +75,20 @@ pub async fn register(
     password: String,
     first_name: String,
     last_name: String,
+    client: ClientInfo,
 ) -> Result<RegisterResponse, AuthError> {
-    let existing = users::Entity::find()
-        .filter(
-            users::Column::Email
-                .eq(email.clone())
-                .or(users::Column::Username.eq(username.clone())),
-        )
-        .one(db)
-        .await?;
-
-    if existing.is_some() {
+    // echobackend `Register`: normalized email, then two checks over live
+    // users (email case-insensitive, username exact).
+    let email = normalize_email(&email);
+    if find_user_by_email(db, &email).await?.is_some() {
+        return Err(AuthError::UserExists);
+    }
+    if check_username_exists(db, &username).await? {
         return Err(AuthError::UserExists);
     }
 
     let hashed = hash_password_async(&password).await?;
-    let user = users::ActiveModel {
+    let inserted = users::ActiveModel {
         id: Set(Uuid::now_v7()),
         email: Set(email),
         username: Set(Some(username)),
@@ -66,15 +100,20 @@ pub async fn register(
         ..Default::default()
     }
     .insert(db)
-    .await?;
+    .await;
+    let user = match inserted {
+        Ok(user) => user,
+        Err(err) if is_unique_violation(&err) => return Err(AuthError::UserExists),
+        Err(err) => return Err(err.into()),
+    };
 
     log_activity(
         db,
         Some(user.id),
         "register",
         "success",
-        None,
-        None,
+        client.ip_address.clone(),
+        client.user_agent.clone(),
         None,
         None,
     )
@@ -93,13 +132,15 @@ pub async fn login(
     db: &DatabaseConnection,
     identifier: &str,
     password: &str,
-    user_agent: Option<String>,
+    client: ClientInfo,
 ) -> Result<AuthTokenResponse, AuthError> {
+    // echobackend `FindUserByIdentifier`: email case-insensitive, username
+    // exact (and untrimmed).
     let user = users::Entity::find()
         .filter(
-            users::Column::Email
-                .eq(identifier)
-                .or(users::Column::Username.eq(identifier)),
+            Condition::any()
+                .add(email_matches(identifier))
+                .add(users::Column::Username.eq(identifier)),
         )
         .filter(users::Column::DeletedAt.is_null())
         .one(db)
@@ -111,8 +152,8 @@ pub async fn login(
             None,
             "login_failed",
             "failure",
-            None,
-            user_agent.clone(),
+            client.ip_address.clone(),
+            client.user_agent.clone(),
             None,
             None,
         )
@@ -126,8 +167,8 @@ pub async fn login(
             Some(user.id),
             "login_failed",
             "failure",
-            None,
-            user_agent.clone(),
+            client.ip_address.clone(),
+            client.user_agent.clone(),
             None,
             None,
         )
@@ -142,8 +183,8 @@ pub async fn login(
             Some(user.id),
             "login_failed",
             "failure",
-            None,
-            user_agent.clone(),
+            client.ip_address.clone(),
+            client.user_agent.clone(),
             None,
             None,
         )
@@ -151,7 +192,7 @@ pub async fn login(
         return Err(AuthError::InvalidCredentials);
     }
 
-    let response = create_token_and_session(db, &user, user_agent.clone()).await?;
+    let response = create_token_and_session(db, &user, client.clone()).await?;
     let mut active: users::ActiveModel = user.clone().into();
     active.last_logged_at = Set(Some(Utc::now().into()));
     if needs_rehash && let Ok(new_hash) = hash_password_async(password).await {
@@ -163,8 +204,8 @@ pub async fn login(
         Some(user.id),
         "login",
         "success",
-        None,
-        user_agent,
+        client.ip_address.clone(),
+        client.user_agent.clone(),
         None,
         None,
     )
@@ -205,7 +246,7 @@ pub async fn update_profile(
         .filter(users::Column::DeletedAt.is_null())
         .one(db)
         .await?
-        .ok_or(AuthError::InvalidToken)?;
+        .ok_or(AuthError::UserNotFound)?;
 
     // Check username uniqueness if changed
     if user.username.as_deref() != Some(&username) {
@@ -220,10 +261,12 @@ pub async fn update_profile(
         }
     }
 
+    // echobackend binds the names as plain strings: an omitted name is
+    // stored and returned as "" rather than NULL.
     let mut active: users::ActiveModel = user.clone().into();
     active.username = Set(Some(username.clone()));
-    active.first_name = Set(first_name.clone());
-    active.last_name = Set(last_name.clone());
+    active.first_name = Set(Some(first_name.unwrap_or_default()));
+    active.last_name = Set(Some(last_name.unwrap_or_default()));
     active.updated_at = Set(Some(Utc::now().into()));
     let updated = active.update(db).await?;
 
@@ -245,17 +288,20 @@ pub async fn delete_account(db: &DatabaseConnection, user_id: Uuid) -> Result<()
         .filter(users::Column::DeletedAt.is_null())
         .one(db)
         .await?
-        .ok_or(AuthError::InvalidToken)?;
+        .ok_or(AuthError::UserNotFound)?;
 
     let mut active: users::ActiveModel = user.into();
     active.deleted_at = Set(Some(Utc::now().into()));
     active.updated_at = Set(Some(Utc::now().into()));
     active.update(db).await?;
 
-    let _ = sessions::Entity::delete_many()
+    if let Err(err) = sessions::Entity::delete_many()
         .filter(sessions::Column::UserId.eq(user_id))
         .exec(db)
-        .await;
+        .await
+    {
+        tracing::warn!(?err, %user_id, "failed to invalidate sessions after account deletion");
+    }
 
     Ok(())
 }
@@ -264,12 +310,6 @@ pub async fn check_email_availability(
     db: &DatabaseConnection,
     email: &str,
 ) -> Result<bool, AuthError> {
-    let exists = users::Entity::find()
-        .filter(users::Column::Email.eq(email))
-        .filter(users::Column::DeletedAt.is_null())
-        .one(db)
-        .await?
-        .is_some();
-
+    let exists = find_user_by_email(db, email).await?.is_some();
     Ok(!exists)
 }

@@ -22,10 +22,44 @@ pub struct GithubUser {
     pub html_url: Option<String>,
 }
 
+/// Cached under `<prefix>:oauth_exchange:<code>` in echobackend's shape (its
+/// untagged Go struct `oauthExchangeEntry{AccessToken, RefreshToken, User,
+/// ExpiresAt}`), so a code minted by one backend can be redeemed by another
+/// sharing Redis. Only `id`/`email`/`username` of `User` are read; the rest of
+/// echobackend's `model.User` is ignored.
 #[derive(Serialize, Deserialize)]
 struct OAuthExchangeEntry {
-    response: AuthTokenResponse,
+    #[serde(rename = "AccessToken")]
+    access_token: String,
+    #[serde(rename = "RefreshToken")]
+    refresh_token: String,
+    #[serde(rename = "User", default)]
+    user: Option<UserBrief>,
+    #[serde(rename = "ExpiresAt")]
     expires_at: chrono::DateTime<Utc>,
+}
+
+impl OAuthExchangeEntry {
+    fn new(response: AuthTokenResponse, expires_at: chrono::DateTime<Utc>) -> Self {
+        Self {
+            access_token: response.access_token,
+            refresh_token: response.refresh_token,
+            user: Some(response.user),
+            expires_at,
+        }
+    }
+
+    /// echobackend rejects an entry that is expired or has no user.
+    fn redeem(self, now: chrono::DateTime<Utc>) -> Option<AuthTokenResponse> {
+        if now > self.expires_at {
+            return None;
+        }
+        Some(AuthTokenResponse {
+            access_token: self.access_token,
+            refresh_token: self.refresh_token,
+            user: self.user?,
+        })
+    }
 }
 
 static OAUTH_EXCHANGE_CODES: OnceLock<Mutex<HashMap<String, OAuthExchangeEntry>>> = OnceLock::new();
@@ -132,7 +166,7 @@ pub async fn fetch_github_user_email(token: &str) -> Result<Option<String>, Auth
 pub async fn sign_in_with_github(
     db: &DatabaseConnection,
     github_user: &GithubUser,
-    user_agent: Option<String>,
+    client: ClientInfo,
 ) -> Result<AuthTokenResponse, AuthError> {
     let existing = users::Entity::find()
         .filter(users::Column::GithubId.eq(github_user.id))
@@ -143,9 +177,12 @@ pub async fn sign_in_with_github(
     let user = match existing {
         Some(user) => user,
         None => {
+            // echobackend stores the normalized GitHub email, or the
+            // `<id>@github.placeholder` fallback when there is none.
             let email = github_user
                 .email
-                .clone()
+                .as_deref()
+                .map(normalize_email)
                 .filter(|email| !email.is_empty())
                 .unwrap_or_else(|| format!("{}@github.placeholder", github_user.id));
 
@@ -168,8 +205,8 @@ pub async fn sign_in_with_github(
                         None,
                         "oauth_login_failed",
                         "failure",
-                        None,
-                        user_agent,
+                        client.ip_address.clone(),
+                        client.user_agent.clone(),
                         None,
                         Some(serde_json::json!({
                             "provider": "github",
@@ -183,7 +220,7 @@ pub async fn sign_in_with_github(
         }
     };
 
-    let response = match create_token_and_session(db, &user, user_agent.clone()).await {
+    let response = match create_token_and_session(db, &user, client.clone()).await {
         Ok(response) => response,
         Err(err) => {
             log_activity(
@@ -191,8 +228,8 @@ pub async fn sign_in_with_github(
                 Some(user.id),
                 "oauth_login_failed",
                 "failure",
-                None,
-                user_agent,
+                client.ip_address.clone(),
+                client.user_agent.clone(),
                 None,
                 Some(serde_json::json!({ "provider": "github" })),
             )
@@ -206,8 +243,8 @@ pub async fn sign_in_with_github(
         Some(user.id),
         "oauth_login",
         "success",
-        None,
-        user_agent,
+        client.ip_address.clone(),
+        client.user_agent.clone(),
         None,
         Some(serde_json::json!({ "provider": "github" })),
     )
@@ -231,10 +268,10 @@ pub(super) fn oauth_exchange_cache_key(cache: &cache::Cache, code: &str) -> Stri
 pub async fn create_oauth_exchange_code(response: AuthTokenResponse) -> String {
     let code = generate_prefixed_token("oc");
     let now = Utc::now();
-    let entry = OAuthExchangeEntry {
+    let entry = OAuthExchangeEntry::new(
         response,
-        expires_at: now + Duration::minutes(OAUTH_EXCHANGE_TTL_MINUTES),
-    };
+        now + Duration::minutes(OAUTH_EXCHANGE_TTL_MINUTES),
+    );
 
     if let Some(cache) = cache::get() {
         let ttl = std::time::Duration::from_secs(OAUTH_EXCHANGE_TTL_MINUTES as u64 * 60);
@@ -262,8 +299,7 @@ pub async fn exchange_oauth_code(code: &str) -> Result<AuthTokenResponse, AuthEr
     if let Some(cache) = cache::get() {
         let key = oauth_exchange_cache_key(cache, code);
         match cache.take_json::<OAuthExchangeEntry>(&key).await {
-            Ok(Some(entry)) if entry.expires_at > Utc::now() => return Ok(entry.response),
-            Ok(Some(_)) => return Err(AuthError::InvalidToken),
+            Ok(Some(entry)) => return entry.redeem(Utc::now()).ok_or(AuthError::InvalidToken),
             Ok(None) => {}
             Err(err) => {
                 tracing::warn!(error = %err, "oauth exchange: Redis read failed, checking memory");
@@ -278,6 +314,69 @@ pub async fn exchange_oauth_code(code: &str) -> Result<AuthTokenResponse, AuthEr
     store.retain(|_, entry| entry.expires_at > now);
     store
         .remove(code)
-        .map(|entry| entry.response)
+        .and_then(|entry| entry.redeem(now))
         .ok_or(AuthError::InvalidToken)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_oauth_exchange_entry_reads_echobackend_shape() {
+        let raw = r#"{
+            "AccessToken": "at",
+            "RefreshToken": "pl_rt",
+            "User": {
+                "id": "0190a8f2-1c3e-7b4a-9d6e-2f1a3b4c5d6e",
+                "email": "user@example.com",
+                "username": "user",
+                "first_name": null,
+                "created_at": "2026-01-01T00:00:00Z"
+            },
+            "ExpiresAt": "2999-01-01T00:00:00.123456789+07:00"
+        }"#;
+        let entry: OAuthExchangeEntry = serde_json::from_str(raw).expect("echo entry parses");
+        let response = entry.redeem(Utc::now()).expect("not expired");
+        assert_eq!(response.access_token, "at");
+        assert_eq!(response.refresh_token, "pl_rt");
+        assert_eq!(response.user.email, "user@example.com");
+        assert_eq!(response.user.username.as_deref(), Some("user"));
+    }
+
+    #[test]
+    fn test_oauth_exchange_entry_writes_echobackend_shape() {
+        let entry = OAuthExchangeEntry::new(
+            AuthTokenResponse {
+                access_token: "at".into(),
+                refresh_token: "pl_rt".into(),
+                user: UserBrief {
+                    id: Uuid::nil(),
+                    email: "user@example.com".into(),
+                    username: None,
+                },
+            },
+            Utc::now(),
+        );
+        let value = serde_json::to_value(&entry).unwrap();
+        for key in ["AccessToken", "RefreshToken", "User", "ExpiresAt"] {
+            assert!(value.get(key).is_some(), "missing {key}");
+        }
+        assert_eq!(value["User"]["email"], "user@example.com");
+    }
+
+    #[test]
+    fn test_oauth_exchange_entry_rejects_missing_user_or_expired() {
+        let no_user: OAuthExchangeEntry = serde_json::from_str(
+            r#"{"AccessToken":"a","RefreshToken":"r","User":null,"ExpiresAt":"2999-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        assert!(no_user.redeem(Utc::now()).is_none());
+
+        let expired: OAuthExchangeEntry = serde_json::from_str(
+            r#"{"AccessToken":"a","RefreshToken":"r","User":{"id":"0190a8f2-1c3e-7b4a-9d6e-2f1a3b4c5d6e","email":"e","username":null},"ExpiresAt":"2000-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        assert!(expired.redeem(Utc::now()).is_none());
+    }
 }

@@ -4,8 +4,8 @@ use crate::models::post_report::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr,
-    EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, Set, Statement,
-    TransactionTrait,
+    EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    Statement, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -37,6 +37,23 @@ impl From<DbErr> for PostReportError {
     fn from(err: DbErr) -> Self {
         PostReportError::Db(err)
     }
+}
+
+/// echobackend `Preload("Reporter"/"Admin", preloadUserBrief)` goes through
+/// GORM's soft-delete scope, so a soft-deleted user yields no brief (and the
+/// `omitempty` key is left out).
+async fn active_user(
+    db: &DatabaseConnection,
+    id: Option<Uuid>,
+) -> Result<Option<users::Model>, DbErr> {
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    users::Entity::find()
+        .filter(users::Column::Id.eq(id))
+        .filter(users::Column::DeletedAt.is_null())
+        .one(db)
+        .await
 }
 
 fn brief_from_user(u: Option<users::Model>) -> Option<UserBrief> {
@@ -71,8 +88,8 @@ pub async fn report_post(
     if !REASON_CHOICES.contains(&reason) {
         return Err(PostReportError::InvalidReportStatus);
     }
-    let post = posts::Entity::find_by_id(post_id)
-        .one(db)
+    // echobackend GetPostByID (author not soft-deleted) + ensurePostInteractable.
+    let post = crate::services::post::find_active_post(db, post_id)
         .await?
         .ok_or(PostReportError::PostNotFound)?;
     if post.hidden_at.is_some() {
@@ -81,31 +98,27 @@ pub async fn report_post(
     if post.created_by == reporter_id {
         return Err(PostReportError::CannotReportOwnPost);
     }
+    // An empty string carries no information; store it as NULL.
     let details = details.filter(|d| !d.is_empty());
-    // Silently ignore a duplicate pending report (partial unique index).
-    let result = post_reports::ActiveModel {
-        id: Set(Uuid::now_v7()),
-        post_id: Set(post_id),
-        reporter_id: Set(reporter_id),
-        reason: Set(reason.to_string()),
-        details: Set(details),
-        status: Set("pending".to_string()),
-        action_id: Set(None),
-        created_at: Set(chrono::Utc::now().into()),
-    }
-    .insert(db)
-    .await;
-    match result {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("duplicate") || msg.contains("unique") {
-                Ok(())
-            } else {
-                Err(PostReportError::Db(e))
-            }
-        }
-    }
+    // echobackend `Create`: a repeat pending report by the same user is
+    // silently ignored. The conflict target repeats the partial unique index
+    // predicate (`idx_post_reports_pending_post_reporter`).
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO post_reports (id, post_id, reporter_id, reason, details, status, created_at) \
+         VALUES ($1, $2, $3, $4, $5, 'pending', $6) \
+         ON CONFLICT (post_id, reporter_id) WHERE status = 'pending' DO NOTHING",
+        vec![
+            Uuid::now_v7().into(),
+            post_id.into(),
+            reporter_id.into(),
+            reason.into(),
+            details.into(),
+            chrono::Utc::now().into(),
+        ],
+    );
+    db.execute_raw(stmt).await?;
+    Ok(())
 }
 
 #[derive(FromQueryResult)]
@@ -199,31 +212,24 @@ pub async fn list_post_reports(
     {
         q = q.filter(post_reports::Column::Status.eq(s));
     }
+    // Raw LIMIT/OFFSET like echobackend (not page-aligned).
     let reports = q
         .order_by_desc(post_reports::Column::CreatedAt)
-        .paginate(db, limit.max(1))
-        .fetch_page(offset / limit.max(1))
+        .limit(limit)
+        .offset(offset)
+        .all(db)
         .await?;
     let mut out = Vec::with_capacity(reports.len());
     for r in reports {
-        let reporter = users::Entity::find_by_id(r.reporter_id).one(db).await?;
-        let resolution = if let Some(action_id) = r.action_id {
-            let action = post_moderation_actions::Entity::find_by_id(action_id)
+        let reporter = active_user(db, Some(r.reporter_id)).await?;
+        // echobackend preloads only "Action" (not "Action.Admin"), so the
+        // resolution never carries an admin brief here.
+        let resolution = match r.action_id {
+            Some(action_id) => post_moderation_actions::Entity::find_by_id(action_id)
                 .one(db)
-                .await?;
-            match action {
-                Some(a) => {
-                    let admin = if let Some(admin_id) = a.admin_id {
-                        users::Entity::find_by_id(admin_id).one(db).await?
-                    } else {
-                        None
-                    };
-                    Some(action_to_response(a, admin))
-                }
-                None => None,
-            }
-        } else {
-            None
+                .await?
+                .map(|a| action_to_response(a, None)),
+            None => None,
         };
         out.push(SinglePostReportResponse {
             id: r.id,
@@ -250,7 +256,10 @@ pub async fn moderate_post(
         return Err(PostReportError::InvalidReportStatus);
     }
     let txn = db.begin().await?;
+    // SELECT ... FOR UPDATE: two admins acting at once serialize instead of
+    // both passing the state check below.
     let post = posts::Entity::find_by_id(post_id)
+        .lock_exclusive()
         .one(&txn)
         .await?
         .ok_or(PostReportError::PostNotFound)?;
@@ -284,7 +293,8 @@ pub async fn moderate_post(
         post_author_id: Set(Some(post.created_by)),
         admin_id: Set(Some(admin_id)),
         action: Set(action.to_string()),
-        note: Set(note.filter(|n| !n.is_empty())),
+        // Stored as sent (echobackend keeps "" as "").
+        note: Set(note),
         created_at: Set(chrono::Utc::now().into()),
     }
     .insert(&txn)
@@ -337,16 +347,13 @@ pub async fn list_moderation_actions(
     let actions = post_moderation_actions::Entity::find()
         .filter(post_moderation_actions::Column::PostId.eq(post_id))
         .order_by_desc(post_moderation_actions::Column::CreatedAt)
-        .paginate(db, limit.max(1))
-        .fetch_page(offset / limit.max(1))
+        .limit(limit)
+        .offset(offset)
+        .all(db)
         .await?;
     let mut out = Vec::with_capacity(actions.len());
     for a in actions {
-        let admin = if let Some(admin_id) = a.admin_id {
-            users::Entity::find_by_id(admin_id).one(db).await?
-        } else {
-            None
-        };
+        let admin = active_user(db, a.admin_id).await?;
         out.push(action_to_response(a, admin));
     }
     Ok((out, total))

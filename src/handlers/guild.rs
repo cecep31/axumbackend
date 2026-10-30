@@ -189,10 +189,7 @@ pub async fn delete_guild(
     services::guild::delete_guild(&pool, &path.slug, auth_user.id)
         .await
         .map_err(map_guild_error)?;
-    Ok(Json(ApiResponse::success_with_message(
-        "Guild deleted successfully",
-        serde_json::Value::Null,
-    )))
+    Ok(Json(ApiResponse::message("Guild deleted successfully")))
 }
 
 pub async fn join_guild(
@@ -220,10 +217,7 @@ pub async fn leave_guild(
     services::guild::leave_guild(&pool, &path.slug, auth_user.id)
         .await
         .map_err(map_guild_error)?;
-    Ok(Json(ApiResponse::success_with_message(
-        "Left guild successfully",
-        serde_json::Value::Null,
-    )))
+    Ok(Json(ApiResponse::message("Left guild successfully")))
 }
 
 pub async fn get_members(
@@ -318,10 +312,7 @@ pub async fn delete_channel(
     services::guild_channel::delete_channel(&pool, &path.slug, &path.channel_id, auth_user.id)
         .await
         .map_err(map_guild_channel_error)?;
-    Ok(Json(ApiResponse::success_with_message(
-        "Channel deleted successfully",
-        serde_json::Value::Null,
-    )))
+    Ok(Json(ApiResponse::message("Channel deleted successfully")))
 }
 
 /// Channel history newest first, paginated backwards with the
@@ -411,10 +402,7 @@ pub async fn delete_message(
     )
     .await
     .map_err(map_guild_channel_error)?;
-    Ok(Json(ApiResponse::success_with_message(
-        "Message deleted successfully",
-        serde_json::Value::Null,
-    )))
+    Ok(Json(ApiResponse::message("Message deleted successfully")))
 }
 
 enum StreamStep {

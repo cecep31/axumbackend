@@ -211,6 +211,32 @@ impl Cache {
     }
 }
 
+/// Fail-open read of `<prefix>:<parts…>`: `None` when the cache is disabled,
+/// the key is missing, the value no longer decodes, or Redis errors.
+pub async fn read_json<T: DeserializeOwned>(parts: &[&str]) -> Option<T> {
+    let cache = get()?;
+    let key = cache.build_key(parts);
+    match cache.get_json(&key).await {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(%key, error = %err, "cache: read failed");
+            None
+        }
+    }
+}
+
+/// Fail-open write of `<prefix>:<parts…>` with an explicit `ttl` (errors are
+/// logged and ignored; no-op when the cache is disabled).
+pub async fn write_json<T: Serialize>(parts: &[&str], value: &T, ttl: Duration) {
+    let Some(cache) = get() else {
+        return;
+    };
+    let key = cache.build_key(parts);
+    if let Err(err) = cache.set_json_with_ttl(&key, value, ttl).await {
+        tracing::warn!(%key, error = %err, "cache: write failed");
+    }
+}
+
 fn build_key(prefix: &str, parts: &[&str]) -> String {
     let joined = parts.join(":");
     if prefix.is_empty() {

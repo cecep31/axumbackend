@@ -10,8 +10,31 @@ pub struct UserIdPath {
 
 #[derive(Deserialize, Validate)]
 pub struct FollowRequest {
-    #[garde(skip)]
-    pub user_id: Uuid,
+    /// Raw so a missing / malformed id is a 422 (`required` / `uuid`) like
+    /// echobackend's `validate:"required,uuid"`, not a body-parse 400.
+    #[serde(default)]
+    #[garde(custom(required_uuid))]
+    pub user_id: String,
+}
+
+impl FollowRequest {
+    /// The validated `user_id`.
+    pub fn user_uuid(&self) -> Option<Uuid> {
+        Uuid::parse_str(&self.user_id).ok()
+    }
+}
+
+/// echobackend `required,uuid`: empty is `required`, anything but a
+/// hyphenated UUID is `uuid`.
+fn required_uuid(value: &str, _: &()) -> garde::Result {
+    if value.is_empty() {
+        return Err(garde::Error::new("required"));
+    }
+    if value.len() == 36 && Uuid::parse_str(value).is_ok() {
+        Ok(())
+    } else {
+        Err(garde::Error::new("uuid"))
+    }
 }
 
 /// Mirrors echobackend's `UserDeletedFilter` (`internal/dto/user.go`).
@@ -36,10 +59,12 @@ impl UserDeletedFilter {
 
 #[derive(Deserialize, Validate)]
 pub struct UserListQuery {
-    #[garde(range(min = 0, max = 10_000))]
-    pub offset: Option<i64>,
-    #[garde(range(min = 1, max = 100))]
-    pub limit: Option<i64>,
+    /// Raw, resolved leniently with `parse_pagination` (echobackend
+    /// `ParsePaginationParams(10)`).
+    #[garde(skip)]
+    pub offset: Option<String>,
+    #[garde(skip)]
+    pub limit: Option<String>,
     #[garde(skip)]
     pub deleted: Option<String>,
     #[garde(skip)]
@@ -58,9 +83,9 @@ pub struct UserDetailQuery {
 pub struct CreateUserRequest {
     #[garde(length(chars, min = 3, max = 30))]
     pub username: String,
-    #[garde(email)]
+    #[garde(email, length(chars, max = 255))]
     pub email: String,
-    #[garde(length(chars, min = 8))]
+    #[garde(length(chars, min = 8, max = 128))]
     pub password: String,
     #[garde(length(chars, max = 100))]
     pub first_name: Option<String>,
@@ -72,7 +97,7 @@ pub struct CreateUserRequest {
 pub struct UpdateUserRequest {
     #[garde(length(chars, min = 3, max = 30))]
     pub username: String,
-    #[garde(email)]
+    #[garde(email, length(chars, max = 255))]
     pub email: String,
     #[garde(length(chars, max = 100))]
     pub first_name: Option<String>,
@@ -86,6 +111,21 @@ pub struct UpdateUserRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_follow_request_requires_uuid() {
+        let tag = |raw: &str| {
+            FollowRequest {
+                user_id: raw.into(),
+            }
+            .validate()
+            .err()
+            .map(|report| report.iter().next().unwrap().1.message().to_string())
+        };
+        assert_eq!(tag(""), Some("required".to_string()));
+        assert_eq!(tag("not-a-uuid"), Some("uuid".to_string()));
+        assert_eq!(tag("0190a8f2-1c3e-7b4a-9d6e-2f1a3b4c5d6e"), None);
+    }
 
     #[test]
     fn test_user_deleted_filter_parse() {

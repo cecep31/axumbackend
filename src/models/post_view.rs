@@ -52,14 +52,13 @@ pub struct MyPostsLikesByMonthResponse {
     pub total: i64,
 }
 
-/// Mirrors echobackend's `dto.PostViewResponse` (no nested `user`).
+/// Mirrors echobackend's `dto.PostViewResponse` (no nested `user`). The
+/// viewer's IP address and user agent are stored but never exposed.
 #[derive(Serialize)]
 pub struct PostViewResponse {
     pub id: Uuid,
     pub post_id: Uuid,
     pub user_id: Option<Uuid>,
-    pub ip_address: Option<String>,
-    pub user_agent: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
 }
@@ -88,8 +87,6 @@ impl PostViewResponse {
             id: view.id,
             post_id: view.post_id,
             user_id: view.user_id,
-            ip_address: view.ip_address,
-            user_agent: view.user_agent,
             created_at: to_utc(view.created_at),
             updated_at: to_utc(view.updated_at),
         }

@@ -32,6 +32,8 @@ type Topics = HashMap<String, broadcast::Sender<Arc<str>>>;
 pub struct Hub {
     topics: Arc<Mutex<Topics>>,
     relay: Arc<OnceLock<Relay>>,
+    /// Set by [`Hub::close`]; later subscriptions start out closed.
+    closed: Arc<AtomicBool>,
 }
 
 struct Relay {
@@ -50,6 +52,16 @@ impl Hub {
     /// Registers a subscriber for `topic`.
     pub fn subscribe(&self, topic: &str) -> Subscription {
         let mut topics = self.topics.lock().unwrap_or_else(|e| e.into_inner());
+        if self.closed.load(Ordering::Acquire) {
+            // echobackend `Subscribe` after `Close`: an already-closed
+            // subscription, so a stream opened during shutdown ends at once.
+            let (_, rx) = broadcast::channel(1);
+            return Subscription {
+                rx,
+                topic: topic.to_string(),
+                hub: self.clone(),
+            };
+        }
         let rx = topics
             .entry(topic.to_string())
             .or_insert_with(|| broadcast::channel(SUBSCRIPTION_BUFFER).0)
@@ -77,6 +89,15 @@ impl Hub {
             None => self.deliver(topic, payload),
         }
         Ok(())
+    }
+
+    /// Ends every subscription (echobackend `Hub.Close`, run on shutdown):
+    /// dropping the topic senders makes each pending `recv` return `None`,
+    /// so open SSE streams finish and clients reconnect to another instance.
+    pub fn close(&self) {
+        let mut topics = self.topics.lock().unwrap_or_else(|e| e.into_inner());
+        self.closed.store(true, Ordering::Release);
+        topics.clear();
     }
 
     /// Hands `payload` to this instance's subscribers of `topic`.
@@ -232,6 +253,17 @@ mod tests {
         assert!(hub.topics.lock().unwrap().contains_key("t"));
         drop(second);
         assert!(!hub.topics.lock().unwrap().contains_key("t"));
+    }
+
+    #[tokio::test]
+    async fn test_close_ends_subscriptions() {
+        let hub = Hub::default();
+        let mut open = hub.subscribe("t");
+        hub.close();
+        assert!(open.recv().await.is_none());
+        let mut late = hub.subscribe("t");
+        assert!(late.recv().await.is_none());
+        assert!(hub.topics.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

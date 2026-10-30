@@ -25,6 +25,8 @@ pub enum HoldingError {
     InvalidDecimal(&'static str),
     DuplicateSameMonth,
     InvalidRange,
+    /// More than 240 months requested (echobackend `ErrHoldingRangeTooLarge`).
+    RangeTooLarge,
     Quote(String),
 }
 

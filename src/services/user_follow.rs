@@ -45,21 +45,49 @@ pub async fn is_following(
         .map(|follow| follow.is_some())
 }
 
+/// `data` payload of echobackend's "follow" notification.
+fn follow_notification_data(follower_id: Uuid) -> serde_json::Value {
+    serde_json::json!({ "follower_id": follower_id })
+}
+
+/// echobackend `FollowUser`: tells the followed user they have a new follower.
+/// Best-effort (`_, _ = CreateNotification(..)`): a failure is logged and never
+/// fails the follow.
+async fn notify_followed_user(db: &DatabaseConnection, follower_id: Uuid, following_id: Uuid) {
+    if follower_id == following_id {
+        return;
+    }
+    if let Err(err) = crate::services::notification::create_notification(
+        db,
+        following_id,
+        "follow",
+        "New follower",
+        Some("You have a new follower".to_string()),
+        Some(follow_notification_data(follower_id)),
+    )
+    .await
+    {
+        tracing::warn!(error = %err, %following_id, "failed to create follow notification");
+    }
+}
+
 pub async fn follow_user(
     db: &DatabaseConnection,
     follower_id: Uuid,
     following_id: Uuid,
 ) -> Result<FollowResponse, UserFollowError> {
-    if follower_id == following_id {
-        return Err(UserFollowError::CannotFollowSelf);
-    }
-
+    // echobackend order: both users must exist, then an existing follow is a
+    // conflict, and only then is a self-follow rejected.
     if !user_exists(db, follower_id).await? || !user_exists(db, following_id).await? {
         return Err(UserFollowError::UserNotFound);
     }
 
     if is_following(db, follower_id, following_id).await? {
         return Err(UserFollowError::AlreadyFollowing);
+    }
+
+    if follower_id == following_id {
+        return Err(UserFollowError::CannotFollowSelf);
     }
 
     user_follows::ActiveModel {
@@ -72,6 +100,8 @@ pub async fn follow_user(
     }
     .insert(db)
     .await?;
+
+    notify_followed_user(db, follower_id, following_id).await;
 
     Ok(FollowResponse {
         is_following: true,
@@ -191,18 +221,28 @@ pub async fn get_follow_stats(
     db: &DatabaseConnection,
     user_id: Uuid,
 ) -> Result<Option<FollowStats>, DbErr> {
-    let Some(user) = users::Entity::find_by_id(user_id)
-        .filter(users::Column::DeletedAt.is_null())
-        .one(db)
-        .await?
-    else {
+    if !user_exists(db, user_id).await? {
         return Ok(None);
-    };
+    }
+
+    // Live counts over active follow rows: the `users.*_count` columns are
+    // only maintained by insert/delete triggers and drift after a
+    // (soft-delete) unfollow.
+    let followers_count = user_follows::Entity::find()
+        .filter(user_follows::Column::FollowingId.eq(user_id))
+        .filter(user_follows::Column::DeletedAt.is_null())
+        .count(db)
+        .await? as i64;
+    let following_count = user_follows::Entity::find()
+        .filter(user_follows::Column::FollowerId.eq(user_id))
+        .filter(user_follows::Column::DeletedAt.is_null())
+        .count(db)
+        .await? as i64;
 
     Ok(Some(FollowStats {
         user_id,
-        followers_count: user.followers_count.unwrap_or_default(),
-        following_count: user.following_count.unwrap_or_default(),
+        followers_count,
+        following_count,
     }))
 }
 
@@ -238,4 +278,18 @@ pub async fn get_mutual_follows(
     }
 
     Ok(responses)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn follow_notification_data_matches_echobackend_json() {
+        let follower = Uuid::parse_str("0190a000-0000-7000-8000-000000000001").unwrap();
+        assert_eq!(
+            follow_notification_data(follower).to_string(),
+            "{\"follower_id\":\"0190a000-0000-7000-8000-000000000001\"}"
+        );
+    }
 }

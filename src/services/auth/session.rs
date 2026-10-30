@@ -16,16 +16,25 @@ pub(super) fn token_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
+/// Payload of a minted access token (echobackend's `jwt.MapClaims{user_id,
+/// iat, exp}`). Decoding stays tolerant via [`crate::http::auth::Claims`].
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct AccessTokenClaims {
+    pub user_id: String,
+    pub iat: usize,
+    pub exp: usize,
+}
+
 pub(super) fn create_access_token(user: &users::Model) -> Result<String, AuthError> {
     let now = Utc::now();
     let jwt = JwtConfig::get();
     let expiry_duration = Duration::from_std(jwt.expiry).unwrap_or_else(|_| Duration::minutes(15));
     let exp = now + expiry_duration;
-    let claims = Claims {
-        user_id: user.id,
-        username: user.username.clone(),
-        email: user.email.clone(),
-        is_super_admin: user.is_super_admin,
+    // echobackend `createAccessToken`: HS256 with exactly user_id, iat, exp.
+    // Identity details and the admin flag are read from the database, never
+    // from the token.
+    let claims = AccessTokenClaims {
+        user_id: user.id.to_string(),
         iat: now.timestamp() as usize,
         exp: exp.timestamp() as usize,
     };
@@ -45,14 +54,15 @@ pub(super) fn build_session(
     user_id: Uuid,
     family_id: Option<Uuid>,
     absolute_expires_at: DateTime<Utc>,
-    user_agent: Option<String>,
+    client: ClientInfo,
 ) -> (String, sessions::Model) {
     let refresh_token = generate_refresh_token();
     let now = Utc::now();
     // The sliding window never outlives the absolute cap, so refreshing right
     // before the deadline does not gain the chain extra time.
     let expires_at = std::cmp::min(
-        now + Duration::days(JwtConfig::get().refresh_token_expiry_days),
+        now + Duration::from_std(JwtConfig::get().refresh_token_expiry)
+            .unwrap_or_else(|_| Duration::hours(72)),
         absolute_expires_at,
     );
     let id = Uuid::now_v7();
@@ -62,8 +72,9 @@ pub(super) fn build_session(
         family_id: family_id.unwrap_or(id),
         refresh_token: token_hash(&refresh_token),
         user_id,
-        user_agent,
-        ip_address: None,
+        user_agent: client.user_agent,
+        // echobackend stores the client IP only when it is known.
+        ip_address: client.ip_address.filter(|ip| !ip.is_empty()),
         created_at: now.into(),
         expires_at: expires_at.into(),
         absolute_expires_at: absolute_expires_at.into(),
@@ -94,14 +105,14 @@ pub(super) fn new_session(session: sessions::Model) -> sessions::ActiveModel {
 pub(super) async fn create_token_and_session(
     db: &DatabaseConnection,
     user: &users::Model,
-    user_agent: Option<String>,
+    client: ClientInfo,
 ) -> Result<AuthTokenResponse, AuthError> {
     let access_token = create_access_token(user)?;
 
     let absolute_expiry = Duration::from_std(JwtConfig::get().refresh_token_absolute_expiry)
         .unwrap_or_else(|_| Duration::days(30));
     let (refresh_token, session) =
-        build_session(user.id, None, Utc::now() + absolute_expiry, user_agent);
+        build_session(user.id, None, Utc::now() + absolute_expiry, client);
     new_session(session).insert(db).await?;
 
     prune_expired_sessions(db, user.id).await;
@@ -168,13 +179,15 @@ pub async fn revoke_user_sessions(
     db: &DatabaseConnection,
     target_user_id: Uuid,
     actor_id: Uuid,
-    user_agent: Option<String>,
+    client: ClientInfo,
 ) -> Result<u64, RevokeError> {
-    let user = users::Entity::find_by_id(target_user_id)
+    // echobackend `userRepo.GetByID(ctx, id, false)`: soft-deleted users are
+    // not found, so nothing is revoked and no activity is logged for them.
+    users::Entity::find_by_id(target_user_id)
+        .filter(users::Column::DeletedAt.is_null())
         .one(db)
         .await?
         .ok_or(RevokeError::UserNotFound)?;
-    let _ = user;
     let result = sessions::Entity::delete_many()
         .filter(sessions::Column::UserId.eq(target_user_id))
         .exec(db)
@@ -184,8 +197,8 @@ pub async fn revoke_user_sessions(
         Some(target_user_id),
         "session_revoked",
         "success",
-        None,
-        user_agent,
+        client.ip_address.clone(),
+        client.user_agent.clone(),
         None,
         Some(serde_json::json!({"revoked_by": actor_id, "revoked_sessions": result.rows_affected})),
     )
@@ -198,7 +211,7 @@ pub async fn revoke_user_sessions(
 pub async fn revoke_all_sessions(
     db: &DatabaseConnection,
     actor_id: Uuid,
-    user_agent: Option<String>,
+    client: ClientInfo,
 ) -> Result<u64, RevokeError> {
     let result = sessions::Entity::delete_many().exec(db).await?;
     log_activity(
@@ -206,8 +219,8 @@ pub async fn revoke_all_sessions(
         None,
         "session_revoked",
         "success",
-        None,
-        user_agent,
+        client.ip_address.clone(),
+        client.user_agent.clone(),
         None,
         Some(
             serde_json::json!({"revoked_by": actor_id, "revoked_sessions": result.rows_affected, "scope": "all_users"}),
@@ -226,7 +239,7 @@ pub async fn revoke_all_sessions(
 pub async fn refresh_token(
     db: &DatabaseConnection,
     refresh_token: &str,
-    user_agent: Option<String>,
+    client: ClientInfo,
 ) -> Result<AuthTokenResponse, AuthError> {
     let session = sessions::Entity::find()
         .filter(sessions::Column::RefreshToken.eq(token_hash(refresh_token)))
@@ -251,7 +264,7 @@ pub async fn refresh_token(
         // anchored to the first rotation, so replays cannot push it forward.
         let grace = refresh_token_grace();
         if grace > Duration::zero() && now <= rotated_at.with_timezone(&Utc) + grace {
-            return issue_rotated_token(db, &session, false, user_agent).await;
+            return issue_rotated_token(db, &session, false, client).await;
         }
 
         // Past the window, assume the token leaked: whoever holds the successor
@@ -264,8 +277,8 @@ pub async fn refresh_token(
             Some(session.user_id),
             "token_reuse_detected",
             "failure",
-            None,
-            user_agent,
+            client.ip_address.clone(),
+            client.user_agent.clone(),
             None,
             Some(serde_json::json!({ "family_id": session.family_id })),
         )
@@ -281,7 +294,7 @@ pub async fn refresh_token(
         return Err(AuthError::TokenExpired);
     }
 
-    issue_rotated_token(db, &session, true, user_agent).await
+    issue_rotated_token(db, &session, true, client).await
 }
 
 /// Mints the successor of `current` along with a fresh access token.
@@ -293,7 +306,7 @@ pub(super) async fn issue_rotated_token(
     db: &DatabaseConnection,
     current: &sessions::Model,
     rotate: bool,
-    user_agent: Option<String>,
+    client: ClientInfo,
 ) -> Result<AuthTokenResponse, AuthError> {
     // The account may have been deleted after the session was issued.
     let user = users::Entity::find_by_id(current.user_id)
@@ -307,7 +320,7 @@ pub(super) async fn issue_rotated_token(
         user.id,
         Some(current.family_id),
         current.absolute_expires_at.with_timezone(&Utc),
-        user_agent.clone(),
+        client.clone(),
     );
 
     if rotate {
@@ -348,8 +361,8 @@ pub(super) async fn issue_rotated_token(
         Some(user.id),
         "token_refresh",
         "success",
-        None,
-        user_agent,
+        client.ip_address.clone(),
+        client.user_agent.clone(),
         None,
         None,
     )
@@ -369,7 +382,7 @@ pub async fn logout(
     db: &DatabaseConnection,
     user_id: Uuid,
     refresh_token: &str,
-    user_agent: Option<String>,
+    client: ClientInfo,
 ) -> Result<(), AuthError> {
     let session = sessions::Entity::find()
         .filter(sessions::Column::RefreshToken.eq(token_hash(refresh_token)))
@@ -384,8 +397,8 @@ pub async fn logout(
         Some(user_id),
         "logout",
         "success",
-        None,
-        user_agent,
+        client.ip_address.clone(),
+        client.user_agent.clone(),
         None,
         None,
     )

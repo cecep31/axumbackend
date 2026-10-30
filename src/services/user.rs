@@ -1,6 +1,7 @@
 use crate::dto::user::UserDeletedFilter;
 use crate::entities::users;
 use crate::models::user::{UserResponse, UserView};
+use crate::services::auth::{email_matches, is_unique_violation, normalize_email};
 use crate::services::user_hydration;
 use chrono::Utc;
 use sea_orm::{
@@ -137,7 +138,12 @@ pub async fn get_users(
     // NULLS LAST so users who never logged in stay at the bottom
     // regardless of asc/desc (Postgres defaults to NULLS FIRST on DESC).
     let nulls = sea_orm::sea_query::NullOrdering::Last;
-    query = if order_desc {
+    let default_order = !matches!(order_by, Some("last_logged_at" | "username" | "email"));
+    query = if default_order && deleted_filter == UserDeletedFilter::Only {
+        // echobackend: the trash view's default order is the deletion time,
+        // newest first, whatever `order_direction` says (no NULLS LAST).
+        query.order_by(users::Column::DeletedAt, sea_orm::Order::Desc)
+    } else if order_desc {
         query.order_by_with_nulls(order_column, sea_orm::Order::Desc, nulls)
     } else {
         query.order_by_with_nulls(order_column, sea_orm::Order::Asc, nulls)
@@ -184,8 +190,8 @@ impl From<DbErr> for RestoreError {
 
 /// Restores a soft-deleted user, mirroring echobackend's `RestoreByID`
 /// (`internal/repository/user_repository.go`): rejects the restore with a
-/// conflict if another user (deleted or not) already holds the same email
-/// or username.
+/// conflict if another *active* user holds the same email (case-insensitive)
+/// or username (exact).
 pub async fn restore(db: &DatabaseConnection, id: Uuid) -> Result<UserResponse, RestoreError> {
     let Some(user) = users::Entity::find_by_id(id)
         .filter(users::Column::DeletedAt.is_not_null())
@@ -196,8 +202,9 @@ pub async fn restore(db: &DatabaseConnection, id: Uuid) -> Result<UserResponse, 
     };
 
     let email_taken = users::Entity::find()
-        .filter(users::Column::Email.eq(user.email.clone()))
+        .filter(email_matches(&user.email))
         .filter(users::Column::Id.ne(id))
+        .filter(users::Column::DeletedAt.is_null())
         .one(db)
         .await?
         .is_some();
@@ -209,6 +216,7 @@ pub async fn restore(db: &DatabaseConnection, id: Uuid) -> Result<UserResponse, 
         let username_taken = users::Entity::find()
             .filter(users::Column::Username.eq(username))
             .filter(users::Column::Id.ne(id))
+            .filter(users::Column::DeletedAt.is_null())
             .one(db)
             .await?
             .is_some();
@@ -243,8 +251,12 @@ pub async fn create_user(
     db: &DatabaseConnection,
     req: crate::dto::user::CreateUserRequest,
 ) -> Result<UserResponse, UserError> {
+    // echobackend `CreateUser`: normalized email; both checks only consider
+    // active users (email case-insensitive, username exact).
+    let email = normalize_email(&req.email);
     let email_exists = users::Entity::find()
-        .filter(users::Column::Email.eq(&req.email))
+        .filter(email_matches(&email))
+        .filter(users::Column::DeletedAt.is_null())
         .one(db)
         .await?
         .is_some();
@@ -254,6 +266,7 @@ pub async fn create_user(
 
     let username_exists = users::Entity::find()
         .filter(users::Column::Username.eq(&req.username))
+        .filter(users::Column::DeletedAt.is_null())
         .one(db)
         .await?
         .is_some();
@@ -264,19 +277,25 @@ pub async fn create_user(
     let hashed = crate::services::auth::hash_password(&req.password)
         .map_err(|e| UserError::InvalidData(format!("{e:?}")))?;
 
-    let new_user = users::ActiveModel {
+    let inserted = users::ActiveModel {
         id: Set(Uuid::now_v7()),
-        email: Set(req.email),
+        email: Set(email),
         username: Set(Some(req.username)),
         password: Set(Some(hashed)),
-        first_name: Set(req.first_name),
-        last_name: Set(req.last_name),
+        // Empty names are stored as NULL, like echobackend.
+        first_name: Set(req.first_name.filter(|name| !name.is_empty())),
+        last_name: Set(req.last_name.filter(|name| !name.is_empty())),
         created_at: Set(Some(Utc::now().into())),
         updated_at: Set(Some(Utc::now().into())),
         ..Default::default()
     }
     .insert(db)
-    .await?;
+    .await;
+    let new_user = match inserted {
+        Ok(user) => user,
+        Err(err) if is_unique_violation(&err) => return Err(UserError::UserExists),
+        Err(err) => return Err(err.into()),
+    };
 
     Ok(hydrate_user(db, new_user, UserView::Admin).await?)
 }
@@ -307,10 +326,14 @@ pub async fn update_user(
         .await?
         .ok_or(UserError::NotFound)?;
 
-    if user.email != req.email {
+    // echobackend `UpdateUser`: normalized email; conflicts are other active
+    // users (email case-insensitive, username exact).
+    let email = normalize_email(&req.email);
+    if user.email != email {
         let email_taken = users::Entity::find()
-            .filter(users::Column::Email.eq(&req.email))
+            .filter(email_matches(&email))
             .filter(users::Column::Id.ne(id))
+            .filter(users::Column::DeletedAt.is_null())
             .one(db)
             .await?
             .is_some();
@@ -323,6 +346,7 @@ pub async fn update_user(
         let username_taken = users::Entity::find()
             .filter(users::Column::Username.eq(&req.username))
             .filter(users::Column::Id.ne(id))
+            .filter(users::Column::DeletedAt.is_null())
             .one(db)
             .await?
             .is_some();
@@ -332,7 +356,7 @@ pub async fn update_user(
     }
 
     let mut active = user.into_active_model();
-    active.email = Set(req.email);
+    active.email = Set(email);
     active.username = Set(Some(req.username));
     active.first_name = Set(req.first_name);
     active.last_name = Set(req.last_name);

@@ -36,11 +36,32 @@ pub struct ApiResponse<T> {
 impl ApiResponse<serde_json::Value> {
     /// Failure envelope: `{ success: false, message, error }`.
     pub fn error(message: impl Into<String>, error: impl Into<String>) -> Self {
+        Self::failure(message, Some(error.into()))
+    }
+
+    /// Failure envelope whose `error` key is omitted when `None` (echobackend
+    /// 500s and `BadRequest(c, msg, nil)`).
+    pub fn failure(message: impl Into<String>, error: Option<String>) -> Self {
         ApiResponse {
             success: false,
             message: message.into(),
             data: None,
-            error: Some(error.into()),
+            error,
+            errors: None,
+            meta: None,
+        }
+    }
+
+    /// Success envelope without a payload: `{ success: true, message }`.
+    /// echobackend's `response.Success(c, msg, nil)` omits `data`, so use this
+    /// instead of `success_with_message(msg, Value::Null)` (which would send
+    /// `"data": null`).
+    pub fn message(message: impl Into<String>) -> Self {
+        ApiResponse {
+            success: true,
+            message: message.into(),
+            data: None,
+            error: None,
             errors: None,
             meta: None,
         }
@@ -139,6 +160,16 @@ mod tests {
         let res = ApiResponse::with_meta_message("OK", "items", 25, 0, 0);
         let meta = res.meta.unwrap();
         assert_eq!(meta.total_pages, 0);
+    }
+
+    #[test]
+    fn test_message_only_omits_data() {
+        let value =
+            serde_json::to_value(ApiResponse::message("Comment deleted successfully")).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"success": true, "message": "Comment deleted successfully"})
+        );
     }
 
     #[test]

@@ -5,7 +5,9 @@ use crate::dto::auth::{
     RecentActivityQuery, RefreshTokenRequest, RegisterRequest, ResetPasswordRequest,
     RevokeAllSessionsRequest, UpdateProfileRequest,
 };
+use crate::dto::validation::parse_pagination;
 use crate::http::auth::{AdminUser, AuthUser};
+use crate::http::client_ip::RequestClient;
 use crate::http::error::AppError;
 use crate::http::extract::{VJson, VPath, VQuery};
 use crate::http::rate_limit::{RateLimiter, rate_limit};
@@ -26,32 +28,22 @@ use rand::distr::{Alphanumeric, SampleString};
 use std::sync::Arc;
 use std::time::Duration;
 
-fn user_agent(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(axum::http::header::USER_AGENT)
-        .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned)
-}
-
-fn map_auth_error(message: &'static str, err: AuthError) -> AppError {
+/// echobackend `response.InternalServerError(c, message, err)`: 500 with the
+/// handler message only; the cause is logged, never sent.
+fn internal_auth_error(message: &'static str, err: AuthError) -> AppError {
     match err {
-        AuthError::UserExists => AppError::Conflict("Email or username already exists".to_string()),
-        AuthError::InvalidCredentials => {
-            AppError::Unauthorized("Invalid identifier or password".to_string())
-        }
-        AuthError::InvalidToken => AppError::Unauthorized("Invalid or expired token".to_string()),
-        AuthError::TokenExpired => AppError::Unauthorized("Token has expired".to_string()),
-        AuthError::TokenUsed => AppError::BadRequest("Token has already been used".to_string()),
-        AuthError::Db(err) => AppError::from(err),
-        AuthError::Token(err) => AppError::InternalServerError(format!("{}: {}", message, err)),
-        AuthError::Hash(err) => AppError::InternalServerError(format!("{}: {}", message, err)),
-        AuthError::Request(err) => AppError::InternalServerError(format!("{}: {}", message, err)),
-        AuthError::OAuth(err) => AppError::InternalServerError(format!("{}: {}", message, err)),
+        AuthError::Db(err) => AppError::from(err).context(message),
+        AuthError::Token(err) => AppError::internal(message, err),
+        AuthError::Hash(err) => AppError::internal(message, err),
+        AuthError::Request(err) => AppError::internal(message, err),
+        AuthError::OAuth(err) => AppError::internal(message, err),
+        other => AppError::internal(message, format!("{other:?}")),
     }
 }
 
 pub async fn register(
     State(pool): State<DbPool>,
+    RequestClient(client): RequestClient,
     VJson(req): VJson<RegisterRequest>,
 ) -> Result<
     (
@@ -67,9 +59,15 @@ pub async fn register(
         req.password,
         req.first_name,
         req.last_name,
+        client,
     )
     .await
-    .map_err(|err| map_auth_error("Registration failed", err))?;
+    .map_err(|err| match err {
+        AuthError::UserExists => {
+            AppError::conflict("Registration failed", "Email or username already exists")
+        }
+        other => internal_auth_error("Registration failed", other),
+    })?;
 
     Ok((
         StatusCode::CREATED,
@@ -82,13 +80,17 @@ pub async fn register(
 
 pub async fn login(
     State(pool): State<DbPool>,
-    headers: HeaderMap,
+    RequestClient(client): RequestClient,
     VJson(req): VJson<LoginRequest>,
 ) -> Result<Json<ApiResponse<services::auth::AuthTokenResponse>>, AppError> {
-    let response =
-        services::auth::login(&pool, &req.identifier, &req.password, user_agent(&headers))
-            .await
-            .map_err(|err| map_auth_error("Login failed", err))?;
+    let response = services::auth::login(&pool, &req.identifier, &req.password, client)
+        .await
+        .map_err(|err| match err {
+            AuthError::InvalidCredentials => {
+                AppError::Unauthorized("Invalid identifier or password".to_string())
+            }
+            other => internal_auth_error("Login failed", other),
+        })?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Login successful",
@@ -99,49 +101,57 @@ pub async fn login(
 pub async fn forgot_password(
     State(pool): State<DbPool>,
     State(mailer): State<Arc<dyn Mailer>>,
-    headers: HeaderMap,
+    RequestClient(client): RequestClient,
     VJson(req): VJson<ForgotPasswordRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    let _ =
-        services::auth::forgot_password(&pool, mailer.as_ref(), &req.email, user_agent(&headers))
-            .await;
-    Ok(Json(ApiResponse::success_with_message(
+    let _ = services::auth::forgot_password(&pool, mailer.as_ref(), &req.email, client).await;
+    Ok(Json(ApiResponse::message(
         "If the email exists, a password reset link has been sent",
-        serde_json::Value::Null,
     )))
 }
 
 pub async fn reset_password(
     State(pool): State<DbPool>,
-    headers: HeaderMap,
+    RequestClient(client): RequestClient,
     VJson(req): VJson<ResetPasswordRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    services::auth::reset_password(&pool, &req.token, &req.password, user_agent(&headers))
+    services::auth::reset_password(&pool, &req.token, &req.password, client)
         .await
         .map_err(|err| match err {
-            AuthError::InvalidToken | AuthError::TokenExpired => {
-                AppError::BadRequest("Invalid or expired reset token".to_string())
-            }
-            AuthError::TokenUsed => {
-                AppError::BadRequest("Reset token has already been used".to_string())
-            }
-            other => map_auth_error("Failed to reset password", other),
+            AuthError::InvalidToken => AppError::bad_request(
+                "Invalid or expired reset token",
+                Some("invalid or expired token".into()),
+            ),
+            AuthError::TokenUsed => AppError::bad_request(
+                "Reset token has already been used",
+                Some("password reset token has already been used".into()),
+            ),
+            AuthError::TokenExpired => AppError::bad_request(
+                "Reset token has expired",
+                Some("password reset token has expired".into()),
+            ),
+            other => internal_auth_error("Failed to reset password", other),
         })?;
 
-    Ok(Json(ApiResponse::success_with_message(
-        "Password reset successful",
-        serde_json::Value::Null,
-    )))
+    Ok(Json(ApiResponse::message("Password reset successful")))
 }
 
 pub async fn refresh_token(
     State(pool): State<DbPool>,
-    headers: HeaderMap,
+    RequestClient(client): RequestClient,
     VJson(req): VJson<RefreshTokenRequest>,
 ) -> Result<Json<ApiResponse<services::auth::AuthTokenResponse>>, AppError> {
-    let response = services::auth::refresh_token(&pool, &req.refresh_token, user_agent(&headers))
+    let response = services::auth::refresh_token(&pool, &req.refresh_token, client)
         .await
-        .map_err(|err| map_auth_error("Failed to refresh token", err))?;
+        .map_err(|err| match err {
+            AuthError::InvalidToken => {
+                AppError::Unauthorized("Invalid or expired refresh token".to_string())
+            }
+            AuthError::TokenExpired => {
+                AppError::Unauthorized("Refresh token has expired".to_string())
+            }
+            other => internal_auth_error("Failed to refresh token", other),
+        })?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Token refreshed successfully",
@@ -152,26 +162,17 @@ pub async fn refresh_token(
 pub async fn logout(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    RequestClient(client): RequestClient,
     VJson(req): VJson<LogoutRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    let _ = services::auth::logout(
-        &pool,
-        auth_user.id,
-        &req.refresh_token,
-        user_agent(&headers),
-    )
-    .await;
-    Ok(Json(ApiResponse::success_with_message(
-        "Logout successful",
-        serde_json::Value::Null,
-    )))
+    let _ = services::auth::logout(&pool, auth_user.id, &req.refresh_token, client).await;
+    Ok(Json(ApiResponse::message("Logout successful")))
 }
 
 pub async fn change_password(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    RequestClient(client): RequestClient,
     VJson(req): VJson<ChangePasswordRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     services::auth::change_password(
@@ -179,20 +180,19 @@ pub async fn change_password(
         auth_user.id,
         &req.current_password,
         &req.new_password,
-        user_agent(&headers),
+        client,
     )
     .await
     .map_err(|err| match err {
         AuthError::InvalidCredentials => {
             AppError::Unauthorized("Current password is incorrect".to_string())
         }
-        other => map_auth_error("Failed to change password", other),
+        // echobackend: a vanished user is ErrUserNotFound, reported as a 500
+        // like any other unmapped error.
+        other => internal_auth_error("Failed to change password", other),
     })?;
 
-    Ok(Json(ApiResponse::success_with_message(
-        "Password changed successfully",
-        serde_json::Value::Null,
-    )))
+    Ok(Json(ApiResponse::message("Password changed successfully")))
 }
 
 pub async fn profile(
@@ -204,8 +204,11 @@ pub async fn profile(
             "Profile retrieved successfully",
             user,
         ))),
-        Ok(None) => Err(AppError::NotFound("User not found".to_string())),
-        Err(e) => Err(AppError::from(e)),
+        Ok(None) => Err(AppError::not_found(
+            "User not found",
+            Some("user not found".into()),
+        )),
+        Err(e) => Err(AppError::from(e).context("Failed to get profile")),
     }
 }
 
@@ -214,17 +217,17 @@ pub async fn activity_logs(
     auth_user: AuthUser,
     VQuery(query): VQuery<ActivityLogQuery>,
 ) -> Result<Json<ApiResponse<Vec<services::auth::AuthActivityLogResponse>>>, AppError> {
-    let limit = query.limit.unwrap_or(20);
-    let offset = query.offset.unwrap_or(0);
+    let (limit, offset) = parse_pagination(query.offset.as_deref(), query.limit.as_deref(), 20);
     let (logs, total) = services::auth::get_activity_logs(
         &pool,
         auth_user.id,
-        query.activity_type.clone(),
+        // echobackend: an empty activity_type means no filter.
+        query.activity_type.clone().filter(|t| !t.is_empty()),
         limit as u64,
         offset as u64,
     )
     .await
-    .map_err(|err| map_auth_error("Failed to get activity logs", err))?;
+    .map_err(|err| internal_auth_error("Failed to get activity logs", err))?;
 
     Ok(Json(ApiResponse::with_meta_message(
         "Activity logs retrieved successfully",
@@ -240,10 +243,10 @@ pub async fn recent_activity(
     auth_user: AuthUser,
     VQuery(query): VQuery<RecentActivityQuery>,
 ) -> Result<Json<ApiResponse<Vec<services::auth::AuthActivityLogResponse>>>, AppError> {
-    let limit = query.limit.unwrap_or(10);
+    let limit = query.limit();
     let logs = services::auth::get_recent_activity(&pool, auth_user.id, limit as u64)
         .await
-        .map_err(|err| map_auth_error("Failed to get recent activity", err))?;
+        .map_err(|err| internal_auth_error("Failed to get recent activity", err))?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Recent activity retrieved successfully",
@@ -256,13 +259,12 @@ pub async fn failed_logins(
     _admin_user: crate::http::auth::AdminUser,
     VQuery(query): VQuery<FailedLoginsQuery>,
 ) -> Result<Json<ApiResponse<Vec<services::auth::AuthActivityLogResponse>>>, AppError> {
-    let limit = query.limit.unwrap_or(20);
-    let offset = query.offset.unwrap_or(0);
-    let since_hours = query.since_hours.unwrap_or(24);
+    let (limit, offset) = parse_pagination(query.offset.as_deref(), query.limit.as_deref(), 20);
+    let since_hours = query.since_hours();
     let (logs, total) =
         services::auth::get_failed_logins(&pool, since_hours, limit as u64, offset as u64)
             .await
-            .map_err(|err| map_auth_error("Failed to get failed logins", err))?;
+            .map_err(|err| internal_auth_error("Failed to get failed logins", err))?;
 
     Ok(Json(ApiResponse::with_meta_message(
         "Failed logins retrieved successfully",
@@ -364,6 +366,7 @@ pub async fn github_oauth_redirect() -> Response {
 pub async fn github_oauth_callback(
     State(pool): State<DbPool>,
     headers: HeaderMap,
+    RequestClient(client): RequestClient,
     Query(query): Query<GithubCallbackQuery>,
 ) -> Response {
     let callback_url = &FrontendConfig::get().oauth_callback_url;
@@ -388,8 +391,6 @@ pub async fn github_oauth_callback(
         );
     }
 
-    let user_agent = user_agent(&headers);
-
     let github_token = match services::auth::get_github_token(&code).await {
         Ok(token) => token,
         Err(err) => {
@@ -398,8 +399,8 @@ pub async fn github_oauth_callback(
                 None,
                 "oauth_login_failed",
                 "failure",
-                None,
-                user_agent.clone(),
+                client.ip_address.clone(),
+                client.user_agent.clone(),
                 None,
                 Some(serde_json::json!({
                     "provider": "github",
@@ -422,8 +423,8 @@ pub async fn github_oauth_callback(
                 None,
                 "oauth_login_failed",
                 "failure",
-                None,
-                user_agent.clone(),
+                client.ip_address.clone(),
+                client.user_agent.clone(),
                 None,
                 Some(serde_json::json!({
                     "provider": "github",
@@ -444,7 +445,7 @@ pub async fn github_oauth_callback(
         github_user.email = Some(email);
     }
 
-    let tokens = match services::auth::sign_in_with_github(&pool, &github_user, user_agent).await {
+    let tokens = match services::auth::sign_in_with_github(&pool, &github_user, client).await {
         Ok(tokens) => tokens,
         Err(_) => {
             return oauth_redirect(
@@ -471,7 +472,7 @@ pub async fn exchange_oauth_code(
             AuthError::InvalidToken => {
                 AppError::Unauthorized("Invalid or expired OAuth code".to_string())
             }
-            other => map_auth_error("Failed to exchange OAuth code", other),
+            other => internal_auth_error("Failed to exchange OAuth code", other),
         })?;
 
     Ok(Json(ApiResponse::success_with_message(
@@ -487,7 +488,7 @@ pub async fn check_username(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     let exists = services::auth::check_username_exists(&pool, &req.username)
         .await
-        .map_err(|err| map_auth_error("Failed to check username", err))?;
+        .map_err(|err| internal_auth_error("Failed to check username", err))?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Username availability checked",
@@ -509,7 +510,15 @@ pub async fn update_profile(
         req.last_name,
     )
     .await
-    .map_err(|err| map_auth_error("Failed to update profile", err))?;
+    .map_err(|err| match err {
+        AuthError::UserExists => {
+            AppError::conflict("Failed to update profile", "Username already taken")
+        }
+        AuthError::UserNotFound => {
+            AppError::not_found("Failed to update profile", Some("user not found".into()))
+        }
+        other => internal_auth_error("Failed to update profile", other),
+    })?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Profile updated successfully",
@@ -524,21 +533,31 @@ pub async fn delete_account(
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     services::auth::delete_account(&pool, auth_user.id)
         .await
-        .map_err(|err| map_auth_error("Failed to delete account", err))?;
+        // echobackend reports every failure here, a missing user included,
+        // as a 500.
+        .map_err(|err| internal_auth_error("Failed to delete account", err))?;
 
-    Ok(Json(ApiResponse::success_with_message(
-        "Account deleted successfully",
-        serde_json::Value::Null,
-    )))
+    Ok(Json(ApiResponse::message("Account deleted successfully")))
 }
 
 fn map_revoke_error(err: services::auth::RevokeError) -> AppError {
     match err {
         services::auth::RevokeError::UserNotFound => {
-            AppError::NotFound("User not found".to_string())
+            AppError::not_found("User not found", Some("user not found".into()))
         }
-        services::auth::RevokeError::Db(e) => AppError::from(e),
+        services::auth::RevokeError::Db(e) => {
+            AppError::from(e).context("Failed to revoke sessions")
+        }
     }
+}
+
+/// echobackend `validator.IsValidUUID`: canonical, lowercase, hyphenated.
+fn is_canonical_uuid(raw: &str) -> bool {
+    raw.len() == 36
+        && raw.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+        })
 }
 
 /// `DELETE /api/auth/sessions/:userId` — admin only, mirrors echobackend's
@@ -546,17 +565,23 @@ fn map_revoke_error(err: services::auth::RevokeError) -> AppError {
 pub async fn revoke_user_sessions(
     State(pool): State<DbPool>,
     admin: AdminUser,
-    headers: HeaderMap,
+    RequestClient(client): RequestClient,
     VPath(params): VPath<RevokeUserPath>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    let revoked = services::auth::revoke_user_sessions(
-        &pool,
-        params.user_id,
-        admin.0.id,
-        user_agent(&headers),
-    )
-    .await
-    .map_err(map_revoke_error)?;
+    // Parsed here rather than by the extractor so a bad id gets echobackend's
+    // "Invalid user ID format" instead of the generic path rejection.
+    let target = Some(params.user_id.as_str())
+        .filter(|raw| is_canonical_uuid(raw))
+        .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+        .ok_or_else(|| {
+            AppError::bad_request(
+                "Invalid user ID format",
+                Some("invalid user ID format".into()),
+            )
+        })?;
+    let revoked = services::auth::revoke_user_sessions(&pool, target, admin.0.id, client)
+        .await
+        .map_err(map_revoke_error)?;
     Ok(Json(ApiResponse::success_with_message(
         "Sessions revoked successfully",
         serde_json::json!({ "user_id": params.user_id, "revoked_sessions": revoked }),
@@ -568,7 +593,7 @@ pub async fn revoke_user_sessions(
 pub async fn revoke_all_sessions(
     State(pool): State<DbPool>,
     admin: AdminUser,
-    headers: HeaderMap,
+    RequestClient(client): RequestClient,
     VJson(req): VJson<RevokeAllSessionsRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     if req.confirm != Some(true) {
@@ -576,7 +601,7 @@ pub async fn revoke_all_sessions(
             "Set \"confirm\": true to log out every user".to_string(),
         ));
     }
-    let revoked = services::auth::revoke_all_sessions(&pool, admin.0.id, user_agent(&headers))
+    let revoked = services::auth::revoke_all_sessions(&pool, admin.0.id, client)
         .await
         .map_err(map_revoke_error)?;
     Ok(Json(ApiResponse::success_with_message(
@@ -588,7 +613,7 @@ pub async fn revoke_all_sessions(
 #[derive(serde::Deserialize, garde::Validate)]
 pub struct RevokeUserPath {
     #[garde(skip)]
-    pub user_id: uuid::Uuid,
+    pub user_id: String,
 }
 
 pub fn routes() -> Router<AppState> {

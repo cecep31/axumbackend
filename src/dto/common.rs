@@ -1,4 +1,4 @@
-use crate::dto::validation::{parse_pagination, username_chars};
+use crate::dto::validation::parse_pagination;
 use garde::Validate;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -22,8 +22,11 @@ impl PaginationQuery {
 }
 
 #[derive(Deserialize, Validate)]
+/// Any non-empty segment, like echobackend's `c.Param("username")`: stored
+/// usernames are only length-checked (3..30, any charset), so e.g.
+/// `john.doe` must stay reachable; unknown names are a 404.
 pub struct UsernamePath {
-    #[garde(length(chars, min = 1, max = 50), custom(username_chars))]
+    #[garde(length(chars, min = 1))]
     pub username: String,
 }
 

@@ -23,9 +23,10 @@ pub struct Post {
     pub photo_url: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
-    pub published: bool,
+    /// `null` only for legacy rows with a NULL flag (echobackend `*bool`).
+    pub published: Option<bool>,
     pub published_at: Option<DateTime<Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Always present (`null` unless hidden), like echobackend's `hidden_at`.
     pub hidden_at: Option<DateTime<Utc>>,
     pub view_count: i64,
     pub like_count: i64,
@@ -64,7 +65,7 @@ impl Post {
             photo_url: post.photo_url,
             created_at: to_utc(post.created_at),
             updated_at: to_utc(post.updated_at),
-            published: post.published.unwrap_or(true),
+            published: post.published,
             published_at: to_utc(post.published_at),
             hidden_at: to_utc(post.hidden_at),
             view_count: post.view_count.unwrap_or_default(),
@@ -142,6 +143,21 @@ mod tests {
         let post = Post::from_entity(model, None, vec![], true);
 
         assert_eq!(post.body.unwrap(), "Short content");
+    }
+
+    #[test]
+    fn test_post_json_always_has_hidden_at() {
+        let model = sample_post_model(Some("body".into()));
+        let json = serde_json::to_value(Post::from_entity(model, None, vec![], true)).unwrap();
+        assert!(
+            json.get("hidden_at")
+                .is_some_and(serde_json::Value::is_null)
+        );
+        assert_eq!(json["published"], serde_json::json!(true));
+        // `user`/`tags` stay omitempty, `created_by` is never sent.
+        assert!(json.get("user").is_none());
+        assert!(json.get("tags").is_none());
+        assert!(json.get("created_by").is_none());
     }
 
     #[test]

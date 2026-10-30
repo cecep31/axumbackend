@@ -9,6 +9,10 @@ pub struct Model {
     pub name: Option<String>,
     pub r#type: String,
     pub event_date: Date,
+    /// Migration 013 (echobackend/fiberbackend): `cum_date DATE NULL`.
+    pub cum_date: Option<Date>,
+    /// Migration 013: `rec_date DATE NULL`.
+    pub rec_date: Option<Date>,
     pub pay_date: Option<Date>,
     pub amount: Option<Decimal>,
     pub currency: Option<String>,

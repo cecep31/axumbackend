@@ -1,10 +1,10 @@
 use axumbackend::{
     config, handlers,
-    http::rate_limit::RateLimiter,
-    infra::{cache, database, email::ResendMailer, realtime, storage},
+    http::rate_limit::TokenBucketLimiter,
+    infra::{cache, database, email::QueuedMailer, realtime, storage},
     state::AppState,
 };
-use std::{net::SocketAddr, sync::Arc};
+use std::{future::IntoFuture, net::SocketAddr, sync::Arc, time::Duration};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -60,25 +60,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Optional: without S3, image uploads report "Storage is not configured".
     storage::init(&config.s3);
 
-    let limiter = if config.rate_limit.max_requests == 0 {
+    // Global HTTP limiter, like echobackend: token bucket per client IP
+    // (rate = HTTP_RATE_LIMIT_RPS, burst = 2x), 0 = disabled.
+    let limiter = if config.rate_limit.rps <= 0 {
         tracing::info!("Rate limiter disabled");
         None
     } else {
+        let rps = u32::try_from(config.rate_limit.rps).unwrap_or(u32::MAX);
         tracing::info!(
-            "Rate limiter enabled (max_requests: {}, window: {:?})",
-            config.rate_limit.max_requests,
-            config.rate_limit.window
+            "Rate limiter enabled (rps: {}, burst: {}, idle_expiry: {:?})",
+            rps,
+            u64::from(rps) * 2,
+            config.rate_limit.idle_expiry
         );
-        Some(RateLimiter::new(
-            config.rate_limit.max_requests,
-            config.rate_limit.window,
+        Some(TokenBucketLimiter::new(
+            rps,
+            config.rate_limit.idle_expiry,
             config.http.trust_proxy,
         ))
     };
 
     let state = AppState {
         db: pool,
-        mailer: Arc::new(ResendMailer),
+        // SMTP (echobackend) when SMTP_HOST is set, else Resend when
+        // RESEND_API_KEY is set, else dev mode.
+        mailer: Arc::new(QueuedMailer::from_config(&config.email)),
     };
     let app = handlers::create_router(limiter).with_state(state);
 
@@ -87,10 +93,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|e| format!("Failed to bind to {}: {}", addr, e))?;
     tracing::info!("Server listening on {}", addr);
-    axum::serve(
+    // echobackend `main`: on SIGINT/SIGTERM stop accepting connections, end
+    // every SSE stream (the hub closes all subscriptions so clients reconnect
+    // elsewhere) and give in-flight requests at most 10s to finish.
+    let shutdown_started = Arc::new(tokio::sync::Notify::new());
+    let on_shutdown = shutdown_started.clone();
+    let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .await?;
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        tracing::info!("server is shutting down");
+        realtime::hub().close();
+        on_shutdown.notify_one();
+    })
+    .into_future();
+    tokio::pin!(server);
+
+    tokio::select! {
+        result = &mut server => result?,
+        _ = shutdown_started.notified() => {
+            match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut server).await {
+                Ok(result) => result?,
+                Err(_) => tracing::error!("server forced to shutdown after {SHUTDOWN_TIMEOUT:?}"),
+            }
+        }
+    }
     Ok(())
+}
+
+/// Upper bound on draining in-flight requests (echobackend's 10s
+/// `server.Shutdown` context).
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Resolves on Ctrl-C (SIGINT) or, on Unix, SIGTERM.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            tracing::error!(error = %err, "failed to listen for Ctrl-C");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "failed to listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }

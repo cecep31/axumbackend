@@ -25,9 +25,12 @@ pub async fn get_my_posts_analytics(
         .as_deref()
         .and_then(|value| chrono::NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d").ok());
 
+    // echobackend `respondError(c, "Failed to get post analytics", err)`: a
+    // span over 366 days is 400 with the domain text as `error`.
     let analytics =
         services::post_view::get_my_posts_analytics(&pool, auth_user.id, start_date, end_date)
-            .await?;
+            .await
+            .map_err(|e| AppError::from(e).context("Failed to get post analytics"))?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Successfully retrieved post analytics",

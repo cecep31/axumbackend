@@ -23,11 +23,11 @@ Edit `.env` with your database credentials:
 ```env
 PORT=8080
 DATABASE_URL="postgresql://postgres:password@localhost:5432/axumbackend"
-DB_POOL_MAX_SIZE=20
-JWT_SECRET="change-this"
+DB_POOL_MAX_OPEN=20
+JWT_SECRET="change-this-to-at-least-32-characters"
 FRONTEND_RESET_PASSWORD_URL="http://localhost:3000/reset-password"
-RESEND_API_KEY=""
-EMAIL_FROM="noreply@pilput.net"
+SMTP_HOST=""
+SMTP_FROM="noreply@pilput.net"
 ```
 
 ### 2. Run the application
@@ -62,15 +62,19 @@ Server starts on `http://localhost:8080`
 
 ### Password Reset Email
 
-`POST /api/auth/forgot-password` always returns the same success response for registered and unregistered emails. When `RESEND_API_KEY` is configured, the backend sends the reset link through Resend using:
+`POST /api/auth/forgot-password` always returns the same success response for registered and unregistered emails. Like echobackend, the email is queued in-process (capacity 128) and delivered by 2 background workers, so the request never waits on delivery:
 
 | Variable | Description |
 |----------|-------------|
-| `RESEND_API_KEY` | Resend API key for email delivery |
-| `EMAIL_FROM` | Sender email address |
+| `SMTP_HOST` / `SMTP_PORT` | SMTP server (delivery is enabled when `SMTP_HOST` is set) |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | Optional credentials (PLAIN auth) |
+| `SMTP_TLS` | `true` for implicit TLS (port 465); otherwise STARTTLS when offered |
+| `SMTP_TIMEOUT_SECONDS` / `SMTP_TASK_TIMEOUT_SECONDS` | Per-operation and per-email timeouts |
+| `SMTP_FROM` (alias `EMAIL_FROM`) | Sender email address |
+| `RESEND_API_KEY` | axum-only fallback transport, used when `SMTP_HOST` is empty |
 | `FRONTEND_RESET_PASSWORD_URL` | Frontend reset page; backend appends `?token=...` |
 
-If Resend is not configured, the reset token is still created and the reset link is recorded in auth activity metadata for local development.
+If no transport is configured, the reset token is still created and a `devMode: true` activity log is recorded (the link itself is never logged).
 
 ## Development
 
