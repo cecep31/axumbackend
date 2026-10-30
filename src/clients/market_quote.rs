@@ -2,7 +2,7 @@
 //!
 //! Ports echobackend's `market.RapidAPIQuoteClient` wrapped in
 //! `market.CachedQuoteClient`: symbols are normalized, cache hits are served
-//! from Redis (`quote:<SYMBOL>`, 15 minute TTL), and misses are fetched in
+//! from Redis (`quote:<SYMBOL>`, 5 minute TTL), and misses are fetched in
 //! batches of up to 50 symbols.
 
 use crate::infra::cache;
@@ -15,7 +15,7 @@ use std::time::Duration;
 const RAPIDAPI_QUOTE_HOST: &str = "yh-finance.p.rapidapi.com";
 const RAPIDAPI_QUOTE_BASE_URL: &str = "https://yh-finance.p.rapidapi.com";
 const MAX_SYMBOLS_PER_QUOTE_REQUEST: usize = 50;
-const QUOTE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+const QUOTE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 fn shared_client() -> &'static Client {
     static CLIENT: LazyLock<Client> = LazyLock::new(|| {
