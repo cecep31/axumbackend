@@ -16,7 +16,7 @@ Recommended order: `cargo fmt && cargo clippy && cargo test`
 
 - Copy `.env.example` to `.env` and configure `DATABASE_URL`. A running PostgreSQL instance is required.
 - Config sections read via `XxxConfig::get()` are published once at startup by `Config::init_globals()` (`OnceLock`); never call `init` again after `main` runs.
-- Config is loaded from env vars (via `dotenvy`), not from a config file. Primary keys are in `.env.example`; loaders and legacy aliases live in `src/config/loader.rs`. Use `parse_env` / `parse_env_alias` / `parse_bool_alias` / `parse_duration_alias` / `env_string` when adding a key. They follow echobackend's `config/env.go`: the first set alias wins, an unparsable value falls back to the default (never panics), bools use Go `strconv.ParseBool`, durations use Go `time.ParseDuration` (`parse_go_duration`).
+- Config is loaded from env vars (via `dotenvy`), not from a config file. Primary keys are in `.env.example`; parsing helpers live in `src/config/env.rs`, per-section loaders and legacy aliases in `src/config/loader.rs`. Use `parse_env` / `parse_env_alias` / `parse_bool_alias` / `parse_duration_alias` / `env_string` when adding a key. They follow echobackend's `config/env.go`: the first set alias wins, an unparsable value falls back to the default (never panics), bools use Go `strconv.ParseBool`, durations use Go `time.ParseDuration` (`parse_go_duration`).
 
 ## Architecture
 

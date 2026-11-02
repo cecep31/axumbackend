@@ -102,7 +102,10 @@ impl TokenBucketLimiter {
 
     /// Takes one token for `client`; `Err(retry_after_secs)` when empty.
     fn check(&self, client: &str, now: Instant) -> Result<(), u64> {
-        let mut inner = self.inner.lock().expect("rate limiter lock poisoned");
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         if now.duration_since(inner.last_cleanup) > self.idle_expiry
             || inner.visitors.len() >= MAX_RATE_LIMITER_ENTRIES
@@ -236,7 +239,10 @@ impl RateLimiter {
 
     fn check(&self, key: RateLimitKey) -> Result<(), u64> {
         let now = Instant::now();
-        let mut inner = self.inner.lock().expect("rate limiter lock poisoned");
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // Periodically or upon reaching capacity, prune expired windows and shrink map capacity
         let cleanup_interval = self.window.min(Duration::from_secs(5));

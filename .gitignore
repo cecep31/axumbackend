@@ -9,3 +9,6 @@
 
 # Qwen IDE settings
 .qwen/
+
+# OpenIdea
+.openidea/

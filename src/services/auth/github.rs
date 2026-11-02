@@ -286,7 +286,7 @@ pub async fn create_oauth_exchange_code(response: AuthTokenResponse) -> String {
 
     let mut store = oauth_exchange_store()
         .lock()
-        .expect("oauth exchange store lock poisoned");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     store.retain(|_, entry| entry.expires_at > now);
     store.insert(code.clone(), entry);
     code
@@ -310,7 +310,7 @@ pub async fn exchange_oauth_code(code: &str) -> Result<AuthTokenResponse, AuthEr
     let now = Utc::now();
     let mut store = oauth_exchange_store()
         .lock()
-        .expect("oauth exchange store lock poisoned");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     store.retain(|_, entry| entry.expires_at > now);
     store
         .remove(code)

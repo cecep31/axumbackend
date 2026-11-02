@@ -1,14 +1,15 @@
 # Axum Backend
 
-A simple Rust web backend built with Axum and PostgreSQL for blog post management.
+Rust backend (Axum + SeaORM + PostgreSQL) for the Pilput platform. It is a port of the Go `echobackend` and keeps its API behaviour: response envelope, validation errors, rate limits and Redis key layout.
 
 ## Features
 
-- REST API for blog posts
-- PostgreSQL database with connection pooling
-- Input validation
-- Structured logging
-- Docker support
+- **Auth**: register/login, rotating refresh tokens with sessions, password reset by email, activity logs, GitHub OAuth (one-time exchange code). Passwords use Argon2id; legacy bcrypt hashes are upgraded on login.
+- **Blog**: posts, tags, comments, likes, bookmarks (with folders), views, follows, reports and moderation, notifications, statistics.
+- **Guilds**: communities with members, channels and messages, with realtime delivery over SSE.
+- **AI chat**: conversations and messages via OpenRouter, with SSE streaming and generated titles.
+- **Holdings**: investment portfolio with analytics, corporate actions, and stock/exchange-rate quotes.
+- **Platform**: global and per-route rate limiting, optional Redis cache (fail-open), S3 uploads, SMTP/Resend email, structured logging, graceful shutdown, Docker.
 
 ## Quick Start
 
@@ -40,25 +41,27 @@ Server starts on `http://localhost:8080`
 
 ## API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/health` | Health check |
-| POST | `/api/auth/register` | Register a user |
-| POST | `/api/auth/login` | Login with email or username |
-| POST | `/api/auth/forgot-password` | Request a password reset link |
-| POST | `/api/auth/reset-password` | Set a new password with a reset token |
-| POST | `/api/auth/refresh` | Rotate access and refresh tokens |
-| POST | `/api/auth/logout` | Logout and delete a refresh session |
-| GET | `/api/auth/profile` | Get current user profile |
-| PATCH | `/api/auth/password` | Change password |
-| GET | `/api/auth/activity-logs` | Get current user auth activity |
-| GET | `/api/auth/oauth/github` | Redirect to GitHub authorization (sets `github_oauth_state` cookie) |
-| GET | `/api/auth/oauth/github/callback` | GitHub OAuth callback; redirects to frontend with one-time `code` |
-| POST | `/api/auth/oauth/exchange` | Exchange one-time OAuth code for access/refresh tokens |
-| GET | `/api/posts` | Get all posts |
-| GET | `/api/posts/random?limit=N` | Get random posts |
-| GET | `/api/posts/tag/{tag}` | Get posts by tag |
-| GET | `/api/posts/u/{username}/{slug}` | Get post by author |
+All routes are under `/api` unless noted. Responses use the `{ success, message, data, error, meta }` envelope. `Auth` = Bearer JWT; `Admin` = super admin (checked in the DB).
+
+| Area | Endpoints |
+|------|-----------|
+| Health | `GET /`, `GET /health` |
+| Auth | `POST /auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/check-username`; `GET/PUT /auth/profile`; `PATCH /auth/password`; `DELETE /auth/account`; `POST /auth/sessions/revoke-all`; `DELETE /auth/sessions/{user_id}` (Admin); `GET /auth/activity-logs[/recent\|/failed-logins]` |
+| GitHub OAuth | `GET /auth/oauth/github`, `GET /auth/oauth/github/callback`, `POST /auth/oauth/exchange` |
+| Posts | `GET/POST /posts`; `GET/PUT/DELETE /posts/{id}`; `GET /posts/random`, `/trending`, `/sitemap`, `/me`, `/feed/for-you`, `/tag/{tag}`, `/username/{username}`, `/u/{username}/{slug}`; `GET/PUT/DELETE /posts/me/{id}`; `POST /posts/image`; stats: `/posts/stats`, `/stats/engagement`, `/me/analytics[/likes-by-month]` |
+| Post engagement | `POST/DELETE /posts/{id}/like`, `GET /posts/{id}/likes\|like-stats\|liked`; `POST /posts/{id}/view`, `GET /posts/{id}/views\|view-stats\|viewed` |
+| Moderation | `POST /posts/{id}/reports`, `GET /posts/reports`, `POST/GET /posts/{id}/moderation` |
+| Comments | `GET/POST /posts/{id}/comments`, `PUT/DELETE /posts/{id}/comments/{comment_id}` |
+| Tags | `GET/POST /tags`, `GET/PUT/DELETE /tags/{id}`, `GET /tags/stats\|trending\|sitemap` |
+| Users | `GET/POST /users`, `GET/PUT/DELETE /users/{id}`, `GET /users/me`, `/users/stats`, `/users/username/{username}`, `POST /users/me/image`, `POST /users/{id}/restore`; follows: `POST /users/follow`, `DELETE /users/{id}/follow`, `GET /users/{id}/followers\|following\|follow-stats\|follow-status\|mutual-follows` |
+| Bookmarks | `GET /bookmarks`, `POST/PATCH /bookmarks/{id}`, `PATCH /bookmarks/{id}/move`, `GET/POST /bookmarks/folders`, `PATCH/DELETE /bookmarks/folders/{folder_id}` |
+| Notifications | `GET /notifications`, `GET /notifications/unread-count`, `PATCH /notifications/read-all`, `PATCH /notifications/{id}/read` |
+| Guilds | `GET/POST /guilds`, `GET /guilds/me`, `GET/PATCH/DELETE /guilds/{slug}`, `GET /guilds/{slug}/members`, `POST /guilds/{slug}/join`, `DELETE /guilds/{slug}/leave`, channels and messages under `/guilds/{slug}/channels/...` (plus an SSE stream) |
+| AI chat | `GET/POST /chat/conversations`, `POST /chat/conversations/stream`, `GET/PUT/DELETE /chat/conversations/{id}`, `GET/POST /chat/conversations/{id}/messages`, `POST .../messages/stream`, `GET/DELETE /chat/messages/{id}` |
+| Holdings | `GET/POST /holdings`, `GET/PUT/DELETE /holdings/{id}`, `GET /holdings/summary\|trends\|compare\|monthly\|calendar`, `POST /holdings/duplicate\|sync`, `GET /holding-types` |
+| Exchange rates | `GET /exchange-rates` |
+
+The routers in `src/handlers/` are the source of truth for the exact list.
 
 ### Password Reset Email
 
@@ -108,9 +111,9 @@ docker run -p 8080:8080 --env-file .env axumbackend
 src/
 ├── main.rs         # Entry point
 ├── state.rs        # Shared AppState
-├── config/         # Env-based configuration
-├── handlers/       # Routes + HTTP handlers (per domain)
-├── services/       # Business logic
+├── config/         # Env-based configuration (env.rs parsing helpers, loader.rs per-section loaders, types.rs)
+├── handlers/       # Routes + HTTP handlers (per domain; large ones are folders: auth/, post/)
+├── services/       # Business logic (large ones are folders: auth/, post/, holding/, chat/)
 ├── dto/            # Request/query input types
 ├── models/         # Response types
 ├── entities/       # SeaORM entities
@@ -120,10 +123,14 @@ src/
 └── domain/         # Slug, antispam
 ```
 
+The database schema is managed outside this repo (no migrations); entities must match it.
+
 ## Tech Stack
 
 - **Framework**: Axum 0.8
-- **Database**: PostgreSQL + deadpool-postgres
-- **Async**: Tokio
+- **Database**: PostgreSQL via SeaORM 2.0 (sqlx)
+- **Async runtime**: Tokio
 - **Serialization**: Serde
-- **Validation**: axum-valid
+- **Validation**: garde
+- **Cache / pub-sub**: Redis or Valkey (optional)
+- **Storage / email**: S3-compatible (rusty-s3), SMTP (lettre) or Resend
