@@ -5,48 +5,10 @@ use crate::models::post::Post;
 use chrono::Utc;
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, ModelTrait, QueryFilter,
-    Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
+    ModelTrait, QueryFilter, QuerySelect, Set, TransactionTrait,
 };
 use std::collections::HashSet;
-
-/// echobackend `FindOrCreateByName`: read first, then
-/// `INSERT .. ON CONFLICT (name) DO NOTHING` and re-read, so two requests that
-/// introduce the same new tag concurrently both succeed instead of the loser
-/// hitting the unique index `idx_tags_name`.
-async fn find_or_create_tag(db: &DatabaseConnection, name: &str) -> Result<tags::Model, DbErr> {
-    if let Some(tag) = find_tag_by_name(db, name).await? {
-        return Ok(tag);
-    }
-
-    tags::Entity::insert(tags::ActiveModel {
-        name: Set(name.to_string()),
-        created_at: Set(Some(Utc::now().into())),
-        ..Default::default()
-    })
-    .on_conflict(
-        OnConflict::column(tags::Column::Name)
-            .do_nothing()
-            .to_owned(),
-    )
-    .exec_without_returning(db)
-    .await?;
-
-    // Either our insert or the concurrent winner's row is there now.
-    find_tag_by_name(db, name)
-        .await?
-        .ok_or_else(|| DbErr::RecordNotFound(format!("tag {name:?} not found after insert")))
-}
-
-async fn find_tag_by_name(
-    db: &DatabaseConnection,
-    name: &str,
-) -> Result<Option<tags::Model>, DbErr> {
-    tags::Entity::find()
-        .filter(tags::Column::Name.eq(name))
-        .one(db)
-        .await
-}
 
 fn normalize_tag_names(tag_names: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
@@ -65,8 +27,14 @@ fn normalize_tag_names(tag_names: &[String]) -> Vec<String> {
     normalized
 }
 
-async fn replace_post_tags(
-    db: &DatabaseConnection,
+/// Replaces a post's tag set with a fixed number of queries, whatever the
+/// tag count. Tags are found or created like echobackend's
+/// `FindOrCreateByName`: existing names are read first, and missing ones are
+/// inserted with `ON CONFLICT (name) DO NOTHING`, so a tag introduced by two
+/// requests at once doesn't hit the unique index `idx_tags_name`. Run it in
+/// the same transaction as the post write.
+async fn replace_post_tags<C: ConnectionTrait>(
+    db: &C,
     post_id: uuid::Uuid,
     tag_names: &[String],
 ) -> Result<(), DbErr> {
@@ -75,15 +43,59 @@ async fn replace_post_tags(
         .exec(db)
         .await?;
 
-    for name in normalize_tag_names(tag_names) {
-        let tag = find_or_create_tag(db, &name).await?;
-        posts_to_tags::ActiveModel {
-            post_id: Set(post_id),
-            tag_id: Set(tag.id),
-        }
-        .insert(db)
-        .await?;
+    let names = normalize_tag_names(tag_names);
+    if names.is_empty() {
+        return Ok(());
     }
+
+    let find_tags = |names: Vec<String>| {
+        tags::Entity::find()
+            .filter(tags::Column::Name.is_in(names))
+            .all(db)
+    };
+    let mut found = find_tags(names.clone()).await?;
+    let known: HashSet<&str> = found.iter().map(|tag| tag.name.as_str()).collect();
+    let mut missing: Vec<String> = names
+        .iter()
+        .filter(|name| !known.contains(name.as_str()))
+        .cloned()
+        .collect();
+    // A fixed insert order keeps two transactions creating the same new tags
+    // from deadlocking on the unique index.
+    missing.sort_unstable();
+
+    if !missing.is_empty() {
+        let now = Utc::now();
+        tags::Entity::insert_many(missing.iter().map(|name| tags::ActiveModel {
+            name: Set(name.clone()),
+            created_at: Set(Some(now.into())),
+            ..Default::default()
+        }))
+        .on_conflict(
+            OnConflict::column(tags::Column::Name)
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec_without_returning(db)
+        .await?;
+        // Either our insert or a concurrent winner's row is there now.
+        found.extend(find_tags(missing).await?);
+    }
+    if found.len() != names.len() {
+        return Err(DbErr::RecordNotFound(format!(
+            "expected {} tags, found {}",
+            names.len(),
+            found.len()
+        )));
+    }
+
+    posts_to_tags::Entity::insert_many(found.iter().map(|tag| posts_to_tags::ActiveModel {
+        post_id: Set(post_id),
+        tag_id: Set(tag.id),
+    }))
+    .on_conflict_do_nothing_on([posts_to_tags::Column::PostId, posts_to_tags::Column::TagId])
+    .exec_without_returning(db)
+    .await?;
 
     Ok(())
 }
@@ -140,6 +152,7 @@ pub async fn create_post(
     }
 
     let now = Utc::now();
+    let txn = db.begin().await?;
     let post = posts::ActiveModel {
         id: Set(uuid::Uuid::now_v7()),
         title: Set(input.title),
@@ -155,10 +168,11 @@ pub async fn create_post(
         bookmark_count: Set(Some(0)),
         ..Default::default()
     }
-    .insert(db)
+    .insert(&txn)
     .await?;
 
-    replace_post_tags(db, post.id, &input.tags).await?;
+    replace_post_tags(&txn, post.id, &input.tags).await?;
+    txn.commit().await?;
     let user = post.find_related(users::Entity).one(db).await?;
     let tags = post.find_related(tags::Entity).all(db).await?;
     hydrate_post(&post, user, tags, false)
@@ -252,6 +266,8 @@ pub async fn update_post(
         return Ok(post);
     }
 
+    // The column update and the tag replacement land together or not at all.
+    let txn = db.begin().await?;
     if !updates.is_empty() {
         let mut update = posts::Entity::update_many()
             .col_expr(posts::Column::UpdatedAt, Expr::value(Utc::now()))
@@ -274,7 +290,7 @@ pub async fn update_post(
         if let Some(published) = updates.published {
             update = update.col_expr(posts::Column::Published, Expr::value(published));
         }
-        if update.exec(db).await?.rows_affected == 0 {
+        if update.exec(&txn).await?.rows_affected == 0 {
             return Err(PostWriteError::NotFound);
         }
     }
@@ -283,11 +299,17 @@ pub async fn update_post(
     if let Some(owner) = owner {
         reload = reload.filter(posts::Column::CreatedBy.eq(owner));
     }
-    let post = reload.one(db).await?.ok_or(PostWriteError::NotFound)?;
+    // FOR UPDATE serialises concurrent tag replacements on the same post.
+    let post = reload
+        .lock_exclusive()
+        .one(&txn)
+        .await?
+        .ok_or(PostWriteError::NotFound)?;
 
     if let Some(tag_names) = &input.tags {
-        replace_post_tags(db, post.id, tag_names).await?;
+        replace_post_tags(&txn, post.id, tag_names).await?;
     }
+    txn.commit().await?;
 
     let user = post.find_related(users::Entity).one(db).await?;
     let tags = post.find_related(tags::Entity).all(db).await?;

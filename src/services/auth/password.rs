@@ -63,7 +63,7 @@ pub(super) fn has_current_argon2_params(hash: &PasswordHash) -> bool {
 
 /// Runs [`hash_password`] on the blocking pool: Argon2id with 64MB memory is
 /// CPU/memory heavy and would otherwise stall a tokio worker thread.
-pub(super) async fn hash_password_async(password: &str) -> Result<String, AuthError> {
+pub async fn hash_password_async(password: &str) -> Result<String, AuthError> {
     let password = password.to_owned();
     tokio::task::spawn_blocking(move || hash_password(&password))
         .await
@@ -233,19 +233,34 @@ pub async fn reset_password(
         .ok_or(AuthError::InvalidToken)?;
 
     let hashed = hash_password_async(password).await?;
+
+    // Claim the token and change the password in one transaction. The
+    // conditional UPDATE makes the token single-use even when two requests
+    // race past the checks above: only one of them sees a row change.
+    let txn = db.begin().await?;
+    let claimed = password_reset_tokens::Entity::update_many()
+        .col_expr(
+            password_reset_tokens::Column::UsedAt,
+            sea_orm::sea_query::Expr::value(Utc::now()),
+        )
+        .filter(password_reset_tokens::Column::Id.eq(reset_token.id))
+        .filter(password_reset_tokens::Column::UsedAt.is_null())
+        .exec(&txn)
+        .await?;
+    if claimed.rows_affected == 0 {
+        return Err(AuthError::TokenUsed);
+    }
+
     let mut active_user: users::ActiveModel = user.clone().into();
     active_user.password = Set(Some(hashed));
     active_user.updated_at = Set(Some(Utc::now().into()));
-    active_user.update(db).await?;
-
-    let mut active_token: password_reset_tokens::ActiveModel = reset_token.into();
-    active_token.used_at = Set(Some(Utc::now().into()));
-    active_token.update(db).await?;
+    active_user.update(&txn).await?;
 
     sessions::Entity::delete_many()
         .filter(sessions::Column::UserId.eq(user.id))
-        .exec(db)
+        .exec(&txn)
         .await?;
+    txn.commit().await?;
 
     log_activity(
         db,

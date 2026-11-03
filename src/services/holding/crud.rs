@@ -7,20 +7,46 @@ use crate::models::holding::*;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, IntoActiveModel,
-    ModelTrait, QueryFilter, QueryOrder, Set,
+    QueryFilter, QueryOrder, Set, TransactionTrait,
 };
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
+
+/// Builds the responses for `holdings` (in their order) with one
+/// `holding_types` lookup for the whole list.
+async fn hydrate_many(
+    db: &DatabaseConnection,
+    holdings: Vec<holdings::Model>,
+) -> Result<Vec<HoldingResponse>, DbErr> {
+    let type_ids: HashSet<i16> = holdings.iter().map(|h| h.holding_type_id).collect();
+    let types_by_id: HashMap<i16, holding_types::Model> = if type_ids.is_empty() {
+        HashMap::new()
+    } else {
+        holding_types::Entity::find()
+            .filter(holding_types::Column::Id.is_in(type_ids))
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|t| (t.id, t))
+            .collect()
+    };
+    Ok(holdings
+        .into_iter()
+        .map(|holding| {
+            let holding_type = types_by_id.get(&holding.holding_type_id).cloned();
+            HoldingResponse::from_entity(holding, holding_type)
+        })
+        .collect())
+}
 
 async fn hydrate(
     db: &DatabaseConnection,
     holding: holdings::Model,
 ) -> Result<HoldingResponse, DbErr> {
-    let holding_type = holding
-        .clone()
-        .find_related(holding_types::Entity)
-        .one(db)
-        .await?;
-    Ok(HoldingResponse::from_entity(holding, holding_type))
+    hydrate_many(db, vec![holding])
+        .await?
+        .pop()
+        .ok_or_else(|| DbErr::Custom("holding hydration returned no row".to_string()))
 }
 
 async fn holding_type_exists(db: &DatabaseConnection, id: i16) -> Result<bool, DbErr> {
@@ -138,11 +164,7 @@ pub async fn get_holdings(
     };
 
     let models = query.all(db).await?;
-    let mut responses = Vec::with_capacity(models.len());
-    for model in models {
-        responses.push(hydrate(db, model).await?);
-    }
-    Ok(responses)
+    Ok(hydrate_many(db, models).await?)
 }
 
 pub async fn get_holding_by_id(
@@ -314,44 +336,49 @@ pub async fn duplicate_holdings(
     if source.is_empty() {
         return Err(HoldingError::NotFound);
     }
+    // Delete and re-insert atomically: a failed insert must not leave the
+    // target month empty or half-copied.
+    let txn = db.begin().await?;
     if overwrite {
         holdings::Entity::delete_many()
             .filter(holdings::Column::UserId.eq(user_id))
             .filter(holdings::Column::Month.eq(to_month))
             .filter(holdings::Column::Year.eq(to_year))
-            .exec(db)
+            .exec(&txn)
             .await?;
     }
-    let mut out = Vec::with_capacity(source.len());
-    for item in source {
-        let now = Utc::now().into();
-        let created = holdings::ActiveModel {
-            user_id: Set(user_id),
-            name: Set(item.name),
-            symbol: Set(item.symbol),
-            platform: Set(item.platform),
-            holding_type_id: Set(item.holding_type_id),
-            currency: Set(item.currency),
-            invested_amount: Set(item.invested_amount),
-            current_value: Set(item.current_value),
-            units: Set(item.units),
-            avg_buy_price: Set(item.avg_buy_price),
-            current_price: Set(item.current_price),
-            notes: Set(item.notes),
-            month: Set(to_month),
-            year: Set(to_year),
-            created_at: Set(now),
-            updated_at: Set(now),
-            ..Default::default()
-        }
-        .insert(db)
+    let now: chrono::DateTime<chrono::FixedOffset> = Utc::now().into();
+    let rows = source.into_iter().map(|item| holdings::ActiveModel {
+        user_id: Set(user_id),
+        name: Set(item.name),
+        symbol: Set(item.symbol),
+        platform: Set(item.platform),
+        holding_type_id: Set(item.holding_type_id),
+        currency: Set(item.currency),
+        invested_amount: Set(item.invested_amount),
+        current_value: Set(item.current_value),
+        units: Set(item.units),
+        avg_buy_price: Set(item.avg_buy_price),
+        current_price: Set(item.current_price),
+        notes: Set(item.notes),
+        month: Set(to_month),
+        year: Set(to_year),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    });
+    let created = holdings::Entity::insert_many(rows)
+        .exec_with_returning(&txn)
         .await?;
-        out.push(DuplicateResultItem {
+    txn.commit().await?;
+
+    Ok(created
+        .into_iter()
+        .map(|created| DuplicateResultItem {
             id: created.id.to_string(),
             name: created.name,
             month: created.month,
             year: created.year,
-        });
-    }
-    Ok(out)
+        })
+        .collect())
 }

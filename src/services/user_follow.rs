@@ -6,6 +6,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, JoinType,
     PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait, RelationTrait, Set,
 };
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -135,22 +136,64 @@ pub async fn unfollow_user(
     })
 }
 
-async fn user_response(
+/// Builds the responses for `users` (in their order) with one profile query
+/// and, for a viewer, one follow-state query for the whole list. The viewer
+/// themselves gets no `is_following`.
+async fn user_responses(
     db: &DatabaseConnection,
-    user: users::Model,
+    users: Vec<users::Model>,
     current_user_id: Option<Uuid>,
-) -> Result<UserResponse, DbErr> {
-    let profile = profiles::Entity::find()
-        .filter(profiles::Column::UserId.eq(user.id))
-        .one(db)
-        .await?;
-    let is_following = match current_user_id {
-        Some(current_user_id) if current_user_id != user.id => {
-            Some(is_following(db, current_user_id, user.id).await?)
+) -> Result<Vec<UserResponse>, DbErr> {
+    if users.is_empty() {
+        return Ok(Vec::new());
+    }
+    let user_ids: HashSet<Uuid> = users.iter().map(|u| u.id).collect();
+
+    let profiles_by_user_id: HashMap<Uuid, profiles::Model> = profiles::Entity::find()
+        .filter(profiles::Column::UserId.is_in(user_ids.iter().copied()))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|profile| (profile.user_id, profile))
+        .collect();
+
+    let followed: HashSet<Uuid> = match current_user_id {
+        Some(viewer) => {
+            let targets: Vec<Uuid> = user_ids
+                .iter()
+                .copied()
+                .filter(|id| *id != viewer)
+                .collect();
+            if targets.is_empty() {
+                HashSet::new()
+            } else {
+                user_follows::Entity::find()
+                    .select_only()
+                    .column(user_follows::Column::FollowingId)
+                    .filter(user_follows::Column::FollowerId.eq(viewer))
+                    .filter(user_follows::Column::FollowingId.is_in(targets))
+                    .filter(user_follows::Column::DeletedAt.is_null())
+                    .into_tuple::<Uuid>()
+                    .all(db)
+                    .await?
+                    .into_iter()
+                    .collect()
+            }
         }
-        _ => None,
+        None => HashSet::new(),
     };
-    Ok(UserResponse::from_entity(user, profile, is_following))
+
+    Ok(users
+        .into_iter()
+        .map(|user| {
+            let is_following = match current_user_id {
+                Some(viewer) if viewer != user.id => Some(followed.contains(&user.id)),
+                _ => None,
+            };
+            let profile = profiles_by_user_id.get(&user.id).cloned();
+            UserResponse::from_entity(user, profile, is_following)
+        })
+        .collect())
 }
 
 pub async fn get_followers(
@@ -177,12 +220,7 @@ pub async fn get_followers(
         .all(db)
         .await?;
 
-    let mut responses = Vec::with_capacity(users.len());
-    for user in users {
-        responses.push(user_response(db, user, current_user_id).await?);
-    }
-
-    Ok((responses, total))
+    Ok((user_responses(db, users, current_user_id).await?, total))
 }
 
 pub async fn get_following(
@@ -209,12 +247,7 @@ pub async fn get_following(
         .all(db)
         .await?;
 
-    let mut responses = Vec::with_capacity(users.len());
-    for user in users {
-        responses.push(user_response(db, user, current_user_id).await?);
-    }
-
-    Ok((responses, total))
+    Ok((user_responses(db, users, current_user_id).await?, total))
 }
 
 pub async fn get_follow_stats(
@@ -272,12 +305,7 @@ pub async fn get_mutual_follows(
         .all(db)
         .await?;
 
-    let mut responses = Vec::with_capacity(users.len());
-    for user in users {
-        responses.push(user_response(db, user, None).await?);
-    }
-
-    Ok(responses)
+    user_responses(db, users, None).await
 }
 
 #[cfg(test)]

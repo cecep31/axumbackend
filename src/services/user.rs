@@ -274,7 +274,8 @@ pub async fn create_user(
         return Err(UserError::UserExists);
     }
 
-    let hashed = crate::services::auth::hash_password(&req.password)
+    let hashed = crate::services::auth::hash_password_async(&req.password)
+        .await
         .map_err(|e| UserError::InvalidData(format!("{e:?}")))?;
 
     let inserted = users::ActiveModel {

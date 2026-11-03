@@ -130,15 +130,27 @@ pub async fn fetch_github_user(token: &str) -> Result<GithubUser, AuthError> {
     Ok(response.json::<GithubUser>().await?)
 }
 
-/// Fetch the primary email of the GitHub account, falling back to the first
-/// email in the list. Mirrors echobackend's `fetchGithubUserEmail`.
-pub async fn fetch_github_user_email(token: &str) -> Result<Option<String>, AuthError> {
-    #[derive(Debug, Deserialize)]
-    struct GithubEmail {
-        email: String,
-        primary: bool,
-    }
+#[derive(Debug, Deserialize)]
+struct GithubEmail {
+    email: String,
+    primary: bool,
+    #[serde(default)]
+    verified: bool,
+}
 
+/// Picks the primary verified email, else the first verified one. Unverified
+/// addresses are never used: anyone can add an address they don't own to a
+/// GitHub account, and the new local account would then claim it.
+fn pick_verified_email(emails: Vec<GithubEmail>) -> Option<String> {
+    let mut verified: Vec<GithubEmail> = emails.into_iter().filter(|e| e.verified).collect();
+    let index = verified.iter().position(|e| e.primary).unwrap_or(0);
+    (index < verified.len()).then(|| verified.swap_remove(index).email)
+}
+
+/// Fetch the primary verified email of the GitHub account, falling back to
+/// the first verified email. Like echobackend's `fetchGithubUserEmail`, but
+/// unverified addresses are skipped.
+pub async fn fetch_github_user_email(token: &str) -> Result<Option<String>, AuthError> {
     let response = github_http_client()?
         .get(GITHUB_USER_EMAILS_URL)
         .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
@@ -155,10 +167,7 @@ pub async fn fetch_github_user_email(token: &str) -> Result<Option<String>, Auth
     }
 
     let emails: Vec<GithubEmail> = response.json().await?;
-    if let Some(primary) = emails.iter().find(|entry| entry.primary) {
-        return Ok(Some(primary.email.clone()));
-    }
-    Ok(emails.into_iter().next().map(|entry| entry.email))
+    Ok(pick_verified_email(emails))
 }
 
 /// Sign in (or register) a user from a GitHub profile and issue tokens.
@@ -378,5 +387,45 @@ mod tests {
         )
         .unwrap();
         assert!(expired.redeem(Utc::now()).is_none());
+    }
+
+    fn email(address: &str, primary: bool, verified: bool) -> GithubEmail {
+        GithubEmail {
+            email: address.to_string(),
+            primary,
+            verified,
+        }
+    }
+
+    #[test]
+    fn pick_verified_email_prefers_primary_verified() {
+        let emails = vec![
+            email("other@x.com", false, true),
+            email("main@x.com", true, true),
+        ];
+        assert_eq!(pick_verified_email(emails).as_deref(), Some("main@x.com"));
+    }
+
+    #[test]
+    fn pick_verified_email_skips_unverified_primary() {
+        let emails = vec![
+            email("victim@x.com", true, false),
+            email("mine@x.com", false, true),
+        ];
+        assert_eq!(pick_verified_email(emails).as_deref(), Some("mine@x.com"));
+    }
+
+    #[test]
+    fn pick_verified_email_none_when_nothing_verified() {
+        let emails = vec![email("victim@x.com", true, false)];
+        assert_eq!(pick_verified_email(emails), None);
+        assert_eq!(pick_verified_email(vec![]), None);
+    }
+
+    #[test]
+    fn github_email_without_verified_field_is_unverified() {
+        let parsed: Vec<GithubEmail> =
+            serde_json::from_str(r#"[{"email":"a@x.com","primary":true}]"#).unwrap();
+        assert_eq!(pick_verified_email(parsed), None);
     }
 }

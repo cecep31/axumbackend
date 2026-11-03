@@ -14,6 +14,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, IntoActiveModel,
     PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
+use std::collections::HashMap;
 use title::build_conversation_title;
 use uuid::Uuid;
 
@@ -114,20 +115,52 @@ async fn insert_message(
     Ok(message)
 }
 
-/// All messages of a conversation in chronological order (the OpenRouter
-/// context window), mirroring `GetMessagesByConversationIDAsc`.
+/// How many of the latest messages are sent to OpenRouter as context. Older
+/// ones are dropped so cost and latency don't grow with the conversation and
+/// long chats don't overflow the model's context window.
+const MAX_CONTEXT_MESSAGES: u64 = 50;
+
+/// The latest [`MAX_CONTEXT_MESSAGES`] messages of a conversation in
+/// chronological order (the OpenRouter context window). echobackend's
+/// `GetMessagesByConversationIDAsc` sends the whole history.
 async fn context_messages(
     db: &DatabaseConnection,
     conversation_id: Uuid,
     user_id: Uuid,
 ) -> Result<Vec<chat_messages::Model>, ChatError> {
-    let messages = chat_messages::Entity::find()
+    let mut messages = chat_messages::Entity::find()
         .filter(chat_messages::Column::ConversationId.eq(conversation_id))
         .filter(chat_messages::Column::UserId.eq(user_id))
-        .order_by_asc(chat_messages::Column::CreatedAt)
+        .order_by_desc(chat_messages::Column::CreatedAt)
+        .order_by_desc(chat_messages::Column::Id)
+        .limit(MAX_CONTEXT_MESSAGES)
         .all(db)
         .await?;
+    messages.reverse();
     Ok(messages)
+}
+
+/// Message count per conversation in one `GROUP BY` query.
+async fn message_counts(
+    db: &DatabaseConnection,
+    conversation_ids: Vec<Uuid>,
+) -> Result<HashMap<Uuid, usize>, DbErr> {
+    if conversation_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<(Uuid, i64)> = chat_messages::Entity::find()
+        .select_only()
+        .column(chat_messages::Column::ConversationId)
+        .column_as(chat_messages::Column::Id.count(), "count")
+        .filter(chat_messages::Column::ConversationId.is_in(conversation_ids))
+        .group_by(chat_messages::Column::ConversationId)
+        .into_tuple()
+        .all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, count)| (id, usize::try_from(count).unwrap_or(0)))
+        .collect())
 }
 
 /// echobackend: a conversation still titled "New conversation" after the first
@@ -195,14 +228,14 @@ pub async fn get_user_conversations(
         .all(db)
         .await?;
 
-    let mut out = Vec::with_capacity(conversations.len());
-    for conversation in conversations {
-        let count = chat_messages::Entity::find()
-            .filter(chat_messages::Column::ConversationId.eq(conversation.id))
-            .count(db)
-            .await? as usize;
-        out.push(conversation_response(conversation, None, count));
-    }
+    let counts = message_counts(db, conversations.iter().map(|c| c.id).collect()).await?;
+    let out = conversations
+        .into_iter()
+        .map(|conversation| {
+            let count = counts.get(&conversation.id).copied().unwrap_or(0);
+            conversation_response(conversation, None, count)
+        })
+        .collect();
     Ok((out, total))
 }
 

@@ -25,13 +25,6 @@ impl From<DbErr> for BookmarkError {
     }
 }
 
-async fn folder_count(db: &DatabaseConnection, folder_id: Uuid) -> Result<i64, DbErr> {
-    Ok(post_bookmarks::Entity::find()
-        .filter(post_bookmarks::Column::FolderId.eq(folder_id))
-        .count(db)
-        .await? as i64)
-}
-
 /// `bookmark_count` for several folders in one query.
 async fn folder_counts(
     db: &DatabaseConnection,
@@ -66,12 +59,30 @@ async fn find_folder(
         .await
 }
 
+/// Builds the responses for `folders` (in their order) with one count query.
+async fn folder_responses(
+    db: &DatabaseConnection,
+    folders: Vec<bookmark_folders::Model>,
+) -> Result<Vec<BookmarkFolderResponse>, DbErr> {
+    let folder_ids: HashSet<Uuid> = folders.iter().map(|f| f.id).collect();
+    let counts = folder_counts(db, &folder_ids).await?;
+    Ok(folders
+        .into_iter()
+        .map(|folder| {
+            let count = counts.get(&folder.id).copied().unwrap_or(0);
+            BookmarkFolderResponse::from_entity(folder, count)
+        })
+        .collect())
+}
+
 async fn folder_response(
     db: &DatabaseConnection,
     folder: bookmark_folders::Model,
 ) -> Result<BookmarkFolderResponse, DbErr> {
-    let count = folder_count(db, folder.id).await?;
-    Ok(BookmarkFolderResponse::from_entity(folder, count))
+    folder_responses(db, vec![folder])
+        .await?
+        .pop()
+        .ok_or_else(|| DbErr::Custom("folder hydration returned no row".to_string()))
 }
 
 /// Builds the responses for `bookmarks` with a fixed number of queries.
@@ -327,11 +338,7 @@ pub async fn get_folders_by_user(
         .order_by_desc(bookmark_folders::Column::CreatedAt)
         .all(db)
         .await?;
-    let mut out = Vec::with_capacity(folders.len());
-    for folder in folders {
-        out.push(folder_response(db, folder).await?);
-    }
-    Ok(out)
+    Ok(folder_responses(db, folders).await?)
 }
 
 pub async fn update_folder(

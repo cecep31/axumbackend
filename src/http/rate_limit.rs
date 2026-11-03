@@ -15,7 +15,7 @@
 
 use std::{
     collections::HashMap,
-    net::SocketAddr,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -48,15 +48,30 @@ pub fn too_many_requests(retry_after_secs: u64) -> Response {
     response
 }
 
-/// Client key for limiters: the resolved client IP, or `"unknown"`.
+/// Client key for limiters: the resolved client IP (IPv6 grouped by /64,
+/// see [`ip_key`]), or `"unknown"`.
 fn client_key(request: &Request, trust_proxy: bool) -> String {
     let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| addr.ip());
     resolve_client_ip(request.headers(), peer, trust_proxy)
-        .map(|ip| ip.to_string())
+        .map(ip_key)
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// IPv4 addresses are keyed as-is. IPv6 clients usually control a whole /64
+/// (often more), so keying the full address would let them rotate addresses
+/// to dodge limits and flood the limiter maps; they share one key per /64.
+/// IPv4-mapped IPv6 (`::ffff:a.b.c.d`) counts as the IPv4 address.
+fn ip_key(ip: IpAddr) -> String {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => {
+            let prefix = u128::from(v6) & (u128::MAX << 64);
+            format!("{}/64", Ipv6Addr::from(prefix))
+        }
+    }
 }
 
 // ============================================================================
@@ -332,6 +347,19 @@ mod tests {
     use axum::http::Request;
     use std::net::SocketAddr;
     use std::thread;
+
+    #[test]
+    fn ip_key_keeps_ipv4_and_groups_ipv6_by_64() {
+        let key = |s: &str| ip_key(s.parse().unwrap());
+        assert_eq!(key("203.0.113.7"), "203.0.113.7");
+        assert_eq!(key("::ffff:203.0.113.7"), "203.0.113.7");
+        assert_eq!(key("2001:db8:1:2:aaaa:bbbb:cccc:dddd"), "2001:db8:1:2::/64");
+        assert_eq!(
+            key("2001:db8:1:2::1"),
+            key("2001:db8:1:2:ffff:ffff:ffff:ffff")
+        );
+        assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
+    }
 
     #[test]
     fn test_token_bucket_burst_then_refill() {

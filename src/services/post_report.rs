@@ -7,6 +7,7 @@ use sea_orm::{
     EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
     Statement, TransactionTrait,
 };
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 pub const REASON_CHOICES: [&str; 6] = [
@@ -42,18 +43,23 @@ impl From<DbErr> for PostReportError {
 /// echobackend `Preload("Reporter"/"Admin", preloadUserBrief)` goes through
 /// GORM's soft-delete scope, so a soft-deleted user yields no brief (and the
 /// `omitempty` key is left out).
-async fn active_user(
+/// Batched in one `id IN (...)` query; no query when `ids` is empty.
+async fn active_users_by_id(
     db: &DatabaseConnection,
-    id: Option<Uuid>,
-) -> Result<Option<users::Model>, DbErr> {
-    let Some(id) = id else {
-        return Ok(None);
-    };
-    users::Entity::find()
-        .filter(users::Column::Id.eq(id))
+    ids: impl IntoIterator<Item = Uuid>,
+) -> Result<HashMap<Uuid, users::Model>, DbErr> {
+    let ids: HashSet<Uuid> = ids.into_iter().collect();
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    Ok(users::Entity::find()
+        .filter(users::Column::Id.is_in(ids))
         .filter(users::Column::DeletedAt.is_null())
-        .one(db)
-        .await
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|u| (u.id, u))
+        .collect())
 }
 
 fn brief_from_user(u: Option<users::Model>) -> Option<UserBrief> {
@@ -219,29 +225,43 @@ pub async fn list_post_reports(
         .offset(offset)
         .all(db)
         .await?;
-    let mut out = Vec::with_capacity(reports.len());
-    for r in reports {
-        let reporter = active_user(db, Some(r.reporter_id)).await?;
-        // echobackend preloads only "Action" (not "Action.Admin"), so the
-        // resolution never carries an admin brief here.
-        let resolution = match r.action_id {
-            Some(action_id) => post_moderation_actions::Entity::find_by_id(action_id)
-                .one(db)
-                .await?
-                .map(|a| action_to_response(a, None)),
-            None => None,
-        };
-        out.push(SinglePostReportResponse {
-            id: r.id,
-            post_id: r.post_id,
-            reason: r.reason,
-            details: r.details,
-            status: r.status,
-            created_at: r.created_at.to_rfc3339(),
-            reporter: brief_from_user(reporter),
-            resolution,
-        });
-    }
+    let reporters = active_users_by_id(db, reports.iter().map(|r| r.reporter_id)).await?;
+    let action_ids: HashSet<Uuid> = reports.iter().filter_map(|r| r.action_id).collect();
+    let actions: HashMap<Uuid, post_moderation_actions::Model> = if action_ids.is_empty() {
+        HashMap::new()
+    } else {
+        post_moderation_actions::Entity::find()
+            .filter(post_moderation_actions::Column::Id.is_in(action_ids))
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|a| (a.id, a))
+            .collect()
+    };
+    let out = reports
+        .into_iter()
+        .map(|r| {
+            // Several reports can share a reporter/action, so clone rather
+            // than take from the maps.
+            let reporter = reporters.get(&r.reporter_id).cloned();
+            // echobackend preloads only "Action" (not "Action.Admin"), so the
+            // resolution never carries an admin brief here.
+            let resolution = r
+                .action_id
+                .and_then(|id| actions.get(&id).cloned())
+                .map(|a| action_to_response(a, None));
+            SinglePostReportResponse {
+                id: r.id,
+                post_id: r.post_id,
+                reason: r.reason,
+                details: r.details,
+                status: r.status,
+                created_at: r.created_at.to_rfc3339(),
+                reporter: brief_from_user(reporter),
+                resolution,
+            }
+        })
+        .collect();
     Ok((out, total))
 }
 
@@ -351,10 +371,13 @@ pub async fn list_moderation_actions(
         .offset(offset)
         .all(db)
         .await?;
-    let mut out = Vec::with_capacity(actions.len());
-    for a in actions {
-        let admin = active_user(db, a.admin_id).await?;
-        out.push(action_to_response(a, admin));
-    }
+    let admins = active_users_by_id(db, actions.iter().filter_map(|a| a.admin_id)).await?;
+    let out = actions
+        .into_iter()
+        .map(|a| {
+            let admin = a.admin_id.and_then(|id| admins.get(&id).cloned());
+            action_to_response(a, admin)
+        })
+        .collect();
     Ok((out, total))
 }

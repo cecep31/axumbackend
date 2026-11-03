@@ -75,6 +75,14 @@ pub fn normalized_temperature(temperature: Option<f64>) -> f64 {
     }
 }
 
+/// One client for the whole process so connections (and TLS sessions) to
+/// OpenRouter are reused. The timeout is set per request from config.
+fn shared_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::Client> =
+        std::sync::LazyLock::new(reqwest::Client::new);
+    &CLIENT
+}
+
 async fn call_api(
     messages: &[OpenRouterMessage],
     model: Option<&str>,
@@ -101,13 +109,9 @@ async fn call_api(
     });
 
     let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(config.timeout)
-        .build()
-        .map_err(|err| format!("failed to build OpenRouter client: {err}"))?;
-
-    let mut request = client
+    let mut request = shared_client()
         .post(&url)
+        .timeout(config.timeout)
         .header("Authorization", format!("Bearer {}", config.api_key))
         .header("Content-Type", "application/json")
         .json(&body);
