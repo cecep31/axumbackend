@@ -1,10 +1,11 @@
-use crate::dto::auth::RevokeAllSessionsRequest;
+use crate::dto::auth::{RevokeAllSessionsRequest, RevokeUserPath};
 use crate::http::auth::AdminUser;
 use crate::http::client_ip::RequestClient;
 use crate::http::error::AppError;
 use crate::http::extract::{VJson, VPath};
 use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
+use crate::models::auth::{RevokeAllSessionsResponse, RevokeUserSessionsResponse};
 use crate::services::{self};
 use axum::{Json, extract::State};
 
@@ -35,7 +36,7 @@ pub async fn revoke_user_sessions(
     admin: AdminUser,
     RequestClient(client): RequestClient,
     VPath(params): VPath<RevokeUserPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<RevokeUserSessionsResponse>>, AppError> {
     // Parsed here rather than by the extractor so a bad id gets echobackend's
     // "Invalid user ID format" instead of the generic path rejection.
     let target = Some(params.user_id.as_str())
@@ -52,7 +53,10 @@ pub async fn revoke_user_sessions(
         .map_err(map_revoke_error)?;
     Ok(Json(ApiResponse::success_with_message(
         "Sessions revoked successfully",
-        serde_json::json!({ "user_id": params.user_id, "revoked_sessions": revoked }),
+        RevokeUserSessionsResponse {
+            user_id: params.user_id,
+            revoked_sessions: revoked,
+        },
     )))
 }
 
@@ -63,7 +67,7 @@ pub async fn revoke_all_sessions(
     admin: AdminUser,
     RequestClient(client): RequestClient,
     VJson(req): VJson<RevokeAllSessionsRequest>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<RevokeAllSessionsResponse>>, AppError> {
     if req.confirm != Some(true) {
         return Err(AppError::BadRequest(
             "Set \"confirm\": true to log out every user".to_string(),
@@ -74,12 +78,8 @@ pub async fn revoke_all_sessions(
         .map_err(map_revoke_error)?;
     Ok(Json(ApiResponse::success_with_message(
         "All sessions revoked successfully",
-        serde_json::json!({ "revoked_sessions": revoked }),
+        RevokeAllSessionsResponse {
+            revoked_sessions: revoked,
+        },
     )))
-}
-
-#[derive(serde::Deserialize, garde::Validate)]
-pub struct RevokeUserPath {
-    #[garde(skip)]
-    pub user_id: String,
 }

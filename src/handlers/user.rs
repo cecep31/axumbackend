@@ -11,8 +11,8 @@ use crate::http::extract::{VJson, VPath, VQuery};
 use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
 use crate::models::stats::UserStatsResponse;
-use crate::models::user::UserResponse;
-use crate::models::user_follow::{FollowResponse, FollowStats};
+use crate::models::user::{AvatarUploadResponse, UserResponse};
+use crate::models::user_follow::{FollowResponse, FollowStats, FollowStatusResponse};
 use crate::services;
 use crate::state::AppState;
 use axum::{
@@ -151,7 +151,7 @@ pub async fn delete_user(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
     VPath(params): VPath<UserIdPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     match services::user::soft_delete(&pool, params.id).await {
         Ok(true) => Ok(Json(ApiResponse::message("Successfully deleted user"))),
         Ok(false) => Err(user_not_found("Failed to delete user")),
@@ -233,14 +233,14 @@ pub async fn check_follow_status(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(params): VPath<UserIdPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<FollowStatusResponse>>, AppError> {
     let is_following = services::user_follow::is_following(&pool, auth_user.id, params.id)
         .await
         .map_err(db_error("Failed to check follow status"))?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Successfully checked follow status",
-        serde_json::json!({ "is_following": is_following }),
+        FollowStatusResponse { is_following },
     )))
 }
 
@@ -315,74 +315,28 @@ pub async fn get_mutual_follows(
     )))
 }
 
-/// Returns `(content_type, extension)` for allowed avatar images.
-fn detect_allowed_avatar(data: &[u8]) -> Option<(&'static str, &'static str)> {
-    if data.len() >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
-        Some(("image/jpeg", ".jpg"))
-    } else if data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
-        Some(("image/png", ".png"))
-    } else if data.len() >= 6 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a") {
-        Some(("image/gif", ".gif"))
-    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
-        Some(("image/webp", ".webp"))
-    } else {
-        None
-    }
-}
+/// Avatar upload settings: `avatar` field, 5 MB cap, JPEG/PNG/GIF/WEBP.
+const AVATAR_UPLOAD: crate::http::upload::ImageUploadSpec = crate::http::upload::ImageUploadSpec {
+    field: "avatar",
+    max_file_bytes: MAX_AVATAR_SIZE,
+    label: "Avatar",
+    key_prefix: AVATAR_PREFIX,
+    log_name: "avatar",
+};
 
 pub async fn upload_avatar(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     headers: axum::http::HeaderMap,
     mut multipart: Multipart,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    // Same fail-fast rationale as post image uploads (see handlers::post):
-    // without this, oversized bodies die mid-stream with a generic parse error.
-    crate::http::upload::reject_oversized_body(&headers, MAX_AVATAR_SIZE, "Avatar")?;
+) -> Result<Json<ApiResponse<AvatarUploadResponse>>, AppError> {
+    let key = crate::http::upload::upload_image(&headers, &mut multipart, &AVATAR_UPLOAD).await?;
+    services::user::set_image(&pool, auth_user.id, &key).await?;
 
-    while let Some(field) = multipart.next_field().await.map_err(|err| {
-        tracing::warn!(error = ?err, "avatar: multipart field error");
-        AppError::BadRequest(format!("Failed to upload image: {err}"))
-    })? {
-        if field.name() != Some("avatar") {
-            continue;
-        }
-
-        let data = field.bytes().await.map_err(|err| {
-            tracing::warn!(error = ?err, "avatar: multipart read error");
-            AppError::BadRequest(format!("Failed to read image: {err}"))
-        })?;
-        if data.len() as u64 > MAX_AVATAR_SIZE {
-            return Err(AppError::PayloadTooLarge(
-                "Avatar is too large (max 5 MB)".to_string(),
-            ));
-        }
-        let Some((content_type, ext)) = detect_allowed_avatar(&data) else {
-            return Err(AppError::BadRequest("Invalid file type".to_string()));
-        };
-        let Some(storage) = crate::infra::storage::get() else {
-            return Err(AppError::BadRequest(
-                "Storage is not configured".to_string(),
-            ));
-        };
-
-        let key = crate::infra::storage::random_object_key(AVATAR_PREFIX, ext);
-        storage
-            .save(&key, data.to_vec(), content_type)
-            .await
-            .map_err(|err| {
-                tracing::error!(error = %err, key = %key, "avatar: upload failed");
-                AppError::InternalServerError("Failed to upload image".to_string())
-            })?;
-        services::user::set_image(&pool, auth_user.id, &key).await?;
-
-        return Ok(Json(ApiResponse::success_with_message(
-            "Profile picture updated successfully",
-            serde_json::json!({ "image": key }),
-        )));
-    }
-
-    Err(AppError::BadRequest("No file uploaded".to_string()))
+    Ok(Json(ApiResponse::success_with_message(
+        "Profile picture updated successfully",
+        AvatarUploadResponse { image: key },
+    )))
 }
 
 pub async fn get_user_stats(

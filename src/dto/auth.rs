@@ -145,6 +145,14 @@ impl FailedLoginsQuery {
     }
 }
 
+/// `DELETE /api/auth/sessions/{user_id}` path; the id is parsed in the
+/// handler so a bad value gets echobackend's "Invalid user ID format".
+#[derive(Deserialize, Validate)]
+pub struct RevokeUserPath {
+    #[garde(skip)]
+    pub user_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

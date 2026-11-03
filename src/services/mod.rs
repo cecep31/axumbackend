@@ -8,6 +8,7 @@ pub mod guild;
 pub mod guild_channel;
 pub mod holding;
 pub mod notification;
+pub mod pagination;
 pub mod post;
 pub mod post_like;
 pub mod post_report;

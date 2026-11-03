@@ -50,7 +50,7 @@ pub async fn report_post(
     auth_user: AuthUser,
     VPath(params): VPath<ReportPostPath>,
     VJsonOrDefault(req): VJsonOrDefault<CreatePostReportRequest>,
-) -> Result<(axum::http::StatusCode, Json<ApiResponse<serde_json::Value>>), AppError> {
+) -> Result<(axum::http::StatusCode, Json<ApiResponse<()>>), AppError> {
     const OP: &str = "Failed to report post";
     let post_id = parse_post_id(&params.id, OP)?;
     services::post_report::report_post(&pool, post_id, auth_user.id, &req.reason, req.details)
@@ -111,7 +111,7 @@ pub async fn moderate_post(
     admin: AdminUser,
     VPath(params): VPath<ReportPostPath>,
     VJsonOrDefault(req): VJsonOrDefault<ModeratePostRequest>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     const OP: &str = "Failed to moderate post";
     let post_id = parse_post_id(&params.id, OP)?;
     services::post_report::moderate_post(&pool, post_id, admin.0.id, &req.action, req.note)

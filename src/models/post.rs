@@ -12,7 +12,7 @@ pub struct SitemapPost {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Post {
     pub id: Uuid,
     pub title: String,
@@ -91,9 +91,50 @@ impl SitemapPost {
     }
 }
 
+/// `data` of `POST /api/posts`: `{ "id": <uuid> }`.
+#[derive(Serialize)]
+pub struct CreatedPostResponse {
+    pub id: Uuid,
+}
+
+/// `data` of `POST /api/posts/image`: the stored object key, sent as both
+/// `path` and `url` like echobackend.
+#[derive(Serialize)]
+pub struct PostImageUploadResponse {
+    pub path: String,
+    pub url: String,
+}
+
+impl PostImageUploadResponse {
+    pub fn from_key(key: String) -> Self {
+        Self {
+            path: key.clone(),
+            url: key,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn created_post_response_matches_old_json() {
+        let id = Uuid::now_v7();
+        assert_eq!(
+            serde_json::to_value(CreatedPostResponse { id }).unwrap(),
+            serde_json::json!({ "id": id })
+        );
+    }
+
+    #[test]
+    fn post_image_upload_response_matches_old_json() {
+        let key = "posts/images/abc123.png".to_string();
+        assert_eq!(
+            serde_json::to_value(PostImageUploadResponse::from_key(key.clone())).unwrap(),
+            serde_json::json!({ "path": key, "url": key })
+        );
+    }
 
     fn sample_post_model(body: Option<String>) -> crate::entities::posts::Model {
         crate::entities::posts::Model {

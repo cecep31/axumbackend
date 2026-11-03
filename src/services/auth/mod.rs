@@ -3,6 +3,7 @@ pub use crate::domain::client::ClientInfo;
 use crate::entities::{auth_activity_logs, password_reset_tokens, sessions, users};
 use crate::infra::cache;
 use crate::infra::email::Mailer;
+use crate::models::auth::UserBrief;
 use argon2::{
     Argon2, Params,
     password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},

@@ -1,3 +1,4 @@
+use crate::dto::exchange_rate::ExchangeRateQuery;
 use crate::http::auth::AuthUser;
 use crate::http::error::AppError;
 use crate::http::extract::VQuery;
@@ -7,18 +8,6 @@ use crate::models::exchange_rate::ExchangeRateResponse;
 use crate::services::exchange_rate::{self, ExchangeRateError};
 use crate::state::AppState;
 use axum::{Json, Router, extract::State, routing::get};
-use garde::Validate;
-use serde::Deserialize;
-
-#[derive(Debug, Default, Deserialize, Validate)]
-pub struct ExchangeRateQuery {
-    #[serde(default)]
-    #[garde(skip)]
-    pub from: String,
-    #[serde(default)]
-    #[garde(skip)]
-    pub to: String,
-}
 
 impl From<ExchangeRateError> for AppError {
     fn from(err: ExchangeRateError) -> Self {

@@ -1,6 +1,7 @@
 use crate::entities::{profiles, user_follows, users};
 use crate::models::user::UserResponse;
 use crate::models::user_follow::{FollowResponse, FollowStats};
+use crate::services::pagination::paginate;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, JoinType,
@@ -212,15 +213,18 @@ pub async fn get_followers(
         .filter(user_follows::Column::DeletedAt.is_null())
         .filter(users::Column::DeletedAt.is_null());
 
-    let total = query.clone().count(db).await? as i64;
-    let users = query
-        .order_by_desc(user_follows::Column::CreatedAt)
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
-        .all(db)
-        .await?;
+    let (users, total) = paginate(
+        db,
+        query.order_by_desc(user_follows::Column::CreatedAt),
+        offset.max(0) as u64,
+        limit.max(0) as u64,
+    )
+    .await?;
 
-    Ok((user_responses(db, users, current_user_id).await?, total))
+    Ok((
+        user_responses(db, users, current_user_id).await?,
+        total as i64,
+    ))
 }
 
 pub async fn get_following(
@@ -239,15 +243,18 @@ pub async fn get_following(
         .filter(user_follows::Column::DeletedAt.is_null())
         .filter(users::Column::DeletedAt.is_null());
 
-    let total = query.clone().count(db).await? as i64;
-    let users = query
-        .order_by_desc(user_follows::Column::CreatedAt)
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
-        .all(db)
-        .await?;
+    let (users, total) = paginate(
+        db,
+        query.order_by_desc(user_follows::Column::CreatedAt),
+        offset.max(0) as u64,
+        limit.max(0) as u64,
+    )
+    .await?;
 
-    Ok((user_responses(db, users, current_user_id).await?, total))
+    Ok((
+        user_responses(db, users, current_user_id).await?,
+        total as i64,
+    ))
 }
 
 pub async fn get_follow_stats(

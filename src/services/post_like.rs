@@ -3,11 +3,12 @@ use crate::models::post_like::{
     LikeStatusResponse, PostLikeListResponse, PostLikeResponse, PostLikeStats,
 };
 use crate::models::user::User;
+use crate::services::pagination::paginate;
 use crate::services::user_hydration;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set,
+    QueryFilter, QueryOrder, Set,
 };
 use uuid::Uuid;
 
@@ -121,13 +122,14 @@ pub async fn get_likes_by_post_id(
 ) -> Result<PostLikeListResponse, PostLikeError> {
     let query = post_likes::Entity::find().filter(post_likes::Column::PostId.eq(post_id));
 
-    let total = query.clone().count(db).await? as i64;
-    let like_models = query
-        .order_by_desc(post_likes::Column::CreatedAt)
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
-        .all(db)
-        .await?;
+    let (like_models, total) = paginate(
+        db,
+        query.order_by_desc(post_likes::Column::CreatedAt),
+        offset.max(0) as u64,
+        limit.max(0) as u64,
+    )
+    .await?;
+    let total = total as i64;
 
     let users_by_id = load_like_user_map(db, &like_models).await?;
     let likes = like_models

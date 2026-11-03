@@ -48,7 +48,7 @@ pub async fn record_view(
     auth_user: AuthUser,
     RequestClient(client): RequestClient,
     VPath(params): VPath<PostIdPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     // echobackend stores `c.RealIP()` (trusted-proxy aware), never the raw
     // X-Forwarded-For header.
     services::post_view::record_view(
@@ -119,7 +119,7 @@ pub async fn like_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(params): VPath<PostIdPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     services::post_like::like_post(&pool, params.id, auth_user.id).await?;
 
     Ok(Json(ApiResponse::message("Post liked successfully")))
@@ -129,7 +129,7 @@ pub async fn unlike_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(params): VPath<PostIdPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     services::post_like::unlike_post(&pool, params.id, auth_user.id).await?;
 
     Ok(Json(ApiResponse::message("Post unliked successfully")))

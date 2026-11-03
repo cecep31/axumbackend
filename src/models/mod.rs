@@ -1,9 +1,11 @@
+pub mod auth;
 pub mod bookmark;
 pub mod chat;
 pub mod comment;
 pub mod corporate_action;
 pub mod exchange_rate;
 pub mod guild;
+pub mod health;
 pub mod holding;
 pub mod notification;
 pub mod post;

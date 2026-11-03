@@ -180,7 +180,7 @@ pub async fn delete_holding(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(params): VPath<HoldingPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     services::holding::delete_holding(&pool, params.id, auth_user.id).await?;
     Ok(Json(ApiResponse::message("Holding deleted successfully")))
 }

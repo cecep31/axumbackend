@@ -91,7 +91,7 @@ pub async fn delete_tag(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
     VPath(params): VPath<TagIdPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     match services::tag::delete_tag(&pool, params.id).await? {
         true => Ok(Json(ApiResponse::message("Tag deleted successfully"))),
         false => Err(AppError::NotFound("Tag not found".to_string())),

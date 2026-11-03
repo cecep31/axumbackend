@@ -2,15 +2,19 @@ use super::{active_posts, find_active_post};
 use crate::entities::{posts, posts_to_tags, tags, users};
 use crate::infra::cache;
 use crate::models::post::{Post, SitemapPost};
+use crate::services::pagination::paginate;
 use chrono::Utc;
 use sea_orm::sea_query::extension::postgres::PgExpr;
 use sea_orm::sea_query::{Expr, SimpleExpr};
 use sea_orm::{
     ColumnTrait, DatabaseConnection, DbErr, EntityTrait, ExprTrait, FromQueryResult, JoinType,
-    ModelTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
-    RelationTrait,
+    ModelTrait, Order, QueryFilter, QueryOrder, QuerySelect, QueryTrait, RelationTrait,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy)]
 pub enum SortDirection {
@@ -171,18 +175,18 @@ pub async fn get_all_posts(
         query = query.filter(tagged_with_any(&filter.tags));
     }
 
-    let total = query.clone().count(db).await? as i64;
-    let post_models = query
-        .order_by(
+    let (post_models, total) = paginate(
+        db,
+        query.order_by(
             validate_order_field(filter.sort_by),
             get_order_dir(filter.sort_order),
-        )
-        .limit(Ord::max(filter.limit, 0) as u64)
-        .offset(Ord::max(filter.offset, 0) as u64)
-        .all(db)
-        .await?;
+        ),
+        Ord::max(filter.offset, 0) as u64,
+        Ord::max(filter.limit, 0) as u64,
+    )
+    .await?;
 
-    Ok((hydrate_posts(db, post_models, true).await?, total))
+    Ok((hydrate_posts(db, post_models, true).await?, total as i64))
 }
 
 /// echobackend `GetPostByID` (admin detail and `/api/posts/me/{id}`): full
@@ -228,15 +232,15 @@ pub async fn get_posts_by_username(
         .filter(posts::Column::Published.eq(true))
         .filter(posts::Column::HiddenAt.is_null());
 
-    let total = query.clone().count(db).await? as i64;
-    let post_models = query
-        .order_by_desc(posts::Column::CreatedAt)
-        .limit(Ord::max(limit, 0) as u64)
-        .offset(Ord::max(offset, 0) as u64)
-        .all(db)
-        .await?;
+    let (post_models, total) = paginate(
+        db,
+        query.order_by_desc(posts::Column::CreatedAt),
+        Ord::max(offset, 0) as u64,
+        Ord::max(limit, 0) as u64,
+    )
+    .await?;
 
-    Ok((hydrate_posts(db, post_models, true).await?, total))
+    Ok((hydrate_posts(db, post_models, true).await?, total as i64))
 }
 
 /// echobackend `GetPostsByCreatedBy` (`GET /api/posts/me`): the author's own
@@ -259,15 +263,15 @@ pub async fn get_posts_by_created_by(
         query = query.filter(posts::Column::Published.eq(published));
     }
 
-    let total = query.clone().count(db).await? as i64;
-    let post_models = query
-        .order_by_desc(posts::Column::CreatedAt)
-        .limit(Ord::max(limit, 0) as u64)
-        .offset(Ord::max(offset, 0) as u64)
-        .all(db)
-        .await?;
+    let (post_models, total) = paginate(
+        db,
+        query.order_by_desc(posts::Column::CreatedAt),
+        Ord::max(offset, 0) as u64,
+        Ord::max(limit, 0) as u64,
+    )
+    .await?;
 
-    Ok((hydrate_posts(db, post_models, true).await?, total))
+    Ok((hydrate_posts(db, post_models, true).await?, total as i64))
 }
 
 /// Mirrors echobackend's `GetPostsForYou`: posts authored by `user_id` or by
@@ -294,42 +298,40 @@ pub async fn get_posts_for_you(
                 .or(posts::Column::CreatedBy.in_subquery(following_ids)),
         );
 
-    let total = query.clone().count(db).await? as i64;
-    let post_models = query
-        .order_by_desc(posts::Column::CreatedAt)
-        .limit(Ord::max(limit, 0) as u64)
-        .offset(Ord::max(offset, 0) as u64)
-        .all(db)
-        .await?;
+    let (post_models, total) = paginate(
+        db,
+        query.order_by_desc(posts::Column::CreatedAt),
+        Ord::max(offset, 0) as u64,
+        Ord::max(limit, 0) as u64,
+    )
+    .await?;
 
-    Ok((hydrate_posts(db, post_models, true).await?, total))
+    Ok((hydrate_posts(db, post_models, true).await?, total as i64))
 }
 
 /// Cached for `CACHE_TTL_SECONDS` under `posts:random:<limit>` when Redis is
 /// configured, like echobackend's `GetPostsRandom`.
 pub async fn get_random_posts(db: &DatabaseConnection, limit: i64) -> Result<Vec<Post>, DbErr> {
-    let cache_key = cache::get().map(|c| c.build_key(&["posts", "random", &limit.to_string()]));
-    if let Some(posts) = read_cached::<Vec<Post>>(cache_key.as_deref()).await {
-        return Ok(posts);
-    }
-
-    let post_models = active_posts()
-        .filter(posts::Column::Published.eq(true))
-        .filter(posts::Column::HiddenAt.is_null())
-        .order_by(sea_orm::sea_query::Expr::cust("RANDOM()"), Order::Asc)
-        .limit(Ord::max(limit, 0) as u64)
-        .all(db)
-        .await?;
-
-    let posts = hydrate_posts(db, post_models, true).await?;
-    write_cached(cache_key.as_deref(), &posts).await;
-    Ok(posts)
+    static CACHE: LazyLock<ListCache<Vec<Post>>> = LazyLock::new(ListCache::default);
+    let limit_key = limit.to_string();
+    CACHE
+        .get_or_load(&["posts", "random", &limit_key], || async {
+            let post_models = active_posts()
+                .filter(posts::Column::Published.eq(true))
+                .filter(posts::Column::HiddenAt.is_null())
+                .order_by(sea_orm::sea_query::Expr::cust("RANDOM()"), Order::Asc)
+                .limit(Ord::max(limit, 0) as u64)
+                .all(db)
+                .await?;
+            hydrate_posts(db, post_models, true).await
+        })
+        .await
 }
 
 /// echobackend caches trending posts wrapped in its `trendingPostsCacheEntry`
 /// struct (`json:"posts"`), so the shared key holds `{"posts": [...]}`.
 /// `Posts` (the casing older axum builds wrote) is still read until it expires.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct TrendingPostsCacheEntry {
     #[serde(alias = "Posts")]
     posts: Vec<Post>,
@@ -338,11 +340,10 @@ struct TrendingPostsCacheEntry {
 /// Cached for `CACHE_TTL_SECONDS` under `posts:trending:<limit>` when Redis is
 /// configured, like echobackend's `GetPostsTrending`.
 pub async fn get_trending_posts(db: &DatabaseConnection, limit: i64) -> Result<Vec<Post>, DbErr> {
-    let cache_key = cache::get().map(|c| c.build_key(&["posts", "trending", &limit.to_string()]));
-    if let Some(entry) = read_cached::<TrendingPostsCacheEntry>(cache_key.as_deref()).await {
-        return Ok(entry.posts);
-    }
-
+    static CACHE: LazyLock<ListCache<TrendingPostsCacheEntry>> = LazyLock::new(ListCache::default);
+    let limit_key = limit.to_string();
+    let entry = CACHE
+        .get_or_load(&["posts", "trending", &limit_key], || async {
     // Posts by soft-deleted users are hidden, like echobackend's `activePostUserJoin`.
     let post_models = active_posts()
         .filter(posts::Column::Published.eq(true))
@@ -367,11 +368,89 @@ pub async fn get_trending_posts(db: &DatabaseConnection, limit: i64) -> Result<V
         .all(db)
         .await?;
 
-    let entry = TrendingPostsCacheEntry {
+    Ok(TrendingPostsCacheEntry {
         posts: hydrate_posts(db, post_models, true).await?,
-    };
-    write_cached(cache_key.as_deref(), &entry).await;
+    })
+        })
+        .await?;
     Ok(entry.posts)
+}
+
+/// How long random/trending lists stay in process memory when Redis is not
+/// configured. Short, so a single instance still rotates random posts often.
+const MEMORY_LIST_TTL: Duration = Duration::from_secs(60);
+
+/// Cache for the random/trending lists that also stops a cache miss from
+/// sending every concurrent request to the database: per key, one request
+/// loads while the others wait, then read what it stored.
+///
+/// With Redis the shared key (same layout as echobackend) is the cache;
+/// without it, results are kept in memory for [`MEMORY_LIST_TTL`]. Keys are
+/// bounded because `limit` is capped at 100.
+struct ListCache<T> {
+    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    memory: Mutex<HashMap<String, (Instant, T)>>,
+}
+
+impl<T> Default for ListCache<T> {
+    fn default() -> Self {
+        Self {
+            locks: Mutex::default(),
+            memory: Mutex::default(),
+        }
+    }
+}
+
+impl<T: Clone + Serialize + DeserializeOwned> ListCache<T> {
+    async fn get_or_load<F, Fut>(&self, key_parts: &[&str], load: F) -> Result<T, DbErr>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, DbErr>>,
+    {
+        let local_key = key_parts.join(":");
+        let redis_key = cache::get().map(|c| c.build_key(key_parts));
+        if let Some(value) = self.lookup(&local_key, redis_key.as_deref()).await {
+            return Ok(value);
+        }
+
+        let lock = self
+            .locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(local_key.clone())
+            .or_default()
+            .clone();
+        let _guard = lock.lock().await;
+        // Whoever held the lock before us may have filled the cache.
+        if let Some(value) = self.lookup(&local_key, redis_key.as_deref()).await {
+            return Ok(value);
+        }
+
+        let value = load().await?;
+        match redis_key.as_deref() {
+            Some(key) => write_cached(Some(key), &value).await,
+            None => {
+                self.memory
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(local_key, (Instant::now(), value.clone()));
+            }
+        }
+        Ok(value)
+    }
+
+    async fn lookup(&self, local_key: &str, redis_key: Option<&str>) -> Option<T> {
+        match redis_key {
+            Some(key) => read_cached(Some(key)).await,
+            None => self
+                .memory
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(local_key)
+                .filter(|(stored_at, _)| stored_at.elapsed() < MEMORY_LIST_TTL)
+                .map(|(_, value)| value.clone()),
+        }
+    }
 }
 
 /// A cache error is treated as a miss: the database stays the source of truth.
@@ -494,19 +573,19 @@ pub async fn get_posts_by_tag(
         .filter(posts::Column::Published.eq(true))
         .filter(posts::Column::HiddenAt.is_null());
 
-    let total = query.clone().count(db).await? as i64;
     // Same whitelist/fallback as GET /api/posts (echobackend PostQueryFilter).
-    let post_models = query
-        .order_by(
+    let (post_models, total) = paginate(
+        db,
+        query.order_by(
             validate_order_field(order_by),
             get_order_dir(order_direction),
-        )
-        .limit(Ord::max(limit, 0) as u64)
-        .offset(Ord::max(offset, 0) as u64)
-        .all(db)
-        .await?;
+        ),
+        Ord::max(offset, 0) as u64,
+        Ord::max(limit, 0) as u64,
+    )
+    .await?;
 
-    Ok((hydrate_posts(db, post_models, true).await?, total))
+    Ok((hydrate_posts(db, post_models, true).await?, total as i64))
 }
 
 #[cfg(test)]
@@ -581,5 +660,49 @@ mod tests {
         assert_eq!(get_order_dir(Some(SortDirection::Asc)), Order::Asc);
         assert_eq!(get_order_dir(Some(SortDirection::Desc)), Order::Desc);
         assert_eq!(get_order_dir(None), Order::Desc);
+    }
+
+    /// Without Redis (as in unit tests), concurrent misses for one key load
+    /// once and the rest are served from memory.
+    #[tokio::test]
+    async fn list_cache_loads_once_for_concurrent_misses() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache: Arc<ListCache<Vec<i32>>> = Arc::new(ListCache::default());
+        let loads = Arc::new(AtomicUsize::new(0));
+        let tasks: Vec<_> = (0..16)
+            .map(|_| {
+                let (cache, loads) = (cache.clone(), loads.clone());
+                tokio::spawn(async move {
+                    cache
+                        .get_or_load(&["test", "list"], || async {
+                            loads.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                            Ok(vec![1, 2, 3])
+                        })
+                        .await
+                })
+            })
+            .collect();
+        for task in tasks {
+            assert_eq!(task.await.unwrap().unwrap(), vec![1, 2, 3]);
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn list_cache_does_not_store_errors() {
+        let cache: ListCache<Vec<i32>> = ListCache::default();
+        let failed = cache
+            .get_or_load(&["test", "err"], || async {
+                Err(DbErr::Custom("boom".into()))
+            })
+            .await;
+        assert!(failed.is_err());
+        let loaded = cache
+            .get_or_load(&["test", "err"], || async { Ok(vec![7]) })
+            .await
+            .unwrap();
+        assert_eq!(loaded, vec![7]);
     }
 }

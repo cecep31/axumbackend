@@ -110,7 +110,7 @@ pub async fn delete_comment(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(params): VPath<CommentPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     let is_admin = is_super_admin(&pool, auth_user.id).await;
     services::comment::delete_comment(&pool, params.id, params.comment_id, auth_user.id, is_admin)
         .await

@@ -9,7 +9,7 @@ use crate::http::error::AppError;
 use crate::http::extract::{VJson, VPath, VQuery};
 use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
-use crate::models::post::{Post, SitemapPost};
+use crate::models::post::{CreatedPostResponse, Post, PostImageUploadResponse, SitemapPost};
 use crate::services;
 use axum::{
     Json,
@@ -44,7 +44,13 @@ pub async fn create_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VJson(req): VJson<CreatePostRequest>,
-) -> Result<(axum::http::StatusCode, Json<ApiResponse<serde_json::Value>>), AppError> {
+) -> Result<
+    (
+        axum::http::StatusCode,
+        Json<ApiResponse<CreatedPostResponse>>,
+    ),
+    AppError,
+> {
     let post = services::post::create_post(
         &pool,
         services::post::CreatePostInput {
@@ -64,7 +70,7 @@ pub async fn create_post(
         axum::http::StatusCode::CREATED,
         Json(ApiResponse::success_with_message(
             "Successfully created post",
-            serde_json::json!({ "id": post.id }),
+            CreatedPostResponse { id: post.id },
         )),
     ))
 }
@@ -208,77 +214,37 @@ pub async fn get_posts_for_you(
     )))
 }
 
-/// Returns `(content_type, extension)` for allowed post images: JPEG, PNG,
-/// WEBP and GIF, like echobackend's `detectAllowedImage`.
-fn detect_allowed_image(data: &[u8]) -> Option<(&'static str, &'static str)> {
-    if data.len() >= 6 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a") {
-        Some(("image/gif", ".gif"))
-    } else if data.len() >= 3 && data[0..3] == [0xff, 0xd8, 0xff] {
-        Some(("image/jpeg", ".jpg"))
-    } else if data.len() >= 8 && data[0..8] == [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a] {
-        Some(("image/png", ".png"))
-    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
-        Some(("image/webp", ".webp"))
-    } else {
-        None
-    }
-}
+/// Post image upload settings: `image` field, 1 MB cap, JPEG/PNG/GIF/WEBP.
+const POST_IMAGE_UPLOAD: crate::http::upload::ImageUploadSpec =
+    crate::http::upload::ImageUploadSpec {
+        field: "image",
+        max_file_bytes: MAX_POST_IMAGE_SIZE,
+        label: "Image",
+        key_prefix: POST_IMAGE_PREFIX,
+        log_name: "post image",
+    };
 
 pub async fn upload_image_posts(
     _auth_user: AuthUser,
     headers: axum::http::HeaderMap,
     mut multipart: Multipart,
-) -> Result<(axum::http::StatusCode, Json<ApiResponse<serde_json::Value>>), AppError> {
-    // Fail fast on oversized bodies: without this the route's body limit
-    // kills the stream mid-field and multer reports a generic "Error parsing
-    // multipart/form-data request" instead of a clear 413.
-    crate::http::upload::reject_oversized_body(&headers, MAX_POST_IMAGE_SIZE, "Image")?;
+) -> Result<
+    (
+        axum::http::StatusCode,
+        Json<ApiResponse<PostImageUploadResponse>>,
+    ),
+    AppError,
+> {
+    let key =
+        crate::http::upload::upload_image(&headers, &mut multipart, &POST_IMAGE_UPLOAD).await?;
 
-    while let Some(field) = multipart.next_field().await.map_err(|err| {
-        tracing::warn!(error = ?err, "post image: multipart field error");
-        AppError::BadRequest(format!("Failed to upload image: {err}"))
-    })? {
-        if field.name() != Some("image") {
-            continue;
-        }
-
-        let data = field.bytes().await.map_err(|err| {
-            tracing::warn!(error = ?err, "post image: multipart read error");
-            AppError::BadRequest(format!("Failed to read image: {err}"))
-        })?;
-        if data.len() as u64 > MAX_POST_IMAGE_SIZE {
-            return Err(AppError::PayloadTooLarge(
-                "Image is too large (max 1 MB)".to_string(),
-            ));
-        }
-        let Some((content_type, ext)) = detect_allowed_image(&data) else {
-            return Err(AppError::BadRequest("Invalid file type".to_string()));
-        };
-        let Some(storage) = crate::infra::storage::get() else {
-            return Err(AppError::BadRequest(
-                "Storage is not configured".to_string(),
-            ));
-        };
-
-        let key = crate::infra::storage::random_object_key(POST_IMAGE_PREFIX, ext);
-        storage
-            .save(&key, data.to_vec(), content_type)
-            .await
-            .map_err(|err| {
-                tracing::error!(error = %err, key = %key, "post image: upload failed");
-                AppError::InternalServerError("Failed to upload image".to_string())
-            })?;
-
-        return Ok((
-            axum::http::StatusCode::CREATED,
-            Json(ApiResponse::success_with_message(
-                "Successfully uploaded image",
-                serde_json::json!({ "path": key, "url": key }),
-            )),
-        ));
-    }
-
-    Err(AppError::BadRequest("No file uploaded".to_string()))
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(ApiResponse::success_with_message(
+            "Successfully uploaded image",
+            PostImageUploadResponse::from_key(key),
+        )),
+    ))
 }
 
 pub async fn get_posts_for_sitemap(
@@ -430,7 +396,7 @@ pub async fn delete_my_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(params): VPath<PostIdPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     delete_post_scoped(&pool, params.id, Some(auth_user.id)).await
 }
 
@@ -438,7 +404,7 @@ async fn delete_post_scoped(
     pool: &DbPool,
     post_id: Uuid,
     owner: Option<Uuid>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     match services::post::delete_post(pool, post_id, owner).await {
         Ok(true) => Ok(Json(ApiResponse::message("Successfully deleted post"))),
         Ok(false) => Err(post_not_found().context("Failed to delete post")),
@@ -482,7 +448,7 @@ pub async fn delete_post(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
     VPath(params): VPath<PostIdPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     delete_post_scoped(&pool, params.id, None).await
 }
 
@@ -504,24 +470,6 @@ pub async fn get_post_by_username_and_slug(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn detect_allowed_image_accepts_gif() {
-        assert_eq!(
-            detect_allowed_image(b"GIF89a\x01\x00"),
-            Some(("image/gif", ".gif"))
-        );
-        assert_eq!(
-            detect_allowed_image(b"GIF87a\x01\x00"),
-            Some(("image/gif", ".gif"))
-        );
-        assert_eq!(
-            detect_allowed_image(&[0xff, 0xd8, 0xff, 0xe0]),
-            Some(("image/jpeg", ".jpg"))
-        );
-        assert_eq!(detect_allowed_image(b"GIF8"), None);
-        assert_eq!(detect_allowed_image(b"plain text"), None);
-    }
 
     #[test]
     fn parse_date_param_accepts_dates_and_timestamps() {

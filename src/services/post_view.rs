@@ -4,10 +4,11 @@ use crate::models::post_view::{
     MyPostsLikesByMonthResponse, MyPostsViewTrendPoint, PostViewResponse, PostViewStats,
     ViewStatusResponse,
 };
+use crate::services::pagination::paginate;
 use chrono::{Datelike, NaiveDate, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait,
-    FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, Statement,
+    FromQueryResult, QueryFilter, QueryOrder, Set, Statement,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -161,18 +162,19 @@ pub async fn get_views_by_post_id(
         .filter(post_views::Column::PostId.eq(post_id))
         .filter(post_views::Column::DeletedAt.is_null());
 
-    let total = query.clone().count(db).await? as i64;
-    let views = query
-        .order_by_desc(post_views::Column::CreatedAt)
-        .limit(limit as u64)
-        .offset(offset as u64)
-        .all(db)
-        .await?
+    let (models, total) = paginate(
+        db,
+        query.order_by_desc(post_views::Column::CreatedAt),
+        offset as u64,
+        limit as u64,
+    )
+    .await?;
+    let views = models
         .into_iter()
         .map(PostViewResponse::from_entity)
         .collect();
 
-    Ok((views, total))
+    Ok((views, total as i64))
 }
 
 /// Like echobackend `GetViewStats`, the post itself is not looked up: a

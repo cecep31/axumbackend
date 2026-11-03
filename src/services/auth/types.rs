@@ -1,13 +1,6 @@
 use super::*;
 
 #[derive(Serialize, Deserialize)]
-pub struct UserBrief {
-    pub id: Uuid,
-    pub email: String,
-    pub username: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
 pub struct AuthTokenResponse {
     pub access_token: String,
     pub refresh_token: String,

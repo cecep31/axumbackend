@@ -185,7 +185,7 @@ pub async fn delete_guild(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(path): VPath<GuildSlugPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     services::guild::delete_guild(&pool, &path.slug, auth_user.id)
         .await
         .map_err(map_guild_error)?;
@@ -213,7 +213,7 @@ pub async fn leave_guild(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(path): VPath<GuildSlugPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     services::guild::leave_guild(&pool, &path.slug, auth_user.id)
         .await
         .map_err(map_guild_error)?;
@@ -308,7 +308,7 @@ pub async fn delete_channel(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(path): VPath<GuildChannelPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     services::guild_channel::delete_channel(&pool, &path.slug, &path.channel_id, auth_user.id)
         .await
         .map_err(map_guild_channel_error)?;
@@ -392,7 +392,7 @@ pub async fn delete_message(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(path): VPath<GuildMessagePath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     services::guild_channel::delete_message(
         &pool,
         &path.slug,

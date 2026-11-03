@@ -7,23 +7,18 @@
 //! are returned. External API errors are swallowed (fail-open) so a partial
 //! result is always returned.
 
+use crate::clients::corporate_action as idx;
 use crate::config::MarketConfig;
 use crate::entities::corporate_actions;
 use crate::models::corporate_action::{CorporateActionCalendarResponse, CorporateActionResponse};
 use chrono::{Datelike, NaiveDate, Utc};
-use reqwest::Client;
 use sea_orm::prelude::Decimal;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
 };
-use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::LazyLock;
-use std::time::Duration;
 
-const RAPIDAPI_IDX_HOST: &str = "indonesia-stock-exchange-idx.p.rapidapi.com";
-const RAPIDAPI_IDX_BASE_URL: &str = "https://indonesia-stock-exchange-idx.p.rapidapi.com";
 const DATE_FORMAT: &str = "%Y-%m-%d";
 
 #[derive(Debug, Clone)]
@@ -39,71 +34,6 @@ struct CorporateAction {
     currency: Option<String>,
     note: Option<String>,
     market: String,
-}
-
-// --- RapidAPI IDX response envelopes ----------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct DividendEnvelope {
-    data: DividendEnvelopeData,
-}
-#[derive(Debug, Deserialize)]
-struct DividendEnvelopeData {
-    data: DividendEnvelopeInner,
-}
-#[derive(Debug, Deserialize)]
-struct DividendEnvelopeInner {
-    dividend: Vec<RapidApiDividendItem>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RupsEnvelope {
-    data: RupsEnvelopeData,
-}
-#[derive(Debug, Deserialize)]
-struct RupsEnvelopeData {
-    data: RupsEnvelopeInner,
-}
-#[derive(Debug, Deserialize)]
-struct RupsEnvelopeInner {
-    rups: Vec<RapidApiRupsItem>,
-}
-
-/// Go `encoding/json` into a `string`: a missing key or `null` leaves "".
-fn go_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
-}
-
-#[derive(Debug, Deserialize)]
-struct RapidApiDividendItem {
-    #[serde(default, deserialize_with = "go_string")]
-    company_symbol: String,
-    #[serde(default, deserialize_with = "go_string")]
-    dividend_exdate: String,
-    #[serde(default, deserialize_with = "go_string")]
-    dividend_cumdate: String,
-    #[serde(default, deserialize_with = "go_string")]
-    dividend_recdate: String,
-    #[serde(default, deserialize_with = "go_string")]
-    dividend_paydate: String,
-    #[serde(default, deserialize_with = "go_string")]
-    dividend_value: String,
-    #[serde(default, deserialize_with = "go_string")]
-    dividend_currency: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct RapidApiRupsItem {
-    #[serde(default, deserialize_with = "go_string")]
-    company_symbol: String,
-    #[serde(default, deserialize_with = "go_string")]
-    company_name: String,
-    #[serde(default, deserialize_with = "go_string")]
-    rups_date: String,
-    #[serde(default, deserialize_with = "go_string")]
-    rups_time: String,
-    #[serde(default, deserialize_with = "go_string")]
-    rups_venue: String,
 }
 
 /// Add `months` calendar months to `date`, clamping the day to the last valid
@@ -147,9 +77,8 @@ pub async fn get_calendar(
         .unwrap_or(false);
 
     if !cached && !MarketConfig::get().rapidapi_idx_key.is_empty() {
-        let client = shared_client();
         let actions =
-            fetch_corporate_actions(client, &MarketConfig::get().rapidapi_idx_key, from, to).await;
+            fetch_corporate_actions(&MarketConfig::get().rapidapi_idx_key, from, to).await;
         let models = dedupe_actions(actions)
             .into_iter()
             .map(|action| corporate_actions::ActiveModel {
@@ -297,20 +226,9 @@ fn dedupe_actions(actions: Vec<CorporateAction>) -> Vec<CorporateAction> {
         .collect()
 }
 
-fn shared_client() -> &'static Client {
-    static CLIENT: LazyLock<Client> = LazyLock::new(|| {
-        Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .unwrap_or_else(|_| Client::new())
-    });
-    &CLIENT
-}
-
 /// Fetches dividend + RUPS calendars from the IDX API. Individual API errors
 /// are swallowed (fail-open) so a partial result is always returned.
 async fn fetch_corporate_actions(
-    client: &Client,
     api_key: &str,
     from: NaiveDate,
     to: NaiveDate,
@@ -318,11 +236,9 @@ async fn fetch_corporate_actions(
     if api_key.is_empty() {
         return Vec::new();
     }
-    let from_str = from.format(DATE_FORMAT).to_string();
-    let to_str = to.format(DATE_FORMAT).to_string();
     let mut actions = Vec::new();
 
-    match fetch_dividends(client, api_key, &from_str, &to_str).await {
+    match idx::fetch_dividends(api_key, from, to).await {
         Ok(dividends) => {
             for d in dividends {
                 if d.company_symbol.is_empty() {
@@ -354,7 +270,7 @@ async fn fetch_corporate_actions(
         Err(err) => tracing::warn!(?err, "rapidapi idx dividend fetch failed; skipping"),
     }
 
-    match fetch_rups(client, api_key, &from_str, &to_str).await {
+    match idx::fetch_rups(api_key, from, to).await {
         Ok(rups_list) => {
             for r in rups_list {
                 if r.company_symbol.is_empty() {
@@ -399,62 +315,6 @@ async fn fetch_corporate_actions(
     actions
 }
 
-async fn fetch_dividends(
-    client: &Client,
-    api_key: &str,
-    from: &str,
-    to: &str,
-) -> Result<Vec<RapidApiDividendItem>, String> {
-    let body = do_request(client, api_key, "/api/calendar/dividend", from, to).await?;
-    let envelope: DividendEnvelope = serde_json::from_slice(body.as_slice())
-        .map_err(|err| format!("decode dividend response: {err}"))?;
-    Ok(envelope.data.data.dividend)
-}
-
-async fn fetch_rups(
-    client: &Client,
-    api_key: &str,
-    from: &str,
-    to: &str,
-) -> Result<Vec<RapidApiRupsItem>, String> {
-    let body = do_request(client, api_key, "/api/calendar/rups", from, to).await?;
-    let envelope: RupsEnvelope = serde_json::from_slice(body.as_slice())
-        .map_err(|err| format!("decode rups response: {err}"))?;
-    Ok(envelope.data.data.rups)
-}
-
-async fn do_request(
-    client: &Client,
-    api_key: &str,
-    endpoint: &str,
-    from: &str,
-    to: &str,
-) -> Result<Vec<u8>, String> {
-    let url = format!("{RAPIDAPI_IDX_BASE_URL}{endpoint}?from={from}&to={to}");
-    let response = client
-        .get(&url)
-        .header("X-RapidAPI-Key", api_key)
-        .header("X-RapidAPI-Host", RAPIDAPI_IDX_HOST)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|err| format!("request {endpoint}: {err}"))?;
-
-    let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .map_err(|err| format!("read {endpoint} response: {err}"))?;
-    if !status.is_success() {
-        let lossy = String::from_utf8_lossy(&body);
-        return Err(format!(
-            "rapidapi idx {endpoint} returned status {status}: {}",
-            truncate(&lossy, 200)
-        ));
-    }
-    Ok(body.to_vec())
-}
-
 fn parse_date(s: &str) -> Option<NaiveDate> {
     if s.is_empty() {
         return None;
@@ -480,34 +340,17 @@ fn normalize_currency(c: &str) -> String {
     }
 }
 
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(n).collect();
-        format!("{truncated}...")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn rapidapi_items_tolerate_null_and_missing_fields() {
-        let item: RapidApiDividendItem = serde_json::from_str(
-            r#"{"company_symbol":"BBCA","dividend_exdate":"2025-07-15","dividend_cumdate":"2025-07-14","dividend_recdate":null,"dividend_value":null}"#,
-        )
-        .unwrap();
+    fn parse_date_treats_empty_and_invalid_as_missing() {
         assert_eq!(
-            parse_date(&item.dividend_cumdate),
+            parse_date("2025-07-14"),
             NaiveDate::from_ymd_opt(2025, 7, 14)
         );
-        assert_eq!(parse_date(&item.dividend_recdate), None);
-        assert!(item.dividend_value.is_empty());
-        assert!(item.dividend_paydate.is_empty());
-
-        let rups: RapidApiRupsItem = serde_json::from_str(r#"{"company_symbol":null}"#).unwrap();
-        assert!(rups.company_symbol.is_empty());
+        assert_eq!(parse_date(""), None);
+        assert_eq!(parse_date("14/07/2025"), None);
     }
 }

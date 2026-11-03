@@ -1,6 +1,7 @@
 use crate::clients::openrouter;
 use crate::dto::chat::{
-    CreateChatConversationRequest, CreateChatConversationStreamRequest, CreateChatMessageRequest,
+    ConversationMessagesPath, ConversationPath, CreateChatConversationRequest,
+    CreateChatConversationStreamRequest, CreateChatMessageRequest, MessagePath,
     UpdateChatConversationRequest,
 };
 use crate::dto::common::PaginationQuery;
@@ -9,7 +10,9 @@ use crate::http::error::AppError;
 use crate::http::extract::{VJson, VPath, VQuery};
 use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
-use crate::models::chat::{ChatConversationResponse, ChatMessageResponse};
+use crate::models::chat::{
+    ChatConversationCreatedData, ChatConversationResponse, ChatMessageResponse, ChatStreamEvent,
+};
 use crate::services::chat::StreamOutcome;
 use crate::services::{self, chat::ChatError};
 use crate::state::AppState;
@@ -23,31 +26,9 @@ use axum::{
     },
     routing::{get, post},
 };
-use garde::Validate;
-use serde::Deserialize;
+use serde::Serialize;
 use std::convert::Infallible;
 use tokio_stream::StreamExt;
-use uuid::Uuid;
-
-#[derive(Debug, Deserialize, Validate)]
-pub struct ConversationPath {
-    #[garde(skip)]
-    pub id: Uuid,
-}
-
-#[derive(Debug, Deserialize, Validate)]
-#[serde(rename_all = "camelCase")]
-pub struct ConversationMessagesPath {
-    #[garde(skip)]
-    pub conversation_id: Uuid,
-}
-
-#[derive(Debug, Deserialize, Validate)]
-#[serde(rename_all = "camelCase")]
-pub struct MessagePath {
-    #[garde(skip)]
-    pub message_id: Uuid,
-}
 
 /// echobackend `respondChatError(c, message, err)`: 404 carries the endpoint
 /// message plus the sentinel text as `error`, 403 uses the sentinel as its
@@ -106,13 +87,13 @@ pub async fn create_conversation_stream(
         )
             .into_response()),
         StreamOutcome::Stream(preparation) => {
-            let initial_event = serde_json::json!({
-                "type": "conversation_created",
-                "data": {
-                    "conversation_id": preparation.conversation_id,
-                    "user_message": preparation.user_message,
+            let initial_event = sse_data_event(
+                "conversation_created",
+                ChatConversationCreatedData {
+                    conversation_id: preparation.conversation_id,
+                    user_message: &preparation.user_message,
                 },
-            });
+            );
             Ok(ai_stream_response(pool, preparation, initial_event).into_response())
         }
     }
@@ -170,7 +151,7 @@ pub async fn delete_conversation(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(params): VPath<ConversationPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     services::chat::delete_conversation(&pool, params.id, auth_user.id)
         .await
         .map_err(chat_err("Failed to delete conversation"))?;
@@ -225,10 +206,7 @@ pub async fn create_message_stream(
         )
             .into_response()),
         StreamOutcome::Stream(preparation) => {
-            let initial_event = serde_json::json!({
-                "type": "user_message",
-                "data": preparation.user_message,
-            });
+            let initial_event = sse_data_event("user_message", &preparation.user_message);
             Ok(ai_stream_response(pool, preparation, initial_event).into_response())
         }
     }
@@ -280,12 +258,16 @@ pub async fn delete_message(
 // SSE streaming
 // ============================================================================
 
-fn sse_data_event(payload: serde_json::Value) -> Result<Event, Infallible> {
-    Ok(Event::default().data(payload.to_string()))
+/// Serializes one `{ "type": kind, "data": data }` stream event into a
+/// `data:` line. The payloads (strings, `ChatMessageResponse`) always
+/// serialize, so the empty fallback is unreachable in practice.
+fn sse_data_event<T: Serialize>(kind: &'static str, data: T) -> Result<Event, Infallible> {
+    let payload = serde_json::to_string(&ChatStreamEvent { kind, data }).unwrap_or_default();
+    Ok(Event::default().data(payload))
 }
 
 fn sse_error_event(message: &str) -> Result<Event, Infallible> {
-    sse_data_event(serde_json::json!({ "type": "error", "data": message }))
+    sse_data_event("error", message)
 }
 
 /// Builds the SSE response for a prepared AI stream, mirroring echobackend's
@@ -295,10 +277,10 @@ fn sse_error_event(message: &str) -> Result<Event, Infallible> {
 fn ai_stream_response(
     pool: DbPool,
     preparation: services::chat::StreamPreparation,
-    initial_event: serde_json::Value,
+    initial_event: Result<Event, Infallible>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let stream = async_stream::stream! {
-        yield sse_data_event(initial_event);
+        yield initial_event;
 
         match openrouter::generate_stream(
             &preparation.context_messages,
@@ -320,9 +302,7 @@ fn ai_stream_response(
                     match event {
                         openrouter::StreamEvent::Chunk(chunk) => {
                             content.push_str(&chunk);
-                            yield sse_data_event(
-                                serde_json::json!({ "type": "ai_chunk", "data": chunk }),
-                            );
+                            yield sse_data_event("ai_chunk", &chunk);
                         }
                         openrouter::StreamEvent::Usage(value) => usage = value,
                         openrouter::StreamEvent::Error(err) => {
@@ -348,9 +328,7 @@ fn ai_stream_response(
                     .await
                     {
                         Ok(message) => {
-                            yield sse_data_event(
-                                serde_json::json!({ "type": "ai_complete", "data": message }),
-                            );
+                            yield sse_data_event("ai_complete", &message);
                         }
                         Err(err) => {
                             tracing::error!(error = ?err, "failed to save streamed AI message");

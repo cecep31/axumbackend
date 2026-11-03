@@ -1,12 +1,13 @@
 use crate::entities::{bookmark_folders, post_bookmarks, posts};
 use crate::models::bookmark::{BookmarkFolderResponse, BookmarkResponse, ToggleBookmarkResponse};
 use crate::models::post::Post;
+use crate::services::pagination::paginate;
 use crate::services::user_hydration;
 use chrono::Utc;
 use sea_orm::sea_query::{Query, SimpleExpr};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, IntoActiveModel,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    QueryFilter, QueryOrder, QuerySelect, Set,
 };
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
@@ -248,14 +249,14 @@ pub async fn get_bookmarks_by_user(
             None => query = query.filter(post_bookmarks::Column::FolderId.is_null()),
         }
     }
-    let total = query.clone().count(db).await? as i64;
-    let models = query
-        .order_by_desc(post_bookmarks::Column::CreatedAt)
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
-        .all(db)
-        .await?;
-    Ok((hydrate_bookmarks(db, models).await?, total))
+    let (models, total) = paginate(
+        db,
+        query.order_by_desc(post_bookmarks::Column::CreatedAt),
+        offset.max(0) as u64,
+        limit.max(0) as u64,
+    )
+    .await?;
+    Ok((hydrate_bookmarks(db, models).await?, total as i64))
 }
 
 pub async fn update_bookmark(

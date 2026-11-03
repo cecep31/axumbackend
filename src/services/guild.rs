@@ -4,13 +4,14 @@ use crate::models::guild::{
     GUILD_DEFAULT_CHANNEL_NAME, GUILD_ROLE_MEMBER, GUILD_ROLE_OWNER, GuildMemberResponse,
     GuildResponse, is_guild_manager,
 };
+use crate::services::pagination::paginate;
 use crate::services::user_hydration::load_user_brief_map;
 use chrono::Utc;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, IntoActiveModel,
-    JoinType, NotSet, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
-    SqlErr, TransactionTrait,
+    JoinType, NotSet, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set, SqlErr,
+    TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -315,15 +316,16 @@ pub async fn list_guilds(
         ));
     }
 
-    let total = query.clone().count(db).await? as i64;
-    let models = query
-        .order_by_desc(guilds::Column::MemberCount)
-        .order_by_desc(guilds::Column::CreatedAt)
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
-        .all(db)
-        .await?;
-    Ok((guild_responses(db, models).await?, total))
+    let (models, total) = paginate(
+        db,
+        query
+            .order_by_desc(guilds::Column::MemberCount)
+            .order_by_desc(guilds::Column::CreatedAt),
+        offset.max(0) as u64,
+        limit.max(0) as u64,
+    )
+    .await?;
+    Ok((guild_responses(db, models).await?, total as i64))
 }
 
 /// Lists the guilds the caller belongs to, including private ones, most
@@ -338,14 +340,14 @@ pub async fn list_my_guilds(
         .join(JoinType::InnerJoin, guilds::Relation::GuildMembers.def())
         .filter(guild_members::Column::UserId.eq(user_id));
 
-    let total = query.clone().count(db).await? as i64;
-    let models = query
-        .order_by_desc(guild_members::Column::CreatedAt)
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
-        .all(db)
-        .await?;
-    Ok((guild_responses(db, models).await?, total))
+    let (models, total) = paginate(
+        db,
+        query.order_by_desc(guild_members::Column::CreatedAt),
+        offset.max(0) as u64,
+        limit.max(0) as u64,
+    )
+    .await?;
+    Ok((guild_responses(db, models).await?, total as i64))
 }
 
 pub struct UpdateGuildInput {
@@ -494,13 +496,14 @@ pub async fn list_members(
     }
 
     let query = guild_members::Entity::find().filter(guild_members::Column::GuildId.eq(guild.id));
-    let total = query.clone().count(db).await? as i64;
-    let members = query
-        .order_by_desc(guild_members::Column::CreatedAt)
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
-        .all(db)
-        .await?;
+    let (members, total) = paginate(
+        db,
+        query.order_by_desc(guild_members::Column::CreatedAt),
+        offset.max(0) as u64,
+        limit.max(0) as u64,
+    )
+    .await?;
+    let total = total as i64;
 
     let mut users = load_user_brief_map(db, members.iter().map(|m| m.user_id)).await?;
     let out = members

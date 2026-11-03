@@ -158,9 +158,24 @@ impl UserResponse {
     }
 }
 
+/// `data` of `POST /api/users/me/image`: the stored avatar object key.
+#[derive(Serialize)]
+pub struct AvatarUploadResponse {
+    pub image: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avatar_upload_response_matches_old_json() {
+        let key = "users/avatars/abc123.webp".to_string();
+        assert_eq!(
+            serde_json::to_value(AvatarUploadResponse { image: key.clone() }).unwrap(),
+            serde_json::json!({ "image": key })
+        );
+    }
 
     #[test]
     fn test_full_name() {

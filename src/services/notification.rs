@@ -1,9 +1,10 @@
 use crate::entities::notifications;
 use crate::models::notification::{MarkAllReadResponse, NotificationResponse, UnreadCountResponse};
+use crate::services::pagination::paginate;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set,
+    QueryFilter, QueryOrder, Set,
 };
 use uuid::Uuid;
 
@@ -53,18 +54,16 @@ pub async fn get_notifications(
         query = query.filter(notifications::Column::Read.eq(false));
     }
 
-    let total = query.clone().count(db).await? as i64;
-    let notifications = query
-        .order_by_desc(notifications::Column::CreatedAt)
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64)
-        .all(db)
-        .await?
-        .into_iter()
-        .map(Into::into)
-        .collect();
+    let (models, total) = paginate(
+        db,
+        query.order_by_desc(notifications::Column::CreatedAt),
+        offset.max(0) as u64,
+        limit.max(0) as u64,
+    )
+    .await?;
+    let notifications = models.into_iter().map(Into::into).collect();
 
-    Ok((notifications, total))
+    Ok((notifications, total as i64))
 }
 
 pub async fn get_unread_count(

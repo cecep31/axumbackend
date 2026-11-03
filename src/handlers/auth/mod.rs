@@ -15,6 +15,7 @@ use crate::http::rate_limit::{RateLimiter, rate_limit};
 use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
 use crate::infra::email::Mailer;
+use crate::models::auth::CheckUsernameResponse;
 use crate::services::{self, auth::AuthError};
 use crate::state::AppState;
 use axum::{
@@ -104,7 +105,7 @@ pub async fn forgot_password(
     State(mailer): State<Arc<dyn Mailer>>,
     RequestClient(client): RequestClient,
     VJson(req): VJson<ForgotPasswordRequest>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     let _ = services::auth::forgot_password(&pool, mailer.as_ref(), &req.email, client).await;
     Ok(Json(ApiResponse::message(
         "If the email exists, a password reset link has been sent",
@@ -115,7 +116,7 @@ pub async fn reset_password(
     State(pool): State<DbPool>,
     RequestClient(client): RequestClient,
     VJson(req): VJson<ResetPasswordRequest>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     services::auth::reset_password(&pool, &req.token, &req.password, client)
         .await
         .map_err(|err| match err {
@@ -165,7 +166,7 @@ pub async fn logout(
     auth_user: AuthUser,
     RequestClient(client): RequestClient,
     VJson(req): VJson<LogoutRequest>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     let _ = services::auth::logout(&pool, auth_user.id, &req.refresh_token, client).await;
     Ok(Json(ApiResponse::message("Logout successful")))
 }
@@ -175,7 +176,7 @@ pub async fn change_password(
     auth_user: AuthUser,
     RequestClient(client): RequestClient,
     VJson(req): VJson<ChangePasswordRequest>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     services::auth::change_password(
         &pool,
         auth_user.id,
@@ -280,14 +281,14 @@ pub async fn failed_logins(
 pub async fn check_username(
     State(pool): State<DbPool>,
     VJson(req): VJson<CheckUsernameRequest>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<CheckUsernameResponse>>, AppError> {
     let exists = services::auth::check_username_exists(&pool, &req.username)
         .await
         .map_err(|err| internal_auth_error("Failed to check username", err))?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Username availability checked",
-        serde_json::json!({ "exists": exists }),
+        CheckUsernameResponse { exists },
     )))
 }
 
@@ -325,7 +326,7 @@ pub async fn update_profile(
 pub async fn delete_account(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     services::auth::delete_account(&pool, auth_user.id)
         .await
         // echobackend reports every failure here, a missing user included,

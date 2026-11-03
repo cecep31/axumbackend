@@ -2,6 +2,7 @@ use crate::entities::{post_moderation_actions, post_reports, posts, users};
 use crate::models::post_report::{
     ModerationActionResponse, PostReportGroup, SinglePostReportResponse, UserBrief,
 };
+use crate::services::pagination::paginate;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr,
     EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
@@ -205,13 +206,6 @@ pub async fn list_post_reports(
     {
         return Err(PostReportError::InvalidReportStatus);
     }
-    let mut count_q = post_reports::Entity::find().filter(post_reports::Column::PostId.eq(post_id));
-    if let Some(s) = status
-        && !s.is_empty()
-    {
-        count_q = count_q.filter(post_reports::Column::Status.eq(s));
-    }
-    let total = count_q.count(db).await? as u64;
     let mut q = post_reports::Entity::find().filter(post_reports::Column::PostId.eq(post_id));
     if let Some(s) = status
         && !s.is_empty()
@@ -219,12 +213,13 @@ pub async fn list_post_reports(
         q = q.filter(post_reports::Column::Status.eq(s));
     }
     // Raw LIMIT/OFFSET like echobackend (not page-aligned).
-    let reports = q
-        .order_by_desc(post_reports::Column::CreatedAt)
-        .limit(limit)
-        .offset(offset)
-        .all(db)
-        .await?;
+    let (reports, total) = paginate(
+        db,
+        q.order_by_desc(post_reports::Column::CreatedAt),
+        offset,
+        limit,
+    )
+    .await?;
     let reporters = active_users_by_id(db, reports.iter().map(|r| r.reporter_id)).await?;
     let action_ids: HashSet<Uuid> = reports.iter().filter_map(|r| r.action_id).collect();
     let actions: HashMap<Uuid, post_moderation_actions::Model> = if action_ids.is_empty() {
@@ -360,17 +355,15 @@ pub async fn list_moderation_actions(
     limit: u64,
     offset: u64,
 ) -> Result<(Vec<ModerationActionResponse>, u64), PostReportError> {
-    let total = post_moderation_actions::Entity::find()
-        .filter(post_moderation_actions::Column::PostId.eq(post_id))
-        .count(db)
-        .await? as u64;
-    let actions = post_moderation_actions::Entity::find()
-        .filter(post_moderation_actions::Column::PostId.eq(post_id))
-        .order_by_desc(post_moderation_actions::Column::CreatedAt)
-        .limit(limit)
-        .offset(offset)
-        .all(db)
-        .await?;
+    let (actions, total) = paginate(
+        db,
+        post_moderation_actions::Entity::find()
+            .filter(post_moderation_actions::Column::PostId.eq(post_id))
+            .order_by_desc(post_moderation_actions::Column::CreatedAt),
+        offset,
+        limit,
+    )
+    .await?;
     let admins = active_users_by_id(db, actions.iter().filter_map(|a| a.admin_id)).await?;
     let out = actions
         .into_iter()

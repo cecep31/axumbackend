@@ -1,5 +1,6 @@
 use garde::Validate;
 use serde::Deserialize;
+use uuid::Uuid;
 
 /// Mirrors echobackend's `free_model` validator (`pkg/validator/validator.go`):
 /// a model ID must be `openrouter/free` or end with `:free`.
@@ -55,6 +56,26 @@ pub struct CreateChatMessageRequest {
     pub model: Option<String>,
     #[garde(range(min = 0.0, max = 2.0))]
     pub temperature: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct ConversationPath {
+    #[garde(skip)]
+    pub id: Uuid,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationMessagesPath {
+    #[garde(skip)]
+    pub conversation_id: Uuid,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct MessagePath {
+    #[garde(skip)]
+    pub message_id: Uuid,
 }
 
 #[cfg(test)]

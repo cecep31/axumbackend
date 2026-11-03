@@ -9,6 +9,7 @@ use crate::entities::{chat_conversations, chat_messages};
 use crate::models::chat::{
     ChatConversationResponse, ChatMessageResponse, conversation_response, message_response,
 };
+use crate::services::pagination::paginate;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, IntoActiveModel,
@@ -220,13 +221,14 @@ pub async fn get_user_conversations(
     let base = chat_conversations::Entity::find()
         .filter(chat_conversations::Column::UserId.eq(user_id))
         .filter(chat_conversations::Column::DeletedAt.is_null());
-    let total = base.clone().count(db).await? as i64;
-    let conversations = base
-        .order_by_desc(chat_conversations::Column::UpdatedAt)
-        .offset(offset)
-        .limit(limit)
-        .all(db)
-        .await?;
+    let (conversations, total) = paginate(
+        db,
+        base.order_by_desc(chat_conversations::Column::UpdatedAt),
+        offset,
+        limit,
+    )
+    .await?;
+    let total = total as i64;
 
     let counts = message_counts(db, conversations.iter().map(|c| c.id).collect()).await?;
     let out = conversations

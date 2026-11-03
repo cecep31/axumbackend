@@ -222,7 +222,7 @@ pub async fn delete_folder(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(params): VPath<FolderIdPath>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+) -> Result<Json<ApiResponse<()>>, AppError> {
     let folder_id = parse_folder_id(&params.folder_id)?;
     services::bookmark::delete_folder(&pool, folder_id, auth_user.id)
         .await

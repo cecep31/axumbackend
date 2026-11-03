@@ -2,11 +2,12 @@ use crate::dto::user::UserDeletedFilter;
 use crate::entities::users;
 use crate::models::user::{UserResponse, UserView};
 use crate::services::auth::{email_matches, is_unique_violation, normalize_email};
+use crate::services::pagination::paginate;
 use crate::services::user_hydration;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait,
-    IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    IntoActiveModel, QueryFilter, QueryOrder, Set,
 };
 use uuid::Uuid;
 
@@ -125,21 +126,17 @@ pub async fn get_users(
         UserDeletedFilter::Only => Condition::all().add(users::Column::DeletedAt.is_not_null()),
         UserDeletedFilter::All => Condition::all(),
     });
-    let total = query.clone().count(db).await? as i64;
     let order_column = match order_by {
         Some("last_logged_at") => users::Column::LastLoggedAt,
         Some("username") => users::Column::Username,
         Some("email") => users::Column::Email,
         _ => users::Column::CreatedAt,
     };
-    let mut query = query
-        .limit(limit.max(0) as u64)
-        .offset(offset.max(0) as u64);
     // NULLS LAST so users who never logged in stay at the bottom
     // regardless of asc/desc (Postgres defaults to NULLS FIRST on DESC).
     let nulls = sea_orm::sea_query::NullOrdering::Last;
     let default_order = !matches!(order_by, Some("last_logged_at" | "username" | "email"));
-    query = if default_order && deleted_filter == UserDeletedFilter::Only {
+    let query = if default_order && deleted_filter == UserDeletedFilter::Only {
         // echobackend: the trash view's default order is the deletion time,
         // newest first, whatever `order_direction` says (no NULLS LAST).
         query.order_by(users::Column::DeletedAt, sea_orm::Order::Desc)
@@ -148,14 +145,15 @@ pub async fn get_users(
     } else {
         query.order_by_with_nulls(order_column, sea_orm::Order::Asc, nulls)
     };
-    let user_models = query.all(db).await?;
+    let (user_models, total) =
+        paginate(db, query, offset.max(0) as u64, limit.max(0) as u64).await?;
 
     let responses = user_models
         .into_iter()
         .map(|user| UserResponse::from_entity_with_view(user, None, None, UserView::Admin))
         .collect();
 
-    Ok((responses, total))
+    Ok((responses, total as i64))
 }
 
 pub async fn soft_delete(db: &DatabaseConnection, id: Uuid) -> Result<bool, DbErr> {

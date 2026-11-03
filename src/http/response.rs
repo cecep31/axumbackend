@@ -51,11 +51,13 @@ impl ApiResponse<serde_json::Value> {
             meta: None,
         }
     }
+}
 
+impl<T> ApiResponse<T> {
     /// Success envelope without a payload: `{ success: true, message }`.
     /// echobackend's `response.Success(c, msg, nil)` omits `data`, so use this
     /// instead of `success_with_message(msg, Value::Null)` (which would send
-    /// `"data": null`).
+    /// `"data": null`). Payload-less handlers return `ApiResponse<()>`.
     pub fn message(message: impl Into<String>) -> Self {
         ApiResponse {
             success: true,
@@ -66,9 +68,7 @@ impl ApiResponse<serde_json::Value> {
             meta: None,
         }
     }
-}
 
-impl<T> ApiResponse<T> {
     pub fn success_with_message(message: impl Into<String>, data: T) -> Self {
         ApiResponse {
             success: true,
@@ -164,12 +164,17 @@ mod tests {
 
     #[test]
     fn test_message_only_omits_data() {
+        let expected =
+            serde_json::json!({"success": true, "message": "Comment deleted successfully"});
         let value =
-            serde_json::to_value(ApiResponse::message("Comment deleted successfully")).unwrap();
-        assert_eq!(
-            value,
-            serde_json::json!({"success": true, "message": "Comment deleted successfully"})
-        );
+            serde_json::to_value(ApiResponse::<()>::message("Comment deleted successfully"))
+                .unwrap();
+        assert_eq!(value, expected);
+        let value = serde_json::to_value(ApiResponse::<serde_json::Value>::message(
+            "Comment deleted successfully",
+        ))
+        .unwrap();
+        assert_eq!(value, expected);
     }
 
     #[test]

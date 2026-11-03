@@ -1,21 +1,13 @@
+use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
+use crate::models::health::HealthResponse;
 use crate::state::AppState;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
-use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
-pub struct HealthResponse {
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-pub async fn root() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "success": true,
-        "message": "Hello, World!"
-    }))
+/// `GET /` — payload-less success envelope `{ success: true, message }`.
+pub async fn root() -> Json<ApiResponse<()>> {
+    Json(ApiResponse::message("Hello, World!"))
 }
 
 pub async fn health(State(pool): State<DbPool>) -> (StatusCode, Json<HealthResponse>) {
@@ -50,4 +42,21 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(root))
         .route("/health", get(health))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn root_body_matches_previous_literal() {
+        let Json(body) = root().await;
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "success": true,
+                "message": "Hello, World!"
+            })
+        );
+    }
 }
