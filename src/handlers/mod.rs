@@ -16,9 +16,9 @@ use crate::{
     http::{middleware as mw, rate_limit},
     state::AppState,
 };
-use axum::{Router, extract::DefaultBodyLimit, http::StatusCode, middleware};
+use axum::{Router, extract::DefaultBodyLimit, middleware};
 use tower_http::{
-    timeout::TimeoutLayer,
+    catch_panic::CatchPanicLayer,
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
@@ -26,7 +26,9 @@ use tracing::Level;
 /// Builds the router. Layer order matches echobackend's `InitMiddleware`
 /// (outermost first): request logging (Trace), CORS, security headers, body
 /// limit, global rate limit. CORS therefore answers preflights before the
-/// limiter and decorates 413/429 responses.
+/// limiter and decorates 413/429 responses. Panics are caught inside the
+/// CORS/security-header layers (echobackend `RecoverWithLog`), so the 500
+/// envelope still carries those headers.
 pub fn create_router(limiter: Option<rate_limit::TokenBucketLimiter>) -> Router<AppState> {
     let http_config = HttpConfig::get();
 
@@ -42,9 +44,9 @@ pub fn create_router(limiter: Option<rate_limit::TokenBucketLimiter>) -> Router<
         .merge(post::routes())
         .merge(tag::routes())
         .merge(user::routes())
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
+        .layer(middleware::from_fn_with_state(
             http_config.request_timeout,
+            mw::request_timeout,
         ));
 
     // Streaming (SSE) routes stay outside the request timeout.
@@ -63,6 +65,7 @@ pub fn create_router(limiter: Option<rate_limit::TokenBucketLimiter>) -> Router<
     }
 
     router
+        .layer(CatchPanicLayer::custom(mw::panic_response))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn(mw::security_headers))
         .layer(mw::cors(http_config))

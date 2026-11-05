@@ -1,7 +1,6 @@
 use crate::dto::validation::parse_pagination;
 use garde::Validate;
 use serde::Deserialize;
-use uuid::Uuid;
 
 /// Lenient pagination query, mirroring echobackend's `ParsePaginationParams`:
 /// invalid or out-of-range values are silently clamped/defaulted rather than
@@ -28,10 +27,4 @@ impl PaginationQuery {
 pub struct UsernamePath {
     #[garde(length(chars, min = 1))]
     pub username: String,
-}
-
-#[derive(Deserialize, Validate)]
-pub struct PostIdPath {
-    #[garde(skip)]
-    pub id: Uuid,
 }

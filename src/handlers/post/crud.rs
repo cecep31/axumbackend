@@ -1,4 +1,4 @@
-use crate::dto::common::PostIdPath;
+use super::PostIdParam;
 use crate::dto::post::{
     CreatePostRequest, PostPaginationQuery, PostPath, PostsFilterQuery, PostsUsernamePath,
     RandomPostQuery, SitemapQuery, TagPath, UpdatePostRequest, parse_go_bool,
@@ -6,14 +6,14 @@ use crate::dto::post::{
 };
 use crate::http::auth::{AdminUser, AuthUser};
 use crate::http::error::AppError;
-use crate::http::extract::{VJson, VPath, VQuery};
+use crate::http::extract::{VBind, VPath, VQuery, bind_message};
 use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
 use crate::models::post::{CreatedPostResponse, Post, PostImageUploadResponse, SitemapPost};
 use crate::services;
 use axum::{
     Json,
-    extract::{Multipart, State},
+    extract::{Multipart, State, multipart::MultipartRejection},
 };
 use uuid::Uuid;
 
@@ -43,7 +43,7 @@ fn post_not_found() -> AppError {
 pub async fn create_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VJson(req): VJson<CreatePostRequest>,
+    body: Result<VBind<CreatePostRequest>, AppError>,
 ) -> Result<
     (
         axum::http::StatusCode,
@@ -51,6 +51,9 @@ pub async fn create_post(
     ),
     AppError,
 > {
+    // echobackend `c.Bind` failure: 400 "Failed to create post"; an empty
+    // body binds to the zero value and fails validation (422 `required`).
+    let VBind(req) = body.map_err(bind_message("Failed to create post"))?;
     let post = services::post::create_post(
         &pool,
         services::post::CreatePostInput {
@@ -171,9 +174,12 @@ pub async fn get_random_posts(
     let client = pool;
     // echobackend: ParsePaginationParams(9), then capped at 20.
     let limit = query.limit_or(9).min(20);
-    let posts = services::post::get_random_posts(&client, limit)
+    let mut posts = services::post::get_random_posts(&client, limit)
         .await
         .map_err(|e| AppError::from(e).context("Failed to get posts"))?;
+    // echobackend caches full bodies and truncates after the read
+    // (`dto.TruncatePostBodies(posts, 250)`), on hits and misses alike.
+    Post::truncate_bodies(&mut posts);
     Ok(Json(ApiResponse::success_with_message(
         "Successfully retrieved posts",
         posts,
@@ -186,9 +192,10 @@ pub async fn get_trending_posts(
 ) -> Result<Json<ApiResponse<Vec<Post>>>, AppError> {
     let client = pool;
     let limit = query.limit_or(10);
-    let posts = services::post::get_trending_posts(&client, limit)
+    let mut posts = services::post::get_trending_posts(&client, limit)
         .await
         .map_err(|e| AppError::from(e).context("Failed to get trending posts"))?;
+    Post::truncate_bodies(&mut posts);
     Ok(Json(ApiResponse::success_with_message(
         "Successfully retrieved trending posts",
         posts,
@@ -224,10 +231,12 @@ const POST_IMAGE_UPLOAD: crate::http::upload::ImageUploadSpec =
         log_name: "post image",
     };
 
+/// echobackend `UploadImagePosts` (route `BodyLimit(1MB)`): see
+/// [`crate::http::upload::upload_post_image`] for the error envelopes.
 pub async fn upload_image_posts(
     _auth_user: AuthUser,
     headers: axum::http::HeaderMap,
-    mut multipart: Multipart,
+    multipart: Result<Multipart, MultipartRejection>,
 ) -> Result<
     (
         axum::http::StatusCode,
@@ -236,7 +245,7 @@ pub async fn upload_image_posts(
     AppError,
 > {
     let key =
-        crate::http::upload::upload_image(&headers, &mut multipart, &POST_IMAGE_UPLOAD).await?;
+        crate::http::upload::upload_post_image(&headers, multipart, &POST_IMAGE_UPLOAD).await?;
 
     Ok((
         axum::http::StatusCode::CREATED,
@@ -345,12 +354,12 @@ pub async fn get_my_posts(
 pub async fn get_my_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VPath(params): VPath<PostIdPath>,
+    PostIdParam(post_id): PostIdParam,
 ) -> Result<Json<ApiResponse<Post>>, AppError> {
-    ensure_author(&pool, params.id, &auth_user)
+    ensure_author(&pool, post_id, &auth_user)
         .await
         .map_err(|e| e.context("Failed to check post ownership"))?;
-    let post = services::post::get_post_by_id(&pool, params.id)
+    let post = services::post::get_post_by_id(&pool, post_id)
         .await
         .map_err(AppError::from)
         .and_then(|post| post.ok_or_else(post_not_found))
@@ -378,10 +387,13 @@ fn update_input(req: UpdatePostRequest) -> services::post::UpdatePostInput {
 pub async fn update_my_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VPath(params): VPath<PostIdPath>,
-    VJson(req): VJson<UpdatePostRequest>,
+    PostIdParam(post_id): PostIdParam,
+    body: Result<VBind<UpdatePostRequest>, AppError>,
 ) -> Result<Json<ApiResponse<Post>>, AppError> {
-    let post = services::post::update_post(&pool, params.id, Some(auth_user.id), update_input(req))
+    // echobackend: an empty body is a no-op update; a bad one is 400 "Failed
+    // to update post".
+    let VBind(req) = body.map_err(bind_message("Failed to update post"))?;
+    let post = services::post::update_post(&pool, post_id, Some(auth_user.id), update_input(req))
         .await
         .map_err(|e| AppError::from(e).context("Failed to update post"))?;
     Ok(Json(ApiResponse::success_with_message(
@@ -395,9 +407,9 @@ pub async fn update_my_post(
 pub async fn delete_my_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VPath(params): VPath<PostIdPath>,
+    PostIdParam(post_id): PostIdParam,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    delete_post_scoped(&pool, params.id, Some(auth_user.id)).await
+    delete_post_scoped(&pool, post_id, Some(auth_user.id)).await
 }
 
 async fn delete_post_scoped(
@@ -415,9 +427,9 @@ async fn delete_post_scoped(
 pub async fn get_post(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    VPath(params): VPath<PostIdPath>,
+    PostIdParam(post_id): PostIdParam,
 ) -> Result<Json<ApiResponse<Post>>, AppError> {
-    let post = services::post::get_post_by_id(&pool, params.id)
+    let post = services::post::get_post_by_id(&pool, post_id)
         .await
         .map_err(AppError::from)
         .and_then(|post| post.ok_or_else(post_not_found))
@@ -432,10 +444,11 @@ pub async fn get_post(
 pub async fn update_post(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    VPath(params): VPath<PostIdPath>,
-    VJson(req): VJson<UpdatePostRequest>,
+    PostIdParam(post_id): PostIdParam,
+    body: Result<VBind<UpdatePostRequest>, AppError>,
 ) -> Result<Json<ApiResponse<Post>>, AppError> {
-    let post = services::post::update_post(&pool, params.id, None, update_input(req))
+    let VBind(req) = body.map_err(bind_message("Failed to update post"))?;
+    let post = services::post::update_post(&pool, post_id, None, update_input(req))
         .await
         .map_err(|e| AppError::from(e).context("Failed to update post"))?;
     Ok(Json(ApiResponse::success_with_message(
@@ -447,9 +460,9 @@ pub async fn update_post(
 pub async fn delete_post(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    VPath(params): VPath<PostIdPath>,
+    PostIdParam(post_id): PostIdParam,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    delete_post_scoped(&pool, params.id, None).await
+    delete_post_scoped(&pool, post_id, None).await
 }
 
 pub async fn get_post_by_username_and_slug(

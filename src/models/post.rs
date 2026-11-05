@@ -17,7 +17,10 @@ pub struct Post {
     pub id: Uuid,
     pub title: String,
     pub body: Option<String>,
-    #[serde(skip_serializing)]
+    /// Internal only: never sent, and absent from the shared
+    /// `posts:random` / `posts:trending` cache entries (echobackend's
+    /// `PostResponse` has no such field), hence the default when decoding.
+    #[serde(skip_serializing, default)]
     pub created_by: Uuid,
     pub slug: String,
     pub photo_url: Option<String>,
@@ -33,8 +36,24 @@ pub struct Post {
     pub bookmark_count: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<User>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// echobackend `json:"tags,omitempty"`: may be absent in cached JSON.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<Tag>,
+}
+
+/// echobackend `dto.TruncatePostBodies(posts, 250)` limit, in chars (runes).
+const LIST_BODY_MAX_CHARS: usize = 250;
+
+/// The first [`LIST_BODY_MAX_CHARS`] chars plus `" ..."` when longer.
+fn truncate_body(body: String) -> String {
+    if body.chars().count() > LIST_BODY_MAX_CHARS {
+        format!(
+            "{} ...",
+            body.chars().take(LIST_BODY_MAX_CHARS).collect::<String>()
+        )
+    } else {
+        body
+    }
 }
 
 fn to_utc(value: Option<DateTime<FixedOffset>>) -> Option<DateTime<Utc>> {
@@ -42,19 +61,25 @@ fn to_utc(value: Option<DateTime<FixedOffset>>) -> Option<DateTime<Utc>> {
 }
 
 impl Post {
+    /// echobackend `dto.TruncatePostBodies(posts, 250)`, applied after a
+    /// cache read so cached entries keep the full body.
+    pub fn truncate_bodies(posts: &mut [Post]) {
+        for post in posts {
+            post.body = post.body.take().map(truncate_body);
+        }
+    }
+
     pub fn from_entity(
         post: crate::entities::posts::Model,
         user: Option<crate::entities::users::Model>,
         tags: Vec<crate::entities::tags::Model>,
         truncate_body: bool,
     ) -> Self {
-        let body = post.body.map(|body| {
-            if truncate_body && body.chars().count() > 250 {
-                format!("{} ...", body.chars().take(250).collect::<String>())
-            } else {
-                body
-            }
-        });
+        let body = if truncate_body {
+            post.body.map(self::truncate_body)
+        } else {
+            post.body
+        };
 
         Self {
             id: post.id,
@@ -199,6 +224,42 @@ mod tests {
         assert!(json.get("user").is_none());
         assert!(json.get("tags").is_none());
         assert!(json.get("created_by").is_none());
+    }
+
+    #[test]
+    fn test_cached_post_json_without_created_by_decodes() {
+        // echobackend's cached `PostResponse` (posts:random / posts:trending):
+        // no `created_by`, `tags` omitted, full body.
+        let body = "b".repeat(300);
+        let cached = serde_json::json!([{
+            "id": "0190a8f2-1c3e-7b4a-9d6e-2f1a3b4c5d6e",
+            "title": "Post Title",
+            "photo_url": null,
+            "body": body,
+            "slug": "post-title",
+            "view_count": 5,
+            "like_count": 2,
+            "bookmark_count": 1,
+            "published": true,
+            "published_at": null,
+            "hidden_at": null,
+            "user": {"id": "0190a8f2-1c3e-7b4a-9d6e-2f1a3b4c5d6f", "username": "u", "image": null},
+            "created_at": "2024-01-02T03:04:05Z",
+            "updated_at": "2024-01-02T03:04:05Z"
+        }]);
+        let mut posts: Vec<Post> = serde_json::from_value(cached).unwrap();
+        assert_eq!(posts[0].created_by, Uuid::nil());
+        assert!(posts[0].tags.is_empty());
+        assert_eq!(posts[0].body.as_deref().map(str::len), Some(300));
+
+        // Round trip: what axum writes back decodes again.
+        let written = serde_json::to_string(&posts).unwrap();
+        assert!(serde_json::from_str::<Vec<Post>>(&written).is_ok());
+
+        Post::truncate_bodies(&mut posts);
+        let truncated = posts[0].body.as_deref().unwrap();
+        assert_eq!(truncated.chars().count(), 254);
+        assert!(truncated.ends_with(" ..."));
     }
 
     #[test]

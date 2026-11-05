@@ -34,6 +34,31 @@ pub async fn find_active_post(
         .await
 }
 
+/// echobackend's `GetPostByID` + `ensurePostInteractable`, keeping apart the
+/// two ways it fails: the lookup itself (`GetPostByID` -> `ErrPostNotFound`,
+/// wrapped by the caller, e.g. "failed to check post existence: post not
+/// found") and a hidden post (`ensurePostInteractable` -> bare
+/// `ErrPostNotFound`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostPresence {
+    /// Missing, or its author is soft-deleted.
+    Missing,
+    /// Exists but `hidden_at` is set by a moderator.
+    Hidden,
+    Interactable,
+}
+
+pub async fn post_presence(
+    db: &impl ConnectionTrait,
+    post_id: uuid::Uuid,
+) -> Result<PostPresence, DbErr> {
+    Ok(match find_active_post(db, post_id).await? {
+        None => PostPresence::Missing,
+        Some(post) if post.hidden_at.is_some() => PostPresence::Hidden,
+        Some(_) => PostPresence::Interactable,
+    })
+}
+
 /// echobackend's `GetPostByID` + `ensurePostInteractable`: whether a post can
 /// receive engagement (like, comment, bookmark, view, report). A hidden post
 /// or one whose author is soft-deleted is reported as missing.

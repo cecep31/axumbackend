@@ -281,8 +281,10 @@ pub async fn update_holding(
             "current_price",
         )?);
     }
-    if input.last_updated.is_some() {
-        active.last_updated = Set(parse_optional_time(input.last_updated));
+    // echobackend only assigns a `last_updated` that parses as RFC 3339; an
+    // unparsable value leaves the stored one untouched.
+    if let Some(last_updated) = parse_optional_time(input.last_updated) {
+        active.last_updated = Set(Some(last_updated));
     }
     if input.notes.is_some() {
         active.notes = Set(input.notes);

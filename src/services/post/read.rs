@@ -310,7 +310,8 @@ pub async fn get_posts_for_you(
 }
 
 /// Cached for `CACHE_TTL_SECONDS` under `posts:random:<limit>` when Redis is
-/// configured, like echobackend's `GetPostsRandom`.
+/// configured, like echobackend's `GetPostsRandom`. Bodies are full (the
+/// cached shape); callers truncate with `Post::truncate_bodies`.
 pub async fn get_random_posts(db: &DatabaseConnection, limit: i64) -> Result<Vec<Post>, DbErr> {
     static CACHE: LazyLock<ListCache<Vec<Post>>> = LazyLock::new(ListCache::default);
     let limit_key = limit.to_string();
@@ -323,7 +324,8 @@ pub async fn get_random_posts(db: &DatabaseConnection, limit: i64) -> Result<Vec
                 .limit(Ord::max(limit, 0) as u64)
                 .all(db)
                 .await?;
-            hydrate_posts(db, post_models, true).await
+            // Cached with full bodies like echobackend; the handler truncates.
+            hydrate_posts(db, post_models, false).await
         })
         .await
 }
@@ -338,7 +340,8 @@ struct TrendingPostsCacheEntry {
 }
 
 /// Cached for `CACHE_TTL_SECONDS` under `posts:trending:<limit>` when Redis is
-/// configured, like echobackend's `GetPostsTrending`.
+/// configured, like echobackend's `GetPostsTrending`. Bodies are full;
+/// callers truncate with `Post::truncate_bodies`.
 pub async fn get_trending_posts(db: &DatabaseConnection, limit: i64) -> Result<Vec<Post>, DbErr> {
     static CACHE: LazyLock<ListCache<TrendingPostsCacheEntry>> = LazyLock::new(ListCache::default);
     let limit_key = limit.to_string();
@@ -369,7 +372,7 @@ pub async fn get_trending_posts(db: &DatabaseConnection, limit: i64) -> Result<V
         .await?;
 
     Ok(TrendingPostsCacheEntry {
-        posts: hydrate_posts(db, post_models, true).await?,
+        posts: hydrate_posts(db, post_models, false).await?,
     })
         })
         .await?;

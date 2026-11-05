@@ -3,7 +3,7 @@ use crate::config::FrontendConfig;
 use crate::dto::auth::{GithubCallbackQuery, OAuthExchangeRequest};
 use crate::http::client_ip::RequestClient;
 use crate::http::error::AppError;
-use crate::http::extract::VJson;
+use crate::http::extract::VBind;
 use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
 use crate::services::{self, auth::AuthError};
@@ -204,7 +204,7 @@ pub async fn github_oauth_callback(
 
 /// `POST /api/auth/oauth/exchange` — mirrors echobackend's `ExchangeOAuthCode`.
 pub async fn exchange_oauth_code(
-    VJson(req): VJson<OAuthExchangeRequest>,
+    VBind(req): VBind<OAuthExchangeRequest>,
 ) -> Result<Json<ApiResponse<services::auth::AuthTokenResponse>>, AppError> {
     let response = services::auth::exchange_oauth_code(&req.code)
         .await

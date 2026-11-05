@@ -10,7 +10,7 @@ use crate::dto::validation::parse_pagination;
 use crate::http::auth::AuthUser;
 use crate::http::client_ip::RequestClient;
 use crate::http::error::AppError;
-use crate::http::extract::{VJson, VQuery};
+use crate::http::extract::{VBind, VQuery};
 use crate::http::rate_limit::{RateLimiter, rate_limit};
 use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
@@ -46,7 +46,7 @@ pub(super) fn internal_auth_error(message: &'static str, err: AuthError) -> AppE
 pub async fn register(
     State(pool): State<DbPool>,
     RequestClient(client): RequestClient,
-    VJson(req): VJson<RegisterRequest>,
+    VBind(req): VBind<RegisterRequest>,
 ) -> Result<
     (
         StatusCode,
@@ -83,7 +83,7 @@ pub async fn register(
 pub async fn login(
     State(pool): State<DbPool>,
     RequestClient(client): RequestClient,
-    VJson(req): VJson<LoginRequest>,
+    VBind(req): VBind<LoginRequest>,
 ) -> Result<Json<ApiResponse<services::auth::AuthTokenResponse>>, AppError> {
     let response = services::auth::login(&pool, &req.identifier, &req.password, client)
         .await
@@ -104,7 +104,7 @@ pub async fn forgot_password(
     State(pool): State<DbPool>,
     State(mailer): State<Arc<dyn Mailer>>,
     RequestClient(client): RequestClient,
-    VJson(req): VJson<ForgotPasswordRequest>,
+    VBind(req): VBind<ForgotPasswordRequest>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let _ = services::auth::forgot_password(&pool, mailer.as_ref(), &req.email, client).await;
     Ok(Json(ApiResponse::message(
@@ -115,7 +115,7 @@ pub async fn forgot_password(
 pub async fn reset_password(
     State(pool): State<DbPool>,
     RequestClient(client): RequestClient,
-    VJson(req): VJson<ResetPasswordRequest>,
+    VBind(req): VBind<ResetPasswordRequest>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     services::auth::reset_password(&pool, &req.token, &req.password, client)
         .await
@@ -141,7 +141,7 @@ pub async fn reset_password(
 pub async fn refresh_token(
     State(pool): State<DbPool>,
     RequestClient(client): RequestClient,
-    VJson(req): VJson<RefreshTokenRequest>,
+    VBind(req): VBind<RefreshTokenRequest>,
 ) -> Result<Json<ApiResponse<services::auth::AuthTokenResponse>>, AppError> {
     let response = services::auth::refresh_token(&pool, &req.refresh_token, client)
         .await
@@ -165,7 +165,7 @@ pub async fn logout(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     RequestClient(client): RequestClient,
-    VJson(req): VJson<LogoutRequest>,
+    VBind(req): VBind<LogoutRequest>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let _ = services::auth::logout(&pool, auth_user.id, &req.refresh_token, client).await;
     Ok(Json(ApiResponse::message("Logout successful")))
@@ -175,7 +175,7 @@ pub async fn change_password(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     RequestClient(client): RequestClient,
-    VJson(req): VJson<ChangePasswordRequest>,
+    VBind(req): VBind<ChangePasswordRequest>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     services::auth::change_password(
         &pool,
@@ -280,7 +280,7 @@ pub async fn failed_logins(
 /// `POST /api/auth/check-username` — mirrors echobackend's `AuthHandler.CheckUsername`.
 pub async fn check_username(
     State(pool): State<DbPool>,
-    VJson(req): VJson<CheckUsernameRequest>,
+    VBind(req): VBind<CheckUsernameRequest>,
 ) -> Result<Json<ApiResponse<CheckUsernameResponse>>, AppError> {
     let exists = services::auth::check_username_exists(&pool, &req.username)
         .await
@@ -296,7 +296,7 @@ pub async fn check_username(
 pub async fn update_profile(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VJson(req): VJson<UpdateProfileRequest>,
+    VBind(req): VBind<UpdateProfileRequest>,
 ) -> Result<Json<ApiResponse<services::auth::ProfileResponse>>, AppError> {
     let profile = services::auth::update_profile(
         &pool,

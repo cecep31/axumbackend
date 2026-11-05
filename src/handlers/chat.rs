@@ -1,13 +1,12 @@
 use crate::clients::openrouter;
 use crate::dto::chat::{
-    ConversationMessagesPath, ConversationPath, CreateChatConversationRequest,
-    CreateChatConversationStreamRequest, CreateChatMessageRequest, MessagePath,
+    CreateChatConversationRequest, CreateChatConversationStreamRequest, CreateChatMessageRequest,
     UpdateChatConversationRequest,
 };
 use crate::dto::common::PaginationQuery;
 use crate::http::auth::AuthUser;
 use crate::http::error::AppError;
-use crate::http::extract::{VJson, VPath, VQuery};
+use crate::http::extract::{VBind, VQuery, bind_message, canonical_uuid_param};
 use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
 use crate::models::chat::{
@@ -18,8 +17,8 @@ use crate::services::{self, chat::ChatError};
 use crate::state::AppState;
 use axum::{
     Json, Router,
-    extract::State,
-    http::StatusCode,
+    extract::{FromRequestParts, State},
+    http::{StatusCode, request::Parts},
     response::{
         IntoResponse, Response,
         sse::{Event, Sse},
@@ -48,11 +47,50 @@ fn chat_err(message: &'static str) -> impl FnOnce(ChatError) -> AppError {
     }
 }
 
+/// echobackend `MsgInvalidConversationID`: the `{id}` / `{conversationId}`
+/// segment must be a canonical UUID, checked before the body and any DB access.
+pub struct ConversationIdParam(pub uuid::Uuid);
+
+impl<S: Send + Sync> FromRequestParts<S> for ConversationIdParam {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let mut id = canonical_uuid_param(parts, state, "id").await;
+        if id.is_none() {
+            id = canonical_uuid_param(parts, state, "conversationId").await;
+        }
+        id.map(ConversationIdParam)
+            .ok_or_else(|| AppError::bad_request("Invalid conversation ID", None))
+    }
+}
+
+/// echobackend `MsgInvalidMessageID` for the `{messageId}` segment.
+pub struct MessageIdParam(pub uuid::Uuid);
+
+impl<S: Send + Sync> FromRequestParts<S> for MessageIdParam {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        canonical_uuid_param(parts, state, "messageId")
+            .await
+            .map(MessageIdParam)
+            .ok_or_else(|| AppError::bad_request("Invalid message ID", None))
+    }
+}
+
+/// echobackend `c.Bind` + `c.Validate` with the endpoint's own bind-failure
+/// message (400 only; 413/422 are left as they are).
+fn bind_body<T>(body: Result<VBind<T>, AppError>, message: &'static str) -> Result<T, AppError> {
+    body.map(|VBind(value)| value)
+        .map_err(bind_message(message))
+}
+
 pub async fn create_conversation(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VJson(req): VJson<CreateChatConversationRequest>,
+    body: Result<VBind<CreateChatConversationRequest>, AppError>,
 ) -> Result<(StatusCode, Json<ApiResponse<ChatConversationResponse>>), AppError> {
+    let req = bind_body(body, "Failed to create conversation")?;
     let conversation = services::chat::create_conversation(&pool, auth_user.id, req)
         .await
         .map_err(chat_err("Failed to create conversation"))?;
@@ -72,8 +110,9 @@ pub async fn create_conversation(
 pub async fn create_conversation_stream(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VJson(req): VJson<CreateChatConversationStreamRequest>,
+    body: Result<VBind<CreateChatConversationStreamRequest>, AppError>,
 ) -> Result<Response, AppError> {
+    let req = bind_body(body, "Failed to create conversation stream")?;
     match services::chat::create_conversation_stream(&pool, auth_user.id, req)
         .await
         .map_err(chat_err("Failed to create conversation stream"))?
@@ -121,9 +160,9 @@ pub async fn get_conversations(
 pub async fn get_conversation(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VPath(params): VPath<ConversationPath>,
+    ConversationIdParam(id): ConversationIdParam,
 ) -> Result<Json<ApiResponse<ChatConversationResponse>>, AppError> {
-    let conversation = services::chat::get_conversation_by_id(&pool, params.id, auth_user.id)
+    let conversation = services::chat::get_conversation_by_id(&pool, id, auth_user.id)
         .await
         .map_err(chat_err("Failed to get conversation"))?;
     Ok(Json(ApiResponse::success_with_message(
@@ -135,10 +174,11 @@ pub async fn get_conversation(
 pub async fn update_conversation(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VPath(params): VPath<ConversationPath>,
-    VJson(req): VJson<UpdateChatConversationRequest>,
+    ConversationIdParam(id): ConversationIdParam,
+    body: Result<VBind<UpdateChatConversationRequest>, AppError>,
 ) -> Result<Json<ApiResponse<ChatConversationResponse>>, AppError> {
-    let conversation = services::chat::update_conversation(&pool, params.id, auth_user.id, req)
+    let req = bind_body(body, "Failed to update conversation")?;
+    let conversation = services::chat::update_conversation(&pool, id, auth_user.id, req)
         .await
         .map_err(chat_err("Failed to update conversation"))?;
     Ok(Json(ApiResponse::success_with_message(
@@ -150,9 +190,9 @@ pub async fn update_conversation(
 pub async fn delete_conversation(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VPath(params): VPath<ConversationPath>,
+    ConversationIdParam(id): ConversationIdParam,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    services::chat::delete_conversation(&pool, params.id, auth_user.id)
+    services::chat::delete_conversation(&pool, id, auth_user.id)
         .await
         .map_err(chat_err("Failed to delete conversation"))?;
     Ok(Json(ApiResponse::message(
@@ -163,10 +203,11 @@ pub async fn delete_conversation(
 pub async fn create_message(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VPath(params): VPath<ConversationMessagesPath>,
-    VJson(req): VJson<CreateChatMessageRequest>,
+    ConversationIdParam(conversation_id): ConversationIdParam,
+    body: Result<VBind<CreateChatMessageRequest>, AppError>,
 ) -> Result<(StatusCode, Json<ApiResponse<Vec<ChatMessageResponse>>>), AppError> {
-    let messages = services::chat::create_message(&pool, auth_user.id, params.conversation_id, req)
+    let req = bind_body(body, "Failed to create message")?;
+    let messages = services::chat::create_message(&pool, auth_user.id, conversation_id, req)
         .await
         .map_err(chat_err("Failed to create message"))?;
     Ok((
@@ -185,17 +226,13 @@ pub async fn create_message(
 pub async fn create_message_stream(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VPath(params): VPath<ConversationMessagesPath>,
-    VJson(req): VJson<CreateChatMessageRequest>,
+    ConversationIdParam(conversation_id): ConversationIdParam,
+    body: Result<VBind<CreateChatMessageRequest>, AppError>,
 ) -> Result<Response, AppError> {
-    match services::chat::prepare_streaming_message(
-        &pool,
-        auth_user.id,
-        params.conversation_id,
-        req,
-    )
-    .await
-    .map_err(chat_err("Failed to create message stream"))?
+    let req = bind_body(body, "Failed to create message stream")?;
+    match services::chat::prepare_streaming_message(&pool, auth_user.id, conversation_id, req)
+        .await
+        .map_err(chat_err("Failed to create message stream"))?
     {
         StreamOutcome::Fallback(user_message) => Ok((
             StatusCode::CREATED,
@@ -215,9 +252,9 @@ pub async fn create_message_stream(
 pub async fn get_messages(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VPath(params): VPath<ConversationMessagesPath>,
+    ConversationIdParam(conversation_id): ConversationIdParam,
 ) -> Result<Json<ApiResponse<Vec<ChatMessageResponse>>>, AppError> {
-    let messages = services::chat::get_messages(&pool, params.conversation_id, auth_user.id)
+    let messages = services::chat::get_messages(&pool, conversation_id, auth_user.id)
         .await
         .map_err(chat_err("Failed to get messages"))?;
     Ok(Json(ApiResponse::success_with_message(
@@ -229,9 +266,9 @@ pub async fn get_messages(
 pub async fn get_message(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VPath(params): VPath<MessagePath>,
+    MessageIdParam(message_id): MessageIdParam,
 ) -> Result<Json<ApiResponse<ChatMessageResponse>>, AppError> {
-    let message = services::chat::get_message(&pool, params.message_id, auth_user.id)
+    let message = services::chat::get_message(&pool, message_id, auth_user.id)
         .await
         .map_err(chat_err("Failed to get message"))?;
     Ok(Json(ApiResponse::success_with_message(
@@ -243,9 +280,9 @@ pub async fn get_message(
 pub async fn delete_message(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VPath(params): VPath<MessagePath>,
+    MessageIdParam(message_id): MessageIdParam,
 ) -> Result<Json<ApiResponse<ChatMessageResponse>>, AppError> {
-    let message = services::chat::delete_message(&pool, params.message_id, auth_user.id)
+    let message = services::chat::delete_message(&pool, message_id, auth_user.id)
         .await
         .map_err(chat_err("Failed to delete message"))?;
     Ok(Json(ApiResponse::success_with_message(

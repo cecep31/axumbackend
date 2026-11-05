@@ -86,6 +86,24 @@ impl AppError {
         Self::detailed(StatusCode::CONFLICT, message, Some(error.into()))
     }
 
+    /// echobackend `response.PayloadTooLarge`: the global body limit's 413
+    /// `{message: "Request Entity Too Large", error: "Request body too
+    /// large"}`. Route-specific upload caps use `PayloadTooLarge(msg)`.
+    pub fn payload_too_large() -> Self {
+        Self::detailed(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Request Entity Too Large",
+            Some("Request body too large".to_string()),
+        )
+    }
+
+    /// echobackend `response.HTTPStatus(c, code, "")` for a plain 4xx status
+    /// (e.g. 408): `message` and `error` are both the status text.
+    pub fn status_text(status: StatusCode) -> Self {
+        let text = status.canonical_reason().unwrap_or("Error").to_string();
+        Self::detailed(status, text.clone(), Some(text))
+    }
+
     /// `500` with `message` and no `error` key (echobackend
     /// `response.InternalServerError`). The cause is logged, never sent.
     pub fn internal(message: impl Into<String>, cause: impl std::fmt::Display) -> Self {
@@ -368,6 +386,23 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["message"], "Failed to get post views");
         assert_eq!(body["error"], "Access forbidden");
+    }
+
+    #[tokio::test]
+    async fn global_payload_too_large_and_status_text_envelopes() {
+        let (status, body) = body_of(AppError::payload_too_large()).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            body,
+            serde_json::json!({"success": false, "message": "Request Entity Too Large", "error": "Request body too large"})
+        );
+
+        let (status, body) = body_of(AppError::status_text(StatusCode::REQUEST_TIMEOUT)).await;
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(
+            body,
+            serde_json::json!({"success": false, "message": "Request Timeout", "error": "Request Timeout"})
+        );
     }
 
     #[test]

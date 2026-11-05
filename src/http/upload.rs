@@ -177,6 +177,105 @@ pub async fn upload_image(
     store_image(image, spec).await
 }
 
+/// echobackend `PostHandler.UploadImagePosts` message for every failure.
+const POST_IMAGE_MESSAGE: &str = "Failed to upload image";
+
+fn post_image_bad_request(detail: impl Into<String>) -> AppError {
+    AppError::bad_request(POST_IMAGE_MESSAGE, Some(detail.into()))
+}
+
+/// A broken multipart stream: echobackend's route `BodyLimit(1MB)` answers
+/// an over-limit body with the global 413, anything else is `c.FormFile`'s
+/// 400.
+fn post_image_stream_error(err: axum::extract::multipart::MultipartError) -> AppError {
+    if err.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+        AppError::payload_too_large()
+    } else {
+        post_image_bad_request(err.body_text())
+    }
+}
+
+/// Go `http.Request.FormFile` error for a request axum's `Multipart`
+/// rejected (not `multipart/form-data`, or no boundary).
+fn not_multipart_detail(headers: &axum::http::HeaderMap) -> &'static str {
+    let mime = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(|value| value.trim().to_ascii_lowercase());
+    if mime.as_deref() == Some("multipart/form-data") {
+        "no multipart boundary param in Content-Type"
+    } else {
+        "request Content-Type isn't multipart/form-data"
+    }
+}
+
+/// The post image upload, with echobackend's `UploadImagePosts` envelopes
+/// (fiber's is identical); the avatar flow keeps [`upload_image`]:
+/// - body over `spec.max_file_bytes` by `Content-Length` (the route
+///   `BodyLimit`) or while streaming: 413 [`AppError::payload_too_large`];
+/// - not multipart, a broken stream, or no `spec.field` file part: 400
+///   "Failed to upload image" with `c.FormFile`'s error ("http: no such
+///   file", ..);
+/// - then, in echobackend's service order: file over the cap "file size must
+///   not exceed 1 MB", no storage "storage is unavailable", not
+///   JPEG/PNG/GIF/WebP "file must be a JPEG, PNG, GIF, or WebP image" (all
+///   400 "Failed to upload image");
+/// - storage save failure: 500 "Failed to upload image".
+pub async fn upload_post_image(
+    headers: &axum::http::HeaderMap,
+    multipart: Result<Multipart, axum::extract::multipart::MultipartRejection>,
+    spec: &ImageUploadSpec,
+) -> Result<String, AppError> {
+    if content_length_exceeds(headers, spec.max_file_bytes) {
+        return Err(AppError::payload_too_large());
+    }
+    let mut multipart =
+        multipart.map_err(|_| post_image_bad_request(not_multipart_detail(headers)))?;
+    let data = read_post_image_field(&mut multipart, spec).await?;
+    if data.len() as u64 > spec.max_file_bytes {
+        return Err(post_image_bad_request("file size must not exceed 1 MB"));
+    }
+    let Some(storage) = crate::infra::storage::get() else {
+        return Err(post_image_bad_request("storage is unavailable"));
+    };
+    let Some((content_type, ext)) = detect_allowed_image(&data) else {
+        return Err(post_image_bad_request(
+            "file must be a JPEG, PNG, GIF, or WebP image",
+        ));
+    };
+
+    let key = crate::infra::storage::random_object_key(spec.key_prefix, ext);
+    storage
+        .save(&key, data.to_vec(), content_type)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, key = %key, "{}: upload failed", spec.log_name);
+            AppError::InternalServerError(POST_IMAGE_MESSAGE.to_string())
+        })?;
+    Ok(key)
+}
+
+/// Go `FormFile(spec.field)`: the first part with that name that carries a
+/// file name (a plain form value does not count). "http: no such file" when
+/// there is none.
+async fn read_post_image_field(
+    multipart: &mut Multipart,
+    spec: &ImageUploadSpec,
+) -> Result<axum::body::Bytes, AppError> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(post_image_stream_error)?
+    {
+        if field.name() != Some(spec.field) || field.file_name().is_none() {
+            continue;
+        }
+        return field.bytes().await.map_err(post_image_stream_error);
+    }
+    Err(post_image_bad_request("http: no such file"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +432,84 @@ mod tests {
         assert!(matches!(err, AppError::PayloadTooLarge(_)));
 
         assert!(reject_oversized_body(&headers_with_length("1000"), 1024 * 1024, "Image").is_ok());
+    }
+
+    fn detail(err: AppError) -> (axum::http::StatusCode, String, Option<String>) {
+        match err {
+            AppError::Detailed {
+                status,
+                message,
+                error,
+            } => (status, message, error),
+            other => panic!("expected Detailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_image_errors_match_echobackend() {
+        let headers = axum::http::HeaderMap::new();
+        let multipart = multipart_with(&[("avatar", PNG)]).await;
+        let err = upload_post_image(&headers, Ok(multipart), &SPEC)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            detail(err),
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "Failed to upload image".into(),
+                Some("http: no such file".into())
+            )
+        );
+
+        let err = upload_post_image(
+            &headers_with_length("1048577"),
+            Ok(multipart_with(&[]).await),
+            &SPEC,
+        )
+        .await
+        .unwrap_err();
+        let (status, message, error) = detail(err);
+        assert_eq!(status, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(message, "Request Entity Too Large");
+        assert_eq!(error.as_deref(), Some("Request body too large"));
+
+        let big = vec![0xffu8; (SPEC.max_file_bytes + 1) as usize];
+        let err = upload_post_image(
+            &headers,
+            Ok(multipart_with(&[("image", &big)]).await),
+            &SPEC,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            detail(err).2.as_deref(),
+            Some("file size must not exceed 1 MB")
+        );
+    }
+
+    #[tokio::test]
+    async fn post_image_rejects_non_multipart_with_go_text() {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from("{}"))
+            .unwrap();
+        let headers = request.headers().clone();
+        let rejection = Multipart::from_request(request, &()).await.map(|_| ());
+        let multipart = match rejection {
+            Ok(()) => panic!("json is not multipart"),
+            Err(rejection) => Err(rejection),
+        };
+        let err = upload_post_image(&headers, multipart, &SPEC)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            detail(err),
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "Failed to upload image".into(),
+                Some("request Content-Type isn't multipart/form-data".into())
+            )
+        );
     }
 }

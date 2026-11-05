@@ -1,13 +1,16 @@
 //! Cross-cutting HTTP layers shared by every route.
 
 use crate::config::HttpConfig;
+use crate::http::auth::AuthUser;
 use crate::http::error::AppError;
 use axum::{
-    extract::Request,
-    http::{HeaderName, HeaderValue, Method, StatusCode},
+    extract::{ConnectInfo, FromRequestParts, Request, State},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
 
 /// echobackend `middleware.SecureWithConfig` values.
@@ -19,17 +22,77 @@ const SECURITY_HEADERS: [(&str, &str); 5] = [
     ("referrer-policy", "strict-origin-when-cross-origin"),
 ];
 
-/// Sent only over HTTPS, like Echo's `Secure` middleware (`HSTSMaxAge: 3600`).
-const HSTS: (&str, &str) = ("strict-transport-security", "max-age=3600");
+/// Sent only over HTTPS, like Echo's `Secure` middleware (`HSTSMaxAge: 3600`,
+/// `HSTSExcludeSubdomains: false`).
+const HSTS: (&str, &str) = (
+    "strict-transport-security",
+    "max-age=3600; includeSubdomains",
+);
 
-/// Echo sends HSTS when the request is TLS or `X-Forwarded-Proto: https`.
-/// This server never terminates TLS itself, so only the header counts.
+/// Echo v5 `c.Scheme() == "https"` (fiberbackend `isHTTPS`): this server never
+/// terminates TLS, so it is HTTPS only when the direct peer is a trusted
+/// proxy (loopback, private or link-local) that forwarded an https scheme.
+/// Forwarding headers from any other peer are ignored.
 fn is_https(request: &Request) -> bool {
-    request.uri().scheme_str() == Some("https")
-        || request
-            .headers()
-            .get("x-forwarded-proto")
-            .is_some_and(|value| value.as_bytes() == b"https")
+    if request.uri().scheme_str() == Some("https") {
+        return true;
+    }
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip());
+    peer.is_some_and(is_trusted_scheme_peer) && forwarded_scheme(request.headers()) == "https"
+}
+
+/// Go's `ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()`
+/// (unlike `client_ip::is_trusted_hop`, CGNAT is not included).
+fn is_trusted_scheme_peer(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_trusted_scheme_peer(IpAddr::V4(v4));
+            }
+            ip.is_loopback()
+                || (ip.segments()[0] & 0xfe00) == 0xfc00
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Echo's `schemeFromHeaders` precedence: when `X-Forwarded-Proto` is present
+/// only its last value counts (added by the nearest proxy); otherwise
+/// `X-Forwarded-Protocol`, `X-Forwarded-Ssl: on` and `X-Url-Scheme`, in order.
+fn forwarded_scheme(headers: &HeaderMap) -> &'static str {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+    };
+    if let Some(last) = headers
+        .get_all("x-forwarded-proto")
+        .iter()
+        .next_back()
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+    {
+        let last = last.rsplit(',').next().unwrap_or_default().trim();
+        return canonical_proto(last).unwrap_or("http");
+    }
+    if let Some(scheme) = canonical_proto(header("x-forwarded-protocol")) {
+        return scheme;
+    }
+    if header("x-forwarded-ssl") == "on" {
+        return "https";
+    }
+    canonical_proto(header("x-url-scheme")).unwrap_or("http")
+}
+
+fn canonical_proto(proto: &str) -> Option<&'static str> {
+    ["http", "https", "ws", "wss"]
+        .into_iter()
+        .find(|p| p.eq_ignore_ascii_case(proto))
 }
 
 /// Adds the standard security headers to every response.
@@ -86,14 +149,71 @@ pub fn cors(http_config: &HttpConfig) -> CorsLayer {
         .allow_headers(AllowHeaders::mirror_request())
 }
 
-/// Router fallback for unknown routes: 404 envelope.
-pub async fn route_not_found() -> Response {
+/// Path prefixes whose echobackend group carries `Auth()`. Echo v5's
+/// `Group.Use` registers `RouteNotFound` for `<prefix>` and `<prefix>/*` with
+/// the group middleware, so an unknown path there is a 401 without a token.
+const AUTH_GROUP_PREFIXES: [&str; 6] = [
+    "/api/users",
+    "/api/bookmarks",
+    "/api/notifications",
+    "/api/holdings",
+    "/api/holding-types",
+    "/api/exchange-rates",
+];
+
+fn in_auth_group(path: &str) -> bool {
+    AUTH_GROUP_PREFIXES.iter().any(|prefix| {
+        path.strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
+}
+
+/// Router fallback for unknown routes: 404 envelope. Under an authenticated
+/// echobackend group the `AuthUser` check runs first (401 without a valid
+/// token).
+pub async fn route_not_found(request: Request) -> Response {
+    if in_auth_group(request.uri().path()) {
+        let (mut parts, _) = request.into_parts();
+        if let Err(rejection) = AuthUser::from_request_parts(&mut parts, &()).await {
+            return rejection;
+        }
+    }
     AppError::Detailed {
         status: StatusCode::NOT_FOUND,
         message: "Route not found".to_string(),
         error: Some("Resource not found".to_string()),
     }
     .into_response()
+}
+
+/// Handler-level request timeout (`HTTP_REQUEST_TIMEOUT_SECS`). echobackend
+/// has none (only 60 s server read/write timeouts), so an expired request is
+/// rendered like its `HTTPStatus(408)`: `{message: "Request Timeout", error:
+/// "Request Timeout"}`. A zero duration disables it.
+pub async fn request_timeout(
+    State(timeout): State<Duration>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if timeout.is_zero() {
+        return next.run(request).await;
+    }
+    match tokio::time::timeout(timeout, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => AppError::status_text(StatusCode::REQUEST_TIMEOUT).into_response(),
+    }
+}
+
+/// `CatchPanicLayer` handler, echobackend `RecoverWithLog`: logs the panic and
+/// answers 500 `{success: false, message: "Internal server error"}`.
+pub fn panic_response(panic: Box<dyn std::any::Any + Send + 'static>) -> Response {
+    let detail = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("unknown panic");
+    tracing::error!(error = %detail, "panic recovered");
+    AppError::InternalServerError("Internal server error".to_string()).into_response()
 }
 
 /// Router fallback for a known path with an unsupported method: 405 envelope.
@@ -218,7 +338,170 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(https.headers()["strict-transport-security"], "max-age=3600");
+        // Forwarded headers from an untrusted (or unknown) peer are ignored.
+        assert!(https.headers().get("strict-transport-security").is_none());
+
+        let from_peer = |peer: &str, headers: &[(&str, &str)]| {
+            let mut builder = axum::http::Request::builder().uri("/x");
+            for (name, value) in headers {
+                builder = builder.header(*name, *value);
+            }
+            let mut req = builder.body(Body::empty()).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            send(app(&["*"]), req)
+        };
+        let res = from_peer("10.0.0.2:5000", &[("x-forwarded-proto", "https")]).await;
+        assert_eq!(
+            res.headers()["strict-transport-security"],
+            "max-age=3600; includeSubdomains"
+        );
+        let res = from_peer("203.0.113.9:5000", &[("x-forwarded-proto", "https")]).await;
+        assert!(res.headers().get("strict-transport-security").is_none());
+        // Only the last X-Forwarded-Proto value counts.
+        let res = from_peer("127.0.0.1:5000", &[("x-forwarded-proto", "https, http")]).await;
+        assert!(res.headers().get("strict-transport-security").is_none());
+        let res = from_peer("127.0.0.1:5000", &[("x-forwarded-proto", "http, HTTPS")]).await;
+        assert!(res.headers().get("strict-transport-security").is_some());
+        let res = from_peer("127.0.0.1:5000", &[("x-forwarded-ssl", "on")]).await;
+        assert!(res.headers().get("strict-transport-security").is_some());
+        let res = from_peer("127.0.0.1:5000", &[("x-url-scheme", "https")]).await;
+        assert!(res.headers().get("strict-transport-security").is_some());
+    }
+
+    #[test]
+    fn forwarded_scheme_precedence() {
+        let headers = |pairs: &[(&'static str, &'static str)]| {
+            let mut map = HeaderMap::new();
+            for (name, value) in pairs {
+                map.append(*name, HeaderValue::from_static(value));
+            }
+            map
+        };
+        assert_eq!(forwarded_scheme(&headers(&[])), "http");
+        assert_eq!(
+            forwarded_scheme(&headers(&[
+                ("x-forwarded-proto", "https"),
+                ("x-forwarded-proto", "http")
+            ])),
+            "http"
+        );
+        assert_eq!(
+            forwarded_scheme(&headers(&[
+                ("x-forwarded-proto", "bogus"),
+                ("x-forwarded-ssl", "on")
+            ])),
+            "http"
+        );
+        assert_eq!(
+            forwarded_scheme(&headers(&[("x-forwarded-protocol", "https")])),
+            "https"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_path_under_auth_group_requires_auth() {
+        assert!(in_auth_group("/api/users"));
+        assert!(in_auth_group("/api/bookmarks/x/y"));
+        assert!(!in_auth_group("/api/usersx"));
+        assert!(!in_auth_group("/api/posts/x"));
+
+        let res = send(
+            app(&["*"]),
+            axum::http::Request::builder()
+                .uri("/api/bookmarks/nope/deeper")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["message"], "Missing authorization header");
+
+        let res = send(
+            app(&["*"]),
+            axum::http::Request::builder()
+                .uri("/api/unknown")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn request_timeout_uses_the_envelope() {
+        let app = Router::new()
+            .route(
+                "/slow",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    "late"
+                }),
+            )
+            .layer(middleware::from_fn_with_state(
+                Duration::from_millis(10),
+                request_timeout,
+            ));
+        let res = send(
+            app,
+            axum::http::Request::builder()
+                .uri("/slow")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"success": false, "message": "Request Timeout", "error": "Request Timeout"})
+        );
+    }
+
+    #[tokio::test]
+    async fn panics_become_a_500_envelope_with_cors_headers() {
+        let cfg = HttpConfig {
+            trust_proxy: false,
+            allow_origins: vec!["*".to_string()],
+            request_timeout: Duration::from_secs(30),
+        };
+        async fn boom() -> &'static str {
+            panic!("boom")
+        }
+        let app = Router::new()
+            .route("/boom", get(boom))
+            .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+                panic_response,
+            ))
+            .layer(middleware::from_fn(security_headers))
+            .layer(cors(&cfg));
+        let res = send(
+            app,
+            axum::http::Request::builder()
+                .uri("/boom")
+                .header("origin", "https://any.example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(res.headers()["access-control-allow-origin"], "*");
+        assert_eq!(res.headers()["x-frame-options"], "SAMEORIGIN");
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"success": false, "message": "Internal server error"})
+        );
     }
 
     #[tokio::test]

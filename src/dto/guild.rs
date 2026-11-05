@@ -1,3 +1,4 @@
+use crate::dto::validation::required;
 use garde::Validate;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -11,9 +12,14 @@ fn validate_uuid<T: AsRef<str>>(value: &T, _: &()) -> garde::Result {
         .map_err(|_| garde::Error::new("uuid"))
 }
 
-#[derive(Debug, Deserialize, Validate)]
+// Request bodies derive `Default` for `VBind` (an empty body binds to zero
+// values) and default missing fields, so echobackend's `required` is a 422 tag
+// `required` (missing or empty) rather than a body-parse 400.
+
+#[derive(Debug, Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct CreateGuildRequest {
-    #[garde(length(chars, min = 3, max = 100))]
+    #[garde(custom(required), length(chars, min = 3, max = 100))]
     pub name: String,
     #[garde(length(chars, min = 3, max = 100))]
     pub slug: Option<String>,
@@ -25,7 +31,7 @@ pub struct CreateGuildRequest {
     pub is_public: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Default, Deserialize, Validate)]
 pub struct UpdateGuildRequest {
     #[garde(length(chars, min = 3, max = 100))]
     pub name: Option<String>,
@@ -37,9 +43,10 @@ pub struct UpdateGuildRequest {
     pub is_public: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct CreateGuildChannelRequest {
-    #[garde(length(chars, min = 1, max = 100))]
+    #[garde(custom(required), length(chars, min = 1, max = 100))]
     pub name: String,
     #[garde(length(chars, max = 1024))]
     pub topic: Option<String>,
@@ -47,7 +54,7 @@ pub struct CreateGuildChannelRequest {
     pub position: Option<i32>,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Default, Deserialize, Validate)]
 pub struct UpdateGuildChannelRequest {
     #[garde(length(chars, min = 1, max = 100))]
     pub name: Option<String>,
@@ -57,17 +64,19 @@ pub struct UpdateGuildChannelRequest {
     pub position: Option<i32>,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct CreateGuildMessageRequest {
-    #[garde(length(chars, min = 1, max = 4000))]
+    #[garde(custom(required), length(chars, max = 4000))]
     pub content: String,
     #[garde(inner(custom(validate_uuid)))]
     pub reply_to_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct UpdateGuildMessageRequest {
-    #[garde(length(chars, min = 1, max = 4000))]
+    #[garde(custom(required), length(chars, max = 4000))]
     pub content: String,
 }
 
@@ -162,6 +171,28 @@ mod tests {
                 .validate()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_required_fields_report_required() {
+        use crate::dto::validation::failing_tags;
+        let required = |field: &str| vec![(field.to_string(), "required".to_string())];
+
+        let guild: CreateGuildRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(failing_tags(&guild), required("Name"));
+        let guild: CreateGuildRequest = serde_json::from_str(r#"{"name":""}"#).unwrap();
+        assert_eq!(failing_tags(&guild), required("Name"));
+        assert_eq!(
+            failing_tags(&guild_request("ab", None)),
+            vec![("Name".to_string(), "min".to_string())]
+        );
+
+        let channel: CreateGuildChannelRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(failing_tags(&channel), required("Name"));
+        let message: CreateGuildMessageRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(failing_tags(&message), required("Content"));
+        let edit: UpdateGuildMessageRequest = serde_json::from_str(r#"{"content":""}"#).unwrap();
+        assert_eq!(failing_tags(&edit), required("Content"));
     }
 
     #[test]

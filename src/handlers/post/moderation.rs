@@ -3,7 +3,7 @@ use crate::dto::post_report::{
 };
 use crate::http::auth::{AdminUser, AuthUser};
 use crate::http::error::AppError;
-use crate::http::extract::{VJsonOrDefault, VPath, VQuery};
+use crate::http::extract::{VJsonOrDefault, VPath, VQuery, bind_message};
 use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
 use crate::models::post_report::{
@@ -42,16 +42,19 @@ fn report_err(op: &'static str) -> impl Fn(PostReportError) -> AppError {
 
 /// echobackend `validator.IsValidUUID(c.Param("id"))` in the service.
 fn parse_post_id(raw: &str, op: &'static str) -> Result<Uuid, AppError> {
-    Uuid::parse_str(raw).map_err(|_| report_err(op)(PostReportError::InvalidPostId))
+    // echobackend `validator.IsValidUUID`: lowercase hyphenated form only.
+    crate::dto::validation::parse_canonical_uuid(raw)
+        .ok_or_else(|| report_err(op)(PostReportError::InvalidPostId))
 }
 
 pub async fn report_post(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(params): VPath<ReportPostPath>,
-    VJsonOrDefault(req): VJsonOrDefault<CreatePostReportRequest>,
+    body: Result<VJsonOrDefault<CreatePostReportRequest>, AppError>,
 ) -> Result<(axum::http::StatusCode, Json<ApiResponse<()>>), AppError> {
     const OP: &str = "Failed to report post";
+    let VJsonOrDefault(req) = body.map_err(bind_message("Invalid request payload"))?;
     let post_id = parse_post_id(&params.id, OP)?;
     services::post_report::report_post(&pool, post_id, auth_user.id, &req.reason, req.details)
         .await
@@ -110,9 +113,10 @@ pub async fn moderate_post(
     State(pool): State<DbPool>,
     admin: AdminUser,
     VPath(params): VPath<ReportPostPath>,
-    VJsonOrDefault(req): VJsonOrDefault<ModeratePostRequest>,
+    body: Result<VJsonOrDefault<ModeratePostRequest>, AppError>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     const OP: &str = "Failed to moderate post";
+    let VJsonOrDefault(req) = body.map_err(bind_message("Invalid request payload"))?;
     let post_id = parse_post_id(&params.id, OP)?;
     services::post_report::moderate_post(&pool, post_id, admin.0.id, &req.action, req.note)
         .await

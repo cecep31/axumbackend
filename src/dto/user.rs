@@ -1,14 +1,17 @@
+use crate::dto::validation::required;
 use garde::Validate;
 use serde::Deserialize;
 use uuid::Uuid;
 
-#[derive(Deserialize, Validate)]
+/// `/api/users/{id}` path, raw so the handler-side extractor can answer a
+/// non-canonical id with echobackend's "Invalid user ID" (see
+/// `dto::validation::is_canonical_uuid`).
+#[derive(Deserialize)]
 pub struct UserIdPath {
-    #[garde(skip)]
-    pub id: Uuid,
+    pub id: String,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Deserialize, Validate, Default)]
 pub struct FollowRequest {
     /// Raw so a missing / malformed id is a 422 (`required` / `uuid`) like
     /// echobackend's `validate:"required,uuid"`, not a body-parse 400.
@@ -79,13 +82,15 @@ pub struct UserDetailQuery {
     pub deleted: Option<String>,
 }
 
-#[derive(Deserialize, Validate)]
+/// Bound with `VBind`; see `dto::auth` for the `required` pattern.
+#[derive(Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct CreateUserRequest {
-    #[garde(length(chars, min = 3, max = 30))]
+    #[garde(custom(required), length(chars, min = 3, max = 30))]
     pub username: String,
-    #[garde(email, length(chars, max = 255))]
+    #[garde(custom(required), email, length(chars, max = 255))]
     pub email: String,
-    #[garde(length(chars, min = 8, max = 128))]
+    #[garde(custom(required), length(chars, min = 8, max = 128))]
     pub password: String,
     #[garde(length(chars, max = 100))]
     pub first_name: Option<String>,
@@ -93,11 +98,12 @@ pub struct CreateUserRequest {
     pub last_name: Option<String>,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct UpdateUserRequest {
-    #[garde(length(chars, min = 3, max = 30))]
+    #[garde(custom(required), length(chars, min = 3, max = 30))]
     pub username: String,
-    #[garde(email, length(chars, max = 255))]
+    #[garde(custom(required), email, length(chars, max = 255))]
     pub email: String,
     #[garde(length(chars, max = 100))]
     pub first_name: Option<String>,
@@ -180,6 +186,27 @@ mod tests {
             last_name: None,
         };
         assert!(short_pwd.validate().is_err());
+    }
+
+    #[test]
+    fn test_user_requests_require_fields_first() {
+        let tags = |result: Result<(), crate::http::error::AppError>| match result {
+            Err(crate::http::error::AppError::UnprocessableEntity { errors, .. }) => errors
+                .into_iter()
+                .map(|e| format!("{}:{}", e.field, e.tag.unwrap_or_default()))
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        let create: CreateUserRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            tags(crate::http::extract::validate_input(&create, || None)),
+            vec!["Username:required", "Email:required", "Password:required"]
+        );
+        let update: UpdateUserRequest = serde_json::from_str(r#"{"email":"x"}"#).unwrap();
+        assert_eq!(
+            tags(crate::http::extract::validate_input(&update, || None)),
+            vec!["Username:required", "Email:email"]
+        );
     }
 
     #[test]

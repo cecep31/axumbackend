@@ -3,21 +3,62 @@ mod engagement;
 mod moderation;
 mod stats;
 
+use crate::dto::validation::parse_canonical_uuid;
 use crate::http::auth::require_auth;
+use crate::http::error::AppError;
+use crate::http::extract::raw_path_param;
 use crate::http::rate_limit::{self, RateLimiter};
 use crate::state::AppState;
 use axum::{
     Router,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, FromRequestParts},
+    http::request::Parts,
     middleware,
     routing::{get, post},
 };
 use std::time::Duration;
+use uuid::Uuid;
 
-/// Maximum post image file size. The route body limit adds multipart framing
-/// slack on top (see `crate::http::upload::max_body_bytes`) so files exactly at
-/// the cap still stream fully and are judged by the handler, not cut off
-/// mid-stream by the limiter.
+/// The `{id}` post id, checked like echobackend's
+/// `if !validator.IsValidUUID(c.Param("id"))`: anything but a lowercase
+/// hyphenated UUID is 400 `{message: "Invalid post ID"}` (no `error`).
+/// Declare it after the auth extractor and before any body extractor, like
+/// echobackend (auth middleware first, the id checked before `c.Bind`).
+pub(crate) struct PostIdParam(pub Uuid);
+
+impl<S: Send + Sync> FromRequestParts<S> for PostIdParam {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        raw_path_param(parts, state, "id")
+            .await
+            .as_deref()
+            .and_then(parse_canonical_uuid)
+            .map(PostIdParam)
+            .ok_or_else(|| AppError::bad_request("Invalid post ID", None))
+    }
+}
+
+/// The `{id}` of the like routes: echobackend's `postLikeService` rejects a
+/// non-canonical id with `ErrInvalidPostID`, answered as 400 `{message:
+/// "invalid post ID format"}` (no `error`).
+pub(crate) struct LikePostIdParam(pub Uuid);
+
+impl<S: Send + Sync> FromRequestParts<S> for LikePostIdParam {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        raw_path_param(parts, state, "id")
+            .await
+            .as_deref()
+            .and_then(parse_canonical_uuid)
+            .map(LikePostIdParam)
+            .ok_or_else(|| AppError::bad_request("invalid post ID format", None))
+    }
+}
+
+/// Maximum post image request body (echobackend `BodyLimit(1MB)`), which also
+/// caps the file itself.
 const MAX_POST_IMAGE_SIZE: u64 = 1024 * 1024;
 /// Object key prefix for post images; matches echobackend.
 const POST_IMAGE_PREFIX: &str = "posts/images";
@@ -74,9 +115,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/posts/feed/for-you", get(crud::get_posts_for_you))
         .route(
             "/api/posts/image",
-            post(crud::upload_image_posts).route_layer(DefaultBodyLimit::max(
-                crate::http::upload::max_body_bytes(MAX_POST_IMAGE_SIZE),
-            )),
+            // echobackend `middleware.BodyLimit(1MB)` on the whole body.
+            post(crud::upload_image_posts)
+                .route_layer(DefaultBodyLimit::max(MAX_POST_IMAGE_SIZE as usize)),
         )
         .route("/api/posts/sitemap", get(crud::get_posts_for_sitemap))
         .route(
@@ -125,4 +166,72 @@ pub fn routes() -> Router<AppState> {
                 .put(crud::update_post)
                 .delete(crud::delete_post),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    async fn get(router: Router, uri: &str) -> (StatusCode, String) {
+        let response = tower::ServiceExt::oneshot(
+            router,
+            axum::http::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn post_id_params_use_echobackend_messages() {
+        let router = || {
+            Router::new()
+                .route(
+                    "/p/{id}",
+                    axum::routing::get(
+                        |PostIdParam(id): PostIdParam| async move { id.to_string() },
+                    ),
+                )
+                .route(
+                    "/l/{id}",
+                    axum::routing::get(|LikePostIdParam(id): LikePostIdParam| async move {
+                        id.to_string()
+                    }),
+                )
+        };
+        let id = "0190a8f2-1c3e-7b4a-9d6e-2f1a3b4c5d6e";
+        assert_eq!(
+            get(router(), &format!("/p/{id}")).await,
+            (StatusCode::OK, id.into())
+        );
+        assert_eq!(
+            get(router(), &format!("/l/{id}")).await,
+            (StatusCode::OK, id.into())
+        );
+
+        let upper = id.to_uppercase();
+        let simple = id.replace('-', "");
+        for bad in ["not-a-uuid", upper.as_str(), simple.as_str()] {
+            let (status, body) = get(router(), &format!("/p/{bad}")).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({"success": false, "message": "Invalid post ID"})
+            );
+            let (status, body) = get(router(), &format!("/l/{bad}")).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({"success": false, "message": "invalid post ID format"})
+            );
+        }
+    }
 }

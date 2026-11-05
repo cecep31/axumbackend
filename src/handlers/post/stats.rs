@@ -43,12 +43,10 @@ pub async fn get_my_posts_likes_by_month(
     auth_user: AuthUser,
     VQuery(query): VQuery<MyPostsLikesByMonthQuery>,
 ) -> Result<Json<ApiResponse<crate::models::post_view::MyPostsLikesByMonthResponse>>, AppError> {
-    let data = services::post_view::get_my_posts_likes_by_month(
-        &pool,
-        auth_user.id,
-        query.months.unwrap_or(12),
-    )
-    .await?;
+    let data =
+        services::post_view::get_my_posts_likes_by_month(&pool, auth_user.id, query.months())
+            .await
+            .map_err(|e| AppError::from(e).context("Failed to get likes by month"))?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Successfully retrieved likes by month",
@@ -63,7 +61,8 @@ pub async fn get_post_stats(
 ) -> Result<Json<ApiResponse<PostStatsResponse>>, AppError> {
     let stats =
         services::stats::post_stats(&pool, query.date_range(), query.limit(), query.tag_id())
-            .await?;
+            .await
+            .map_err(|e| AppError::from(e).context("Failed to fetch post stats"))?;
     Ok(Json(ApiResponse::success_with_message(
         "Post stats fetched successfully",
         stats,
@@ -75,7 +74,9 @@ pub async fn get_post_engagement(
     _admin: AdminUser,
     VQuery(query): VQuery<StatsQuery>,
 ) -> Result<Json<ApiResponse<EngagementMetricsResponse>>, AppError> {
-    let metrics = services::stats::engagement(&pool, query.date_range()).await?;
+    let metrics = services::stats::engagement(&pool, query.date_range())
+        .await
+        .map_err(|e| AppError::from(e).context("Failed to fetch engagement metrics"))?;
     Ok(Json(ApiResponse::success_with_message(
         "Engagement metrics fetched successfully",
         metrics,

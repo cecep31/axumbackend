@@ -2,9 +2,10 @@ use crate::dto::bookmark::{
     BookmarkPath, BookmarkQuery, CreateBookmarkFolderRequest, FolderIdPath, MoveBookmarkRequest,
     ToggleBookmarkRequest, UpdateBookmarkFolderRequest, UpdateBookmarkRequest,
 };
+use crate::dto::validation::parse_canonical_uuid;
 use crate::http::auth::AuthUser;
 use crate::http::error::AppError;
-use crate::http::extract::{VJson, VJsonOrDefault, VPath, VQuery};
+use crate::http::extract::{VBind, VJsonOrDefault, VPath, VQuery, bind_message};
 use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
 use crate::models::bookmark::{BookmarkFolderResponse, BookmarkResponse, ToggleBookmarkResponse};
@@ -49,18 +50,19 @@ fn bookmark_err(message: &'static str) -> impl FnOnce(BookmarkError) -> AppError
 
 /// echobackend `validateBookmarkPostAndUser`: 400 with `ErrInvalidPostID`'s
 /// text as message and no detail.
+/// Only the lowercase hyphenated form passes, like `validator.IsValidUUID`.
 fn parse_post_id(raw: &str) -> Result<Uuid, AppError> {
-    Uuid::parse_str(raw).map_err(|_| AppError::bad_request("invalid post ID format", None))
+    parse_canonical_uuid(raw).ok_or_else(|| AppError::bad_request("invalid post ID format", None))
 }
 
 /// echobackend `validateBookmarkAndUser`: a malformed id is "not found".
 fn parse_bookmark_id(raw: &str) -> Result<Uuid, AppError> {
-    Uuid::parse_str(raw).map_err(|_| BookmarkError::BookmarkNotFound.into())
+    parse_canonical_uuid(raw).ok_or_else(|| BookmarkError::BookmarkNotFound.into())
 }
 
 /// echobackend `validateFolderAndUser`: a malformed id is "not found".
 fn parse_folder_id(raw: &str) -> Result<Uuid, AppError> {
-    Uuid::parse_str(raw).map_err(|_| BookmarkError::FolderNotFound.into())
+    parse_canonical_uuid(raw).ok_or_else(|| BookmarkError::FolderNotFound.into())
 }
 
 fn parse_folder_filter(raw: Option<String>) -> Result<Option<Option<Uuid>>, AppError> {
@@ -128,8 +130,10 @@ pub async fn update_bookmark(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(params): VPath<BookmarkPath>,
-    VJson(req): VJson<UpdateBookmarkRequest>,
+    body: Result<VBind<UpdateBookmarkRequest>, AppError>,
 ) -> Result<Json<ApiResponse<BookmarkResponse>>, AppError> {
+    // echobackend `c.Bind`: an empty body changes nothing.
+    let VBind(req) = body.map_err(bind_message("Invalid request body"))?;
     let bookmark_id = parse_bookmark_id(&params.id)?;
     let bookmark =
         services::bookmark::update_bookmark(&pool, bookmark_id, auth_user.id, req.name, req.notes)
@@ -146,13 +150,21 @@ pub async fn move_bookmark(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(params): VPath<BookmarkPath>,
-    VJson(req): VJson<MoveBookmarkRequest>,
+    body: Result<VBind<MoveBookmarkRequest>, AppError>,
 ) -> Result<Json<ApiResponse<BookmarkResponse>>, AppError> {
+    // echobackend `c.Bind`: an empty body is no folder; a bad one is 400
+    // "Invalid request body", a malformed `folder_id` a 422 `uuid`.
+    let VBind(req) = body.map_err(bind_message("Invalid request body"))?;
     let bookmark_id = parse_bookmark_id(&params.id)?;
-    let bookmark =
-        services::bookmark::move_bookmark(&pool, bookmark_id, auth_user.id, req.folder_id)
-            .await
-            .map_err(bookmark_err("Failed to move bookmark"))?;
+    // echobackend `MoveBookmark`: a `folder_id` that passes the `uuid` tag
+    // but is not lowercase hyphenated is "folder not found".
+    let folder_id = match req.folder_id.as_deref() {
+        None | Some("") => None,
+        Some(raw) => Some(parse_folder_id(raw)?),
+    };
+    let bookmark = services::bookmark::move_bookmark(&pool, bookmark_id, auth_user.id, folder_id)
+        .await
+        .map_err(bookmark_err("Failed to move bookmark"))?;
 
     Ok(Json(ApiResponse::success_with_message(
         "Bookmark moved successfully",
@@ -163,7 +175,7 @@ pub async fn move_bookmark(
 pub async fn create_folder(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VJson(req): VJson<CreateBookmarkFolderRequest>,
+    body: Result<VBind<CreateBookmarkFolderRequest>, AppError>,
 ) -> Result<
     (
         axum::http::StatusCode,
@@ -171,6 +183,8 @@ pub async fn create_folder(
     ),
     AppError,
 > {
+    // echobackend `c.Bind`: an empty body is a 422 `required` name.
+    let VBind(req) = body.map_err(bind_message("Invalid request body"))?;
     let folder = services::bookmark::create_folder(&pool, auth_user.id, req.name, req.description)
         .await
         .map_err(bookmark_err("Failed to create folder"))?;
@@ -200,8 +214,10 @@ pub async fn update_folder(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(params): VPath<FolderIdPath>,
-    VJson(req): VJson<UpdateBookmarkFolderRequest>,
+    body: Result<VBind<UpdateBookmarkFolderRequest>, AppError>,
 ) -> Result<Json<ApiResponse<BookmarkFolderResponse>>, AppError> {
+    // echobackend `c.Bind`: an empty body changes nothing.
+    let VBind(req) = body.map_err(bind_message("Invalid request body"))?;
     let folder_id = parse_folder_id(&params.folder_id)?;
     let folder = services::bookmark::update_folder(
         &pool,
@@ -288,6 +304,26 @@ mod tests {
             Ok(Some(None))
         ));
         assert!(matches!(parse_folder_filter(None), Ok(None)));
+    }
+
+    /// `validator.IsValidUUID` only takes the lowercase hyphenated form.
+    #[test]
+    fn ids_must_be_canonical_uuids() {
+        let ok = "0190a8f2-1c3e-7b4a-9d6e-2f1a3b4c5d6e";
+        assert!(parse_post_id(ok).is_ok());
+        assert!(parse_bookmark_id(ok).is_ok());
+        assert!(parse_folder_id(ok).is_ok());
+        for bad in [
+            "0190A8F2-1C3E-7B4A-9D6E-2F1A3B4C5D6E",
+            "0190a8f21c3e7b4a9d6e2f1a3b4c5d6e",
+            "{0190a8f2-1c3e-7b4a-9d6e-2f1a3b4c5d6e}",
+            "urn:uuid:0190a8f2-1c3e-7b4a-9d6e-2f1a3b4c5d6e",
+        ] {
+            assert!(parse_post_id(bad).is_err(), "{bad}");
+            assert!(parse_bookmark_id(bad).is_err(), "{bad}");
+            assert!(parse_folder_id(bad).is_err(), "{bad}");
+            assert!(parse_folder_filter(Some(bad.into())).is_err(), "{bad}");
+        }
     }
 
     #[tokio::test]

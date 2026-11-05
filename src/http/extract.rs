@@ -4,12 +4,15 @@
 //! JSON envelope as echobackend:
 //! - body/query/path parse failures -> `400` `{message: "Invalid request
 //!   body" | "Invalid query parameters" | "Invalid path parameters", error:
-//!   <parser detail>}`; a body over the route's `DefaultBodyLimit` -> `413`
+//!   <parser detail>}`; [`VBind`] / [`PJson`] use echobackend's `c.Bind`
+//!   message "Invalid request format" instead; a body over the route's
+//!   `DefaultBodyLimit` -> `413` [`AppError::payload_too_large`]
 //! - validation failures -> `422` with `errors: [{field, message, value?,
 //!   tag}]`, mirroring echobackend's `response.FromValidateError` envelope
 //!   (go-playground/validator): `field` is the Go struct field name
 //!   (`first_name` -> `FirstName`, `user_id` -> `UserID`), `value` the
-//!   submitted value when the request carried one.
+//!   submitted value when the request carried one. Like go-playground, only
+//!   the first failing rule of each field is reported.
 
 use crate::http::error::AppError;
 use axum::{
@@ -58,6 +61,51 @@ fn invalid_body(detail: String) -> AppError {
     AppError::bad_request("Invalid request body", Some(detail))
 }
 
+/// echobackend `response.BadRequest(c, "Invalid request format", err)`, the
+/// answer to every failed `c.Bind`.
+fn invalid_format(detail: String) -> AppError {
+    AppError::bad_request("Invalid request format", Some(detail))
+}
+
+const EXPECTED_JSON: &str = "Expected request with `Content-Type: application/json`";
+
+/// Buffers the body: a body over the `DefaultBodyLimit` is echobackend's
+/// global 413 envelope, any other read failure goes through `on_error`.
+async fn read_body<S: Send + Sync>(
+    req: Request,
+    state: &S,
+    on_error: fn(String) -> AppError,
+) -> Result<Bytes, AppError> {
+    Bytes::from_request(req, state).await.map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            AppError::payload_too_large()
+        } else {
+            on_error(rejection.body_text())
+        }
+    })
+}
+
+/// echobackend handlers pass their own message to `response.BadRequest(c,
+/// "<message>", bindErr)` when `c.Bind` fails ("Failed to create post",
+/// "Invalid request payload", ..). Take the body as `Result<VBind<T>,
+/// AppError>` (or `VJson` / `VJsonOrDefault`) and map the rejection with
+/// this: only a 400 bind rejection gets `message`, its parser detail stays as
+/// `error`; the 413 body limit and 422 validation envelopes are kept as is.
+pub fn bind_message(message: &'static str) -> impl FnOnce(AppError) -> AppError {
+    move |err| match err {
+        AppError::Detailed {
+            status: StatusCode::BAD_REQUEST,
+            error,
+            ..
+        } => AppError::Detailed {
+            status: StatusCode::BAD_REQUEST,
+            message: message.to_string(),
+            error,
+        },
+        other => other,
+    }
+}
+
 /// JSON body extractor with `garde` support (replaces `Valid<Json<T>>`).
 pub struct VJson<T>(pub T);
 
@@ -70,21 +118,46 @@ where
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         if !has_json_content_type(req.headers()) {
-            return Err(invalid_body(
-                "Expected request with `Content-Type: application/json`".to_string(),
-            ));
+            return Err(invalid_body(EXPECTED_JSON.to_string()));
         }
-        let bytes = Bytes::from_request(req, state).await.map_err(|rejection| {
-            if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                AppError::PayloadTooLarge("Request Entity Too Large".to_string())
-            } else {
-                invalid_body(rejection.body_text())
-            }
-        })?;
+        let bytes = read_body(req, state, invalid_body).await?;
         let Json(value) = Json::<T>::from_bytes(&bytes)
             .map_err(|rejection| invalid_body(rejection.body_text()))?;
-        validate_with_source(&value, || serde_json::from_slice(&bytes).ok())?;
+        validate_input(&value, || serde_json::from_slice(&bytes).ok())?;
         Ok(VJson(value))
+    }
+}
+
+/// echobackend `c.Bind` + `c.Validate`: a zero-length body binds to
+/// `T::default()` (echo's `Bind` returns early on `ContentLength == 0`) and is
+/// then validated, so missing required fields are a 422 `required`; a
+/// non-empty body must be JSON, and one that does not bind is a 400 "Invalid
+/// request format" with the parser detail as `error`. Give `T`
+/// `#[serde(default)]` so a missing field is a validation (not a bind) error.
+pub struct VBind<T>(pub T);
+
+impl<S, T> FromRequest<S> for VBind<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + Validate<Context = ()> + Default,
+{
+    type Rejection = AppError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let json_content_type = has_json_content_type(req.headers());
+        let bytes = read_body(req, state, invalid_format).await?;
+        if bytes.is_empty() {
+            let value = T::default();
+            validate_input(&value, || None)?;
+            return Ok(VBind(value));
+        }
+        if !json_content_type {
+            return Err(invalid_format(EXPECTED_JSON.to_string()));
+        }
+        let Json(value) = Json::<T>::from_bytes(&bytes)
+            .map_err(|rejection| invalid_format(rejection.body_text()))?;
+        validate_input(&value, || serde_json::from_slice(&bytes).ok())?;
+        Ok(VBind(value))
     }
 }
 
@@ -102,23 +175,13 @@ where
     type Rejection = AppError;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let invalid_format =
-            |detail: String| AppError::bad_request("Invalid request format", Some(detail));
         let json_content_type = has_json_content_type(req.headers());
-        let bytes = Bytes::from_request(req, state).await.map_err(|rejection| {
-            if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                AppError::PayloadTooLarge("Request Entity Too Large".to_string())
-            } else {
-                invalid_format(rejection.body_text())
-            }
-        })?;
+        let bytes = read_body(req, state, invalid_format).await?;
         if bytes.is_empty() {
             return Ok(PJson(T::default()));
         }
         if !json_content_type {
-            return Err(invalid_format(
-                "Expected request with `Content-Type: application/json`".to_string(),
-            ));
+            return Err(invalid_format(EXPECTED_JSON.to_string()));
         }
         let Json(value) = Json::<T>::from_bytes(&bytes)
             .map_err(|rejection| invalid_format(rejection.body_text()))?;
@@ -141,26 +204,18 @@ where
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let json_content_type = has_json_content_type(req.headers());
-        let bytes = Bytes::from_request(req, state).await.map_err(|rejection| {
-            if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                AppError::PayloadTooLarge("Request Entity Too Large".to_string())
-            } else {
-                invalid_body(rejection.body_text())
-            }
-        })?;
+        let bytes = read_body(req, state, invalid_body).await?;
         if bytes.iter().all(u8::is_ascii_whitespace) {
             let value = T::default();
-            validate(&value)?;
+            validate_input(&value, || None)?;
             return Ok(VJsonOrDefault(value));
         }
         if !json_content_type {
-            return Err(invalid_body(
-                "Expected request with `Content-Type: application/json`".to_string(),
-            ));
+            return Err(invalid_body(EXPECTED_JSON.to_string()));
         }
         let Json(value) = Json::<T>::from_bytes(&bytes)
             .map_err(|rejection| invalid_body(rejection.body_text()))?;
-        validate_with_source(&value, || serde_json::from_slice(&bytes).ok())?;
+        validate_input(&value, || serde_json::from_slice(&bytes).ok())?;
         Ok(VJsonOrDefault(value))
     }
 }
@@ -182,7 +237,7 @@ where
                 .map_err(|rejection| {
                     AppError::bad_request("Invalid query parameters", Some(rejection.body_text()))
                 })?;
-        validate_with_source(&value, || {
+        validate_input(&value, || {
             Query::<HashMap<String, String>>::try_from_uri(&parts.uri)
                 .ok()
                 .and_then(|Query(map)| serde_json::to_value(map).ok())
@@ -208,9 +263,37 @@ where
                 .map_err(|rejection| {
                     AppError::bad_request("Invalid path parameters", Some(rejection.body_text()))
                 })?;
-        validate(&value)?;
+        validate_input(&value, || None)?;
         Ok(VPath(value))
     }
+}
+
+/// The raw (percent-decoded) value of the `name` path segment, like
+/// echobackend's `c.Param(name)`; `None` when the route has no such segment.
+/// Lets per-route id extractors report echobackend's own 400 message instead
+/// of the generic "Invalid path parameters".
+pub async fn raw_path_param<S: Send + Sync>(
+    parts: &mut Parts,
+    state: &S,
+    name: &str,
+) -> Option<String> {
+    Path::<HashMap<String, String>>::from_request_parts(parts, state)
+        .await
+        .ok()
+        .and_then(|Path(mut params)| params.remove(name))
+}
+
+/// The `name` path segment parsed as a canonical UUID (echobackend
+/// `validator.IsValidUUID(c.Param(name))`); `None` when it is missing or not
+/// canonical (upper-case, braced or unhyphenated ids are rejected too).
+pub async fn canonical_uuid_param<S: Send + Sync>(
+    parts: &mut Parts,
+    state: &S,
+    name: &str,
+) -> Option<uuid::Uuid> {
+    raw_path_param(parts, state, name)
+        .await
+        .and_then(|raw| crate::dto::validation::parse_canonical_uuid(&raw))
 }
 
 /// Validates `value`, mapping failures to the `422` envelope.
@@ -224,7 +307,65 @@ pub fn validate_with_source<T: Validate<Context = ()>>(
     value: &T,
     source: impl FnOnce() -> Option<serde_json::Value>,
 ) -> Result<(), AppError> {
-    with_i18n(TagI18n, || value.validate()).map_err(|report| validation_error(report, source()))
+    with_i18n(TagI18n, || value.validate())
+        .map_err(|report| validation_error(report, source(), &[]))
+}
+
+/// What the extractors use: [`validate_with_source`], with field errors in
+/// struct declaration order like go-playground (garde itself reports fields
+/// alphabetically), so the top-level `error` is the first declared field's.
+pub fn validate_input<T: DeserializeOwned + Validate<Context = ()>>(
+    value: &T,
+    source: impl FnOnce() -> Option<serde_json::Value>,
+) -> Result<(), AppError> {
+    with_i18n(TagI18n, || value.validate())
+        .map_err(|report| validation_error(report, source(), serde_field_order::<T>()))
+}
+
+/// Declared field names of a `#[derive(Deserialize)]` struct (serde passes
+/// them, in declaration order, to `deserialize_struct`). Empty for anything
+/// else (maps, flattened structs, enums).
+fn serde_field_order<T: DeserializeOwned>() -> &'static [&'static str] {
+    use serde::de::{self, Deserializer, Visitor};
+
+    struct Introspect<'a>(&'a mut &'static [&'static str]);
+
+    impl<'de> Deserializer<'de> for Introspect<'_> {
+        type Error = de::value::Error;
+
+        fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+            Err(de::Error::custom("introspection only"))
+        }
+
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _name: &'static str,
+            fields: &'static [&'static str],
+            _visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            *self.0 = fields;
+            Err(de::Error::custom("introspection only"))
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map enum identifier ignored_any
+        }
+    }
+
+    let mut fields: &'static [&'static str] = &[];
+    let _ = T::deserialize(Introspect(&mut fields));
+    fields
+}
+
+/// `first_name` / `firstName` -> `firstname`, to match a garde path segment
+/// (Rust field name) with a serde field name (possibly renamed).
+fn normalized_field(name: &str) -> String {
+    name.chars()
+        .filter(|c| *c != '_')
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// garde only reports a message per failure, so validation runs under this
@@ -303,11 +444,33 @@ impl I18n for TagI18n {
     }
 }
 
-fn validation_error(report: Report, source: Option<serde_json::Value>) -> AppError {
-    let field_errors: Vec<FieldError> = report
+fn validation_error(
+    report: Report,
+    source: Option<serde_json::Value>,
+    field_order: &[&str],
+) -> AppError {
+    // go-playground stops at the first failing tag of a field. garde runs a
+    // field's custom rules first, then its built-in rules in a fixed order
+    // (email/url before length before range), so keeping the first error per
+    // path gives `required` before `email` before `min`/`max`.
+    let mut seen = std::collections::HashSet::new();
+    let order: Vec<String> = field_order.iter().map(|f| normalized_field(f)).collect();
+    let mut errors: Vec<(String, &garde::Error)> = report
         .iter()
+        .map(|(path, error)| (path.to_string(), error))
+        .filter(|(path, _)| seen.insert(path.clone()))
+        .collect();
+    if !order.is_empty() {
+        // Stable: errors of one field (or unknown fields) keep garde's order.
+        errors.sort_by_key(|(path, _)| {
+            let top = path.split(['.', '[']).next().unwrap_or_default();
+            let top = normalized_field(top);
+            order.iter().position(|f| *f == top).unwrap_or(usize::MAX)
+        });
+    }
+    let field_errors: Vec<FieldError> = errors
+        .into_iter()
         .map(|(path, error)| {
-            let path = path.to_string();
             let mut field_error = to_field_error(&path, error.message());
             field_error.value = source
                 .as_ref()
@@ -503,6 +666,184 @@ mod tests {
             optional_body(Some("application/json"), r#"{"name":"abcd"}"#).await,
             Err(AppError::UnprocessableEntity { .. })
         ));
+    }
+
+    #[derive(Debug, Default, serde::Deserialize, garde::Validate)]
+    #[serde(default)]
+    struct BindBody {
+        #[garde(custom(crate::dto::validation::required), length(chars, min = 3))]
+        name: String,
+    }
+
+    async fn bind_body(
+        content_type: Option<&str>,
+        body: &'static str,
+    ) -> Result<BindBody, (StatusCode, serde_json::Value)> {
+        let mut builder = axum::http::Request::builder().method("POST").uri("/");
+        if let Some(content_type) = content_type {
+            builder = builder.header(header::CONTENT_TYPE, content_type);
+        }
+        let req = builder.body(axum::body::Body::from(body)).unwrap();
+        match VBind::<BindBody>::from_request(req, &()).await {
+            Ok(VBind(value)) => Ok(value),
+            Err(err) => {
+                let response = axum::response::IntoResponse::into_response(err);
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                Err((status, serde_json::from_slice(&bytes).unwrap()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_uses_invalid_request_format_for_bad_bodies() {
+        for (content_type, body) in [
+            (Some("application/json"), "{"),
+            (Some("application/json"), r#"{"name": 5}"#),
+            (Some("text/plain"), r#"{"name":"abc"}"#),
+            (None, r#"{"name":"abc"}"#),
+        ] {
+            let (status, body) = bind_body(content_type, body).await.unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["message"], "Invalid request format");
+            assert!(body["error"].is_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_message_rewrites_only_bind_rejections() {
+        let render = |err: AppError| async move {
+            let response = axum::response::IntoResponse::into_response(err);
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            )
+        };
+        let (status, body) = render(bind_message("Invalid request payload")(invalid_format(
+            "EOF".into(),
+        )))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            serde_json::json!({"success": false, "message": "Invalid request payload", "error": "EOF"})
+        );
+        let (status, body) = render(bind_message("Failed to create post")(
+            AppError::payload_too_large(),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(body["message"], "Request Entity Too Large");
+        let missing = BindBody::default();
+        let err = validate_input(&missing, || None).unwrap_err();
+        let (status, body) = render(bind_message("Failed to create post")(err)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["message"], "Validation failed");
+    }
+
+    #[tokio::test]
+    async fn bind_validates_missing_and_empty_bodies_as_required() {
+        for (content_type, body) in [
+            (None, ""),
+            (Some("application/json"), ""),
+            (Some("application/json"), "{}"),
+            (Some("application/json"), r#"{"name":""}"#),
+        ] {
+            let (status, body) = bind_body(content_type, body).await.unwrap_err();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(body["message"], "Validation failed");
+            assert_eq!(body["error"], "Name is required");
+            assert_eq!(
+                body["errors"].as_array().unwrap().len(),
+                1,
+                "only the first failing rule per field"
+            );
+            assert_eq!(body["errors"][0]["tag"], "required");
+        }
+        let (_, body) = bind_body(Some("application/json"), r#"{"name":"ab"}"#)
+            .await
+            .unwrap_err();
+        assert_eq!(body["errors"][0]["tag"], "min");
+        assert_eq!(
+            bind_body(Some("application/json"), r#"{"name":"abc"}"#)
+                .await
+                .unwrap()
+                .name,
+            "abc"
+        );
+    }
+
+    #[tokio::test]
+    async fn global_body_limit_is_the_413_envelope() {
+        use axum::{Router, routing::post};
+        use tower::ServiceExt;
+        let app = Router::new()
+            .route(
+                "/",
+                post(
+                    |VJson(body): VJson<OptionalBody>| async move { body.name.unwrap_or_default() },
+                ),
+            )
+            .layer(axum::extract::DefaultBodyLimit::max(8));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(r#"{"name":"abc"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"success": false, "message": "Request Entity Too Large", "error": "Request body too large"})
+        );
+    }
+
+    #[derive(serde::Deserialize, garde::Validate)]
+    #[serde(rename_all = "camelCase")]
+    struct Ordered {
+        #[garde(length(min = 1))]
+        zeta_field: String,
+        #[garde(length(min = 1))]
+        alpha: String,
+    }
+
+    #[test]
+    fn field_errors_follow_declaration_order() {
+        assert_eq!(serde_field_order::<Ordered>(), ["zetaField", "alpha"]);
+        let value = Ordered {
+            zeta_field: String::new(),
+            alpha: String::new(),
+        };
+        match validate_input(&value, || None) {
+            Err(AppError::UnprocessableEntity { error, errors }) => {
+                assert_eq!(error, "Zeta field must be at least 1 characters long");
+                let fields: Vec<_> = errors.iter().map(|e| e.field.as_str()).collect();
+                assert_eq!(fields, ["ZetaField", "Alpha"]);
+            }
+            _ => panic!("Expected UnprocessableEntity"),
+        }
+        // garde alone reports alphabetically.
+        match validate(&value) {
+            Err(AppError::UnprocessableEntity { errors, .. }) => {
+                assert_eq!(errors[0].field, "Alpha");
+            }
+            _ => panic!("Expected UnprocessableEntity"),
+        }
     }
 
     #[derive(garde::Validate)]

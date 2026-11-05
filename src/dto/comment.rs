@@ -1,19 +1,14 @@
+use crate::dto::validation::required;
 use garde::Validate;
 use serde::Deserialize;
-use uuid::Uuid;
 
-#[derive(Deserialize, Validate)]
+/// echobackend `CreateCommentRequest`: `text` `required,min=1,max=1000`. A
+/// missing `text` defaults to empty so it is a 422 `required`.
+#[derive(Deserialize, Validate, Default)]
+#[serde(default)]
 pub struct CommentRequest {
-    #[garde(length(chars, min = 1, max = 1000))]
+    #[garde(custom(required), length(chars, min = 1, max = 1000))]
     pub text: String,
-}
-
-#[derive(Deserialize, Validate)]
-pub struct CommentPath {
-    #[garde(skip)]
-    pub id: Uuid,
-    #[garde(skip)]
-    pub comment_id: Uuid,
 }
 
 /// `/api/posts/{id}/comments`: the id is taken raw like echobackend's
@@ -24,4 +19,27 @@ pub struct CommentPath {
 pub struct CommentPostPath {
     #[garde(skip)]
     pub id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dto::validation::failing_tags;
+
+    #[test]
+    fn comment_text_is_required() {
+        let missing: CommentRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            failing_tags(&missing),
+            vec![("Text".to_string(), "required".to_string())]
+        );
+        let long = CommentRequest {
+            text: "x".repeat(1001),
+        };
+        assert_eq!(
+            failing_tags(&long),
+            vec![("Text".to_string(), "max".to_string())]
+        );
+        assert!(failing_tags(&CommentRequest { text: "ok".into() }).is_empty());
+    }
 }

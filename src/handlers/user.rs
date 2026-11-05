@@ -4,10 +4,10 @@ use crate::dto::user::{
     CreateUserRequest, FollowRequest, UpdateUserRequest, UserDeletedFilter, UserDetailQuery,
     UserIdPath, UserListQuery,
 };
-use crate::dto::validation::parse_pagination;
+use crate::dto::validation::{parse_canonical_uuid, parse_pagination};
 use crate::http::auth::{AdminUser, AuthUser};
 use crate::http::error::AppError;
-use crate::http::extract::{VJson, VPath, VQuery};
+use crate::http::extract::{VBind, VPath, VQuery, bind_message};
 use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
 use crate::models::stats::UserStatsResponse;
@@ -17,8 +17,8 @@ use crate::services;
 use crate::state::AppState;
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Multipart, State},
-    http::StatusCode,
+    extract::{DefaultBodyLimit, FromRequestParts, Multipart, Path, State},
+    http::{StatusCode, request::Parts},
     routing::{delete, get, post},
 };
 
@@ -81,14 +81,39 @@ fn user_not_found(message: &'static str) -> AppError {
     AppError::not_found(message, Some("user not found".into()))
 }
 
+/// The `{id}` of `/api/users/{id}/...`, checked like echobackend's
+/// `validator.IsValidUUID` + `respondInvalidUserID`: anything but a canonical
+/// lowercase hyphenated UUID is 400 "Invalid user ID" / "invalid user ID
+/// format". Declare it after the `AuthUser` / `AdminUser` argument (auth runs
+/// first) and before any body extractor (the id is checked before `c.Bind`).
+pub struct UserIdParam(pub uuid::Uuid);
+
+impl<S: Send + Sync> FromRequestParts<S> for UserIdParam {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Path::<UserIdPath>::from_request_parts(parts, state)
+            .await
+            .ok()
+            .and_then(|Path(path)| parse_canonical_uuid(&path.id))
+            .map(UserIdParam)
+            .ok_or_else(invalid_user_id)
+    }
+}
+
+/// echobackend `respondInvalidUserID`.
+fn invalid_user_id() -> AppError {
+    AppError::bad_request("Invalid user ID", Some("invalid user ID format".into()))
+}
+
 pub async fn get_users(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
     VQuery(query): VQuery<UserListQuery>,
 ) -> Result<Json<ApiResponse<Vec<UserResponse>>>, AppError> {
     let (limit, offset) = parse_pagination(query.offset.as_deref(), query.limit.as_deref(), 10);
-    let deleted_filter =
-        UserDeletedFilter::parse(query.deleted.as_deref()).map_err(AppError::BadRequest)?;
+    let deleted_filter = UserDeletedFilter::parse(query.deleted.as_deref())
+        .map_err(|err| AppError::bad_request("Invalid deleted filter", Some(err)))?;
     // echobackend `ParseUserOrderDesc`: only the exact string "asc" ascends.
     let order_desc = query.order_direction.as_deref() != Some("asc");
     let (users, total) = services::user::get_users(
@@ -114,13 +139,13 @@ pub async fn get_users(
 pub async fn get_by_id(
     State(pool): State<DbPool>,
     admin_user: AdminUser,
-    VPath(params): VPath<UserIdPath>,
+    UserIdParam(user_id): UserIdParam,
     VQuery(query): VQuery<UserDetailQuery>,
 ) -> Result<Json<ApiResponse<UserResponse>>, AppError> {
     let result = if query.deleted.as_deref() == Some("true") {
-        services::user::get_admin_by_id_deleted_only(&pool, params.id).await
+        services::user::get_admin_by_id_deleted_only(&pool, user_id).await
     } else {
-        services::user::get_admin_by_id(&pool, params.id, Some(admin_user.0.id)).await
+        services::user::get_admin_by_id(&pool, user_id, Some(admin_user.0.id)).await
     };
 
     match result {
@@ -150,9 +175,9 @@ pub async fn get_me(
 pub async fn delete_user(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    VPath(params): VPath<UserIdPath>,
+    UserIdParam(user_id): UserIdParam,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    match services::user::soft_delete(&pool, params.id).await {
+    match services::user::soft_delete(&pool, user_id).await {
         Ok(true) => Ok(Json(ApiResponse::message("Successfully deleted user"))),
         Ok(false) => Err(user_not_found("Failed to delete user")),
         Err(e) => Err(AppError::from(e).context("Failed to delete user")),
@@ -162,9 +187,9 @@ pub async fn delete_user(
 pub async fn restore_user(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    VPath(params): VPath<UserIdPath>,
+    UserIdParam(user_id): UserIdParam,
 ) -> Result<Json<ApiResponse<UserResponse>>, AppError> {
-    match services::user::restore(&pool, params.id).await {
+    match services::user::restore(&pool, user_id).await {
         Ok(user) => Ok(Json(ApiResponse::success_with_message(
             "Successfully restored user",
             user,
@@ -199,8 +224,11 @@ pub async fn get_by_username(
 pub async fn follow_user(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VJson(req): VJson<FollowRequest>,
+    body: Result<VBind<FollowRequest>, AppError>,
 ) -> Result<Json<ApiResponse<FollowResponse>>, AppError> {
+    // echobackend `c.Bind` + `c.Validate`: an empty body is a 422 `required`
+    // `UserID`; one that does not bind is a 400 "Invalid request body".
+    let VBind(req) = body.map_err(bind_message("Invalid request body"))?;
     let target = req
         .user_uuid()
         .ok_or_else(|| AppError::BadRequest("Invalid request body".to_string()))?;
@@ -217,9 +245,9 @@ pub async fn follow_user(
 pub async fn unfollow_user(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VPath(params): VPath<UserIdPath>,
+    UserIdParam(user_id): UserIdParam,
 ) -> Result<Json<ApiResponse<FollowResponse>>, AppError> {
-    let response = services::user_follow::unfollow_user(&pool, auth_user.id, params.id)
+    let response = services::user_follow::unfollow_user(&pool, auth_user.id, user_id)
         .await
         .map_err(follow_error("Failed to unfollow user"))?;
 
@@ -232,9 +260,9 @@ pub async fn unfollow_user(
 pub async fn check_follow_status(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VPath(params): VPath<UserIdPath>,
+    UserIdParam(user_id): UserIdParam,
 ) -> Result<Json<ApiResponse<FollowStatusResponse>>, AppError> {
-    let is_following = services::user_follow::is_following(&pool, auth_user.id, params.id)
+    let is_following = services::user_follow::is_following(&pool, auth_user.id, user_id)
         .await
         .map_err(db_error("Failed to check follow status"))?;
 
@@ -246,12 +274,12 @@ pub async fn check_follow_status(
 
 pub async fn get_followers(
     State(pool): State<DbPool>,
-    VPath(params): VPath<UserIdPath>,
+    UserIdParam(user_id): UserIdParam,
     VQuery(query): VQuery<PaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<UserResponse>>>, AppError> {
     let (limit, offset) = query.resolve(10);
     let (followers, total) =
-        services::user_follow::get_followers(&pool, params.id, limit, offset, None)
+        services::user_follow::get_followers(&pool, user_id, limit, offset, None)
             .await
             .map_err(db_error("Failed to get followers"))?;
 
@@ -266,12 +294,12 @@ pub async fn get_followers(
 
 pub async fn get_following(
     State(pool): State<DbPool>,
-    VPath(params): VPath<UserIdPath>,
+    UserIdParam(user_id): UserIdParam,
     VQuery(query): VQuery<PaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<UserResponse>>>, AppError> {
     let (limit, offset) = query.resolve(10);
     let (following, total) =
-        services::user_follow::get_following(&pool, params.id, limit, offset, None)
+        services::user_follow::get_following(&pool, user_id, limit, offset, None)
             .await
             .map_err(db_error("Failed to get following"))?;
 
@@ -286,9 +314,9 @@ pub async fn get_following(
 
 pub async fn get_follow_stats(
     State(pool): State<DbPool>,
-    VPath(params): VPath<UserIdPath>,
+    UserIdParam(user_id): UserIdParam,
 ) -> Result<Json<ApiResponse<FollowStats>>, AppError> {
-    match services::user_follow::get_follow_stats(&pool, params.id)
+    match services::user_follow::get_follow_stats(&pool, user_id)
         .await
         .map_err(db_error("Failed to get follow statistics"))?
     {
@@ -303,9 +331,9 @@ pub async fn get_follow_stats(
 pub async fn get_mutual_follows(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VPath(params): VPath<UserIdPath>,
+    UserIdParam(user_id): UserIdParam,
 ) -> Result<Json<ApiResponse<Vec<UserResponse>>>, AppError> {
-    let users = services::user_follow::get_mutual_follows(&pool, auth_user.id, params.id)
+    let users = services::user_follow::get_mutual_follows(&pool, auth_user.id, user_id)
         .await
         .map_err(db_error("Failed to get mutual follows"))?;
 
@@ -344,7 +372,9 @@ pub async fn get_user_stats(
     _admin_user: AdminUser,
     VQuery(query): VQuery<StatsQuery>,
 ) -> Result<Json<ApiResponse<UserStatsResponse>>, AppError> {
-    let stats = services::stats::user_stats(&pool, query.date_range(), query.limit()).await?;
+    let stats = services::stats::user_stats(&pool, query.date_range(), query.limit())
+        .await
+        .map_err(db_error("Failed to fetch user stats"))?;
     Ok(Json(ApiResponse::success_with_message(
         "User stats fetched successfully",
         stats,
@@ -354,7 +384,7 @@ pub async fn get_user_stats(
 pub async fn create_user(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    VJson(req): VJson<CreateUserRequest>,
+    VBind(req): VBind<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<UserResponse>>), AppError> {
     let user = services::user::create_user(&pool, req)
         .await
@@ -377,10 +407,10 @@ pub async fn create_user(
 pub async fn update_user(
     State(pool): State<DbPool>,
     _admin_user: AdminUser,
-    VPath(params): VPath<UserIdPath>,
-    VJson(req): VJson<UpdateUserRequest>,
+    UserIdParam(user_id): UserIdParam,
+    VBind(req): VBind<UpdateUserRequest>,
 ) -> Result<Json<ApiResponse<UserResponse>>, AppError> {
-    let user = services::user::update_user(&pool, params.id, req)
+    let user = services::user::update_user(&pool, user_id, req)
         .await
         .map_err(|err| match err {
             services::user::UserError::UserExists => {
@@ -419,4 +449,103 @@ pub fn routes() -> Router<AppState> {
             "/api/users/{id}",
             get(get_by_id).put(update_user).delete(delete_user),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn user_id_param(uri: &str) -> Result<uuid::Uuid, AppError> {
+        let app = Router::new().route(
+            "/api/users/{id}",
+            get(|UserIdParam(id): UserIdParam| async move { id.to_string() }),
+        );
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        if status == StatusCode::OK {
+            Ok(String::from_utf8(bytes.to_vec()).unwrap().parse().unwrap())
+        } else {
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                body,
+                serde_json::json!({"success": false, "message": "Invalid user ID", "error": "invalid user ID format"})
+            );
+            Err(invalid_user_id())
+        }
+    }
+
+    async fn follow_body(body: &'static str) -> (StatusCode, serde_json::Value) {
+        let app = Router::new().route(
+            "/api/users/follow",
+            axum::routing::post(|body: Result<VBind<FollowRequest>, AppError>| async move {
+                body.map_err(bind_message("Invalid request body"))
+                    .map(|VBind(req)| req.user_id)
+            }),
+        );
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/users/follow")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// echobackend `FollowUser`: `c.Bind` skips an empty body, so it is a
+    /// 422 `required`; an unparsable one is 400 "Invalid request body".
+    #[tokio::test]
+    async fn follow_body_matches_echobackend_bind() {
+        let (status, body) = follow_body("").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["errors"][0]["field"], "UserID");
+        assert_eq!(body["errors"][0]["tag"], "required");
+
+        let (status, body) = follow_body("{").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["message"], "Invalid request body");
+    }
+
+    #[tokio::test]
+    async fn user_id_param_accepts_only_canonical_uuids() {
+        let ok = "0190a8f2-1c3e-7b4a-9d6e-2f1a3b4c5d6e";
+        assert_eq!(
+            user_id_param(&format!("/api/users/{ok}"))
+                .await
+                .unwrap()
+                .to_string(),
+            ok
+        );
+        for bad in [
+            "not-a-uuid",
+            "0190A8F2-1C3E-7B4A-9D6E-2F1A3B4C5D6E",
+            "0190a8f21c3e7b4a9d6e2f1a3b4c5d6e",
+            "%7B0190a8f2-1c3e-7b4a-9d6e-2f1a3b4c5d6e%7D",
+        ] {
+            assert!(user_id_param(&format!("/api/users/{bad}")).await.is_err());
+        }
+    }
 }

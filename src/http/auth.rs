@@ -9,10 +9,31 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use jsonwebtoken::{DecodingKey, Validation, decode};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect};
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use uuid::Uuid;
+
+/// Access-token validation: HS256 only, `exp` required and enforced with no
+/// leeway (echobackend's `jwt.Parse` rejects a token the moment it expires;
+/// jsonwebtoken's default would accept it for another 60 s).
+static ACCESS_TOKEN_VALIDATION: LazyLock<Validation> = LazyLock::new(|| {
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.leeway = 0;
+    validation
+});
+
+/// Verifies an access token's signature and expiry.
+pub fn decode_access_token(token: &str, secret: &[u8]) -> Option<Claims> {
+    decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(secret),
+        &ACCESS_TOKEN_VALIDATION,
+    )
+    .ok()
+    .map(|data| data.claims)
+}
 
 /// Decoded access-token claims. Tokens are minted with only `user_id`, `iat`
 /// and `exp` (echobackend `createAccessToken`); the legacy `username`,
@@ -89,14 +110,10 @@ where
             ));
         };
 
-        let token = decode::<Claims>(
-            token,
-            &DecodingKey::from_secret(JwtConfig::get().secret.as_bytes()),
-            &Validation::default(),
-        )
-        .map_err(|_| auth_error(StatusCode::UNAUTHORIZED, "Invalid or expired token"))?;
+        let claims = decode_access_token(token, JwtConfig::get().secret.as_bytes())
+            .ok_or_else(|| auth_error(StatusCode::UNAUTHORIZED, "Invalid or expired token"))?;
 
-        let Ok(id) = Uuid::parse_str(&token.claims.user_id) else {
+        let Ok(id) = Uuid::parse_str(&claims.user_id) else {
             return Err(auth_error(
                 StatusCode::UNAUTHORIZED,
                 "Authentication required",
@@ -214,5 +231,47 @@ where
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jsonwebtoken::{EncodingKey, Header, encode};
+
+    const SECRET: &[u8] = b"test-secret";
+
+    fn token_expiring_in(seconds: i64) -> String {
+        let now = chrono::Utc::now().timestamp();
+        let claims = Claims {
+            user_id: Uuid::now_v7().to_string(),
+            username: None,
+            email: String::new(),
+            is_super_admin: None,
+            iat: now as usize,
+            exp: (now + seconds) as usize,
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(SECRET),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn valid_token_decodes() {
+        assert!(decode_access_token(&token_expiring_in(60), SECRET).is_some());
+    }
+
+    /// echobackend rejects a token as soon as `exp` has passed (no leeway).
+    #[test]
+    fn recently_expired_token_is_rejected() {
+        assert!(decode_access_token(&token_expiring_in(-5), SECRET).is_none());
+    }
+
+    #[test]
+    fn wrong_secret_is_rejected() {
+        assert!(decode_access_token(&token_expiring_in(60), b"other").is_none());
     }
 }

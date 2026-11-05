@@ -1,83 +1,100 @@
+use crate::dto::validation::required;
 use garde::Validate;
 use serde::Deserialize;
 
-#[derive(Deserialize, Validate)]
+// Request bodies bound with `VBind` (echobackend `c.Bind` + `c.Validate`):
+// `#[serde(default)]` makes a missing field empty, and `custom(required)` runs
+// first, so a missing or empty field is a 422 `required` like echobackend's
+// `validate:"required,..."` instead of a 400 parse error or a `min` tag.
+
+#[derive(Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct RegisterRequest {
-    #[garde(email, length(chars, max = 255))]
+    #[garde(custom(required), email, length(chars, max = 255))]
     pub email: String,
-    #[garde(length(chars, min = 3, max = 30))]
+    #[garde(custom(required), length(chars, min = 3, max = 30))]
     pub username: String,
-    #[garde(length(chars, min = 8, max = 128))]
+    #[garde(custom(required), length(chars, min = 8, max = 128))]
     pub password: String,
-    #[garde(length(chars, min = 1, max = 100))]
+    #[garde(custom(required), length(chars, min = 1, max = 100))]
     pub first_name: String,
-    #[garde(length(chars, min = 1, max = 100))]
+    #[garde(custom(required), length(chars, min = 1, max = 100))]
     pub last_name: String,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct LoginRequest {
-    #[garde(length(chars, min = 1, max = 255))]
+    #[garde(custom(required), length(chars, max = 255))]
     pub identifier: String,
-    #[garde(length(chars, min = 6))]
+    #[garde(custom(required), length(chars, min = 6))]
     pub password: String,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct RefreshTokenRequest {
-    #[garde(length(chars, min = 1))]
+    #[garde(custom(required))]
     pub refresh_token: String,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct ForgotPasswordRequest {
-    #[garde(email, length(chars, max = 255))]
+    #[garde(custom(required), email, length(chars, max = 255))]
     pub email: String,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct ResetPasswordRequest {
-    #[garde(length(chars, min = 1))]
+    #[garde(custom(required))]
     pub token: String,
-    #[garde(length(chars, min = 8, max = 128))]
+    #[garde(custom(required), length(chars, min = 8, max = 128))]
     pub password: String,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct ChangePasswordRequest {
-    #[garde(length(chars, min = 8))]
+    #[garde(custom(required), length(chars, min = 8))]
     pub current_password: String,
-    #[garde(length(chars, min = 8, max = 128))]
+    #[garde(custom(required), length(chars, min = 8, max = 128))]
     pub new_password: String,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct LogoutRequest {
-    #[garde(length(chars, min = 1))]
+    #[garde(custom(required))]
     pub refresh_token: String,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct OAuthExchangeRequest {
-    #[garde(length(chars, min = 1))]
+    #[garde(custom(required))]
     pub code: String,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct CheckUsernameRequest {
-    #[garde(length(chars, min = 3, max = 30))]
+    #[garde(custom(required), length(chars, min = 3, max = 30))]
     pub username: String,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct RevokeAllSessionsRequest {
     #[garde(skip)]
     pub confirm: Option<bool>,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Default, Deserialize, Validate)]
+#[serde(default)]
 pub struct UpdateProfileRequest {
-    #[garde(length(chars, min = 3, max = 30))]
+    #[garde(custom(required), length(chars, min = 3, max = 30))]
     pub username: String,
     #[garde(length(chars, max = 100))]
     pub first_name: Option<String>,
@@ -99,7 +116,9 @@ pub struct ActivityLogQuery {
     pub offset: Option<String>,
     #[garde(skip)]
     pub limit: Option<String>,
-    #[garde(length(chars, min = 1, max = 50))]
+    /// Unvalidated like echobackend's `c.QueryParam("activity_type")`; an
+    /// empty value means no filter.
+    #[garde(skip)]
     pub activity_type: Option<String>,
 }
 
@@ -324,6 +343,107 @@ mod tests {
                 20
             ),
             (100, 0)
+        );
+    }
+
+    #[test]
+    fn test_activity_type_is_not_validated() {
+        for activity_type in [String::new(), "x".repeat(80)] {
+            let query = ActivityLogQuery {
+                offset: None,
+                limit: None,
+                activity_type: Some(activity_type),
+            };
+            assert!(query.validate().is_ok());
+        }
+    }
+
+    /// Field errors as `(field, tag)` in the 422 envelope order.
+    fn tags<T: serde::de::DeserializeOwned + Validate<Context = ()>>(
+        value: &T,
+    ) -> Vec<(String, String)> {
+        match crate::http::extract::validate_input(value, || None) {
+            Ok(()) => Vec::new(),
+            Err(crate::http::error::AppError::UnprocessableEntity { errors, .. }) => errors
+                .into_iter()
+                .map(|e| (e.field, e.tag.unwrap_or_default()))
+                .collect(),
+            Err(other) => panic!("unexpected {other:?}"),
+        }
+    }
+
+    fn pair(field: &str, tag: &str) -> (String, String) {
+        (field.to_string(), tag.to_string())
+    }
+
+    /// echobackend `required,...`: a missing/empty field reports only
+    /// `required` (never also `min`/`email`), one error per field.
+    #[test]
+    fn test_required_comes_first_and_once_per_field() {
+        let register: RegisterRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            tags(&register),
+            vec![
+                pair("Email", "required"),
+                pair("Username", "required"),
+                pair("Password", "required"),
+                pair("FirstName", "required"),
+                pair("LastName", "required"),
+            ]
+        );
+
+        // `email` before `max`, `min` reported alone.
+        let register = RegisterRequest {
+            email: format!("{}@", "a".repeat(300)),
+            username: "ab".into(),
+            password: "supersecret123".into(),
+            first_name: "A".into(),
+            last_name: "B".into(),
+        };
+        assert_eq!(
+            tags(&register),
+            vec![pair("Email", "email"), pair("Username", "min")]
+        );
+
+        let login: LoginRequest = serde_json::from_str(r#"{"identifier":""}"#).unwrap();
+        assert_eq!(
+            tags(&login),
+            vec![pair("Identifier", "required"), pair("Password", "required")]
+        );
+        assert_eq!(
+            tags(&ForgotPasswordRequest::default()),
+            vec![pair("Email", "required")]
+        );
+        assert_eq!(
+            tags(&ResetPasswordRequest::default()),
+            vec![pair("Token", "required"), pair("Password", "required")]
+        );
+        assert_eq!(
+            tags(&RefreshTokenRequest::default()),
+            vec![pair("RefreshToken", "required")]
+        );
+        assert_eq!(
+            tags(&ChangePasswordRequest::default()),
+            vec![
+                pair("CurrentPassword", "required"),
+                pair("NewPassword", "required")
+            ]
+        );
+        assert_eq!(
+            tags(&LogoutRequest::default()),
+            vec![pair("RefreshToken", "required")]
+        );
+        assert_eq!(
+            tags(&OAuthExchangeRequest::default()),
+            vec![pair("Code", "required")]
+        );
+        assert_eq!(
+            tags(&CheckUsernameRequest::default()),
+            vec![pair("Username", "required")]
+        );
+        assert_eq!(
+            tags(&UpdateProfileRequest::default()),
+            vec![pair("Username", "required")]
         );
     }
 

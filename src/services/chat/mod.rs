@@ -256,6 +256,12 @@ pub async fn get_conversation_by_id(
     Ok(conversation_response(conversation, Some(messages), count))
 }
 
+/// The title an update applies: `None` for an absent, empty or
+/// whitespace-only title (echobackend `strings.TrimSpace(title) != ""`).
+fn effective_title(title: Option<String>) -> Option<String> {
+    title.filter(|title| !title.trim().is_empty())
+}
+
 pub async fn update_conversation(
     db: &DatabaseConnection,
     id: Uuid,
@@ -263,10 +269,11 @@ pub async fn update_conversation(
     req: UpdateChatConversationRequest,
 ) -> Result<ChatConversationResponse, ChatError> {
     let conversation = owned_conversation(db, id, user_id).await?;
-    // echobackend `UpdateConversation`: a non-empty title (untrimmed check)
-    // and/or `is_pinned`; with nothing to change no write happens, so
-    // `updated_at` (and the list order) stays put.
-    let title = req.title.filter(|title| !title.is_empty());
+    // echobackend `UpdateConversation`: a title that is not blank after
+    // trimming (stored as sent, untrimmed) and/or `is_pinned`; with nothing
+    // to change no write happens, so `updated_at` (and the list order) stays
+    // put.
+    let title = effective_title(req.title);
     let updated = if title.is_none() && req.is_pinned.is_none() {
         conversation
     } else {
@@ -525,4 +532,18 @@ pub async fn delete_message(
         .await?;
     touch_conversation(db, conversation).await?;
     Ok(message_response(message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_title;
+
+    #[test]
+    fn blank_update_title_means_no_change() {
+        assert_eq!(effective_title(None), None);
+        assert_eq!(effective_title(Some(String::new())), None);
+        assert_eq!(effective_title(Some("   \t".into())), None);
+        // Real text is kept untrimmed, like echobackend.
+        assert_eq!(effective_title(Some(" Hi ".into())), Some(" Hi ".into()));
+    }
 }

@@ -1,12 +1,30 @@
-use crate::dto::validation::{parse_month, parse_year};
+use crate::dto::validation::{parse_month, parse_year, required, required_num};
 use crate::services::holding::HoldingError;
 use garde::Validate;
 use serde::Deserialize;
 
-#[derive(Deserialize, Validate)]
-pub struct HoldingPath {
-    #[garde(skip)]
-    pub id: i64,
+/// echobackend `strconv.ParseInt(c.Param("id"), 10, 64)`: an optionally
+/// signed base-10 `i64`. On failure the error is Go's `*strconv.NumError`
+/// text (`invalid syntax` / `value out of range`).
+pub fn parse_holding_id(raw: &str) -> Result<i64, String> {
+    let quoted = format!("{raw:?}");
+    let digits = raw.strip_prefix(['+', '-']).unwrap_or(raw);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "strconv.ParseInt: parsing {quoted}: invalid syntax"
+        ));
+    }
+    raw.parse::<i64>()
+        .map_err(|_| format!("strconv.ParseInt: parsing {quoted}: value out of range"))
+}
+
+/// go-playground `len=3` on a string (rune count), tag `len`.
+fn len_3(value: &str, _: &()) -> garde::Result {
+    if value.chars().count() == 3 {
+        Ok(())
+    } else {
+        Err(garde::Error::new("len"))
+    }
 }
 
 #[derive(Deserialize, Validate)]
@@ -36,29 +54,31 @@ impl HoldingQuery {
     }
 }
 
-#[derive(Deserialize, Validate)]
 /// Required fields default when missing so a missing or zero value is a 422
-/// (echobackend `validate:"required"`), not a body-parse 400.
+/// tag `required` (echobackend `validate:"required"`), not a body-parse 400.
+#[derive(Deserialize, Validate, Default)]
 pub struct CreateHoldingRequest {
     #[serde(default)]
-    #[garde(length(chars, min = 1))]
+    #[garde(custom(required))]
     pub name: String,
     #[garde(skip)]
     pub symbol: Option<String>,
     #[serde(default)]
-    #[garde(length(chars, min = 1))]
+    #[garde(custom(required))]
     pub platform: String,
+    /// echobackend `required` only: any non-zero id passes validation (an
+    /// unknown one is then "holding type not found").
     #[serde(default)]
-    #[garde(range(min = 1))]
+    #[garde(custom(required_num))]
     pub holding_type_id: i16,
     #[serde(default)]
-    #[garde(length(chars, equal = 3))]
+    #[garde(custom(required), custom(len_3))]
     pub currency: String,
     #[serde(default)]
-    #[garde(length(min = 1))]
+    #[garde(custom(required))]
     pub invested_amount: String,
     #[serde(default)]
-    #[garde(length(min = 1))]
+    #[garde(custom(required))]
     pub current_value: String,
     #[garde(skip)]
     pub units: Option<String>,
@@ -71,10 +91,10 @@ pub struct CreateHoldingRequest {
     #[garde(skip)]
     pub notes: Option<String>,
     #[serde(default)]
-    #[garde(range(min = 1, max = 12))]
+    #[garde(custom(required_num), range(min = 1, max = 12))]
     pub month: i32,
     #[serde(default)]
-    #[garde(range(min = 2000))]
+    #[garde(custom(required_num), range(min = 2000))]
     pub year: i32,
 }
 
@@ -110,24 +130,19 @@ pub struct UpdateHoldingRequest {
     pub year: Option<i32>,
 }
 
-#[derive(Deserialize, Validate)]
-#[serde(rename_all = "camelCase")]
+/// Missing values default to 0, which is a 422 tag `required` like
+/// echobackend's `required`.
+#[derive(Deserialize, Validate, Default)]
+#[serde(rename_all = "camelCase", default)]
 pub struct DuplicateHoldingRequest {
-    // Missing values default to 0, which the ranges reject with a 422 like
-    // echobackend's `required`.
-    #[serde(default)]
-    #[garde(range(min = 1, max = 12))]
+    #[garde(custom(required_num), range(min = 1, max = 12))]
     pub from_month: i32,
-    #[serde(default)]
-    #[garde(range(min = 1900, max = 2100))]
+    #[garde(custom(required_num), range(min = 1900, max = 2100))]
     pub from_year: i32,
-    #[serde(default)]
-    #[garde(range(min = 1, max = 12))]
+    #[garde(custom(required_num), range(min = 1, max = 12))]
     pub to_month: i32,
-    #[serde(default)]
-    #[garde(range(min = 1900, max = 2100))]
+    #[garde(custom(required_num), range(min = 1900, max = 2100))]
     pub to_year: i32,
-    #[serde(default)]
     #[garde(skip)]
     pub overwrite: bool,
 }
@@ -266,6 +281,76 @@ impl CalendarQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dto::validation::failing_tags;
+
+    fn tags(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(f, t)| (f.to_string(), t.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_required_tags_like_go_playground() {
+        let create: CreateHoldingRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            failing_tags(&create),
+            tags(&[
+                ("Name", "required"),
+                ("Platform", "required"),
+                ("HoldingTypeID", "required"),
+                ("Currency", "required"),
+                ("InvestedAmount", "required"),
+                ("CurrentValue", "required"),
+                ("Month", "required"),
+                ("Year", "required"),
+            ])
+        );
+        let duplicate: DuplicateHoldingRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            failing_tags(&duplicate),
+            tags(&[
+                ("FromMonth", "required"),
+                ("FromYear", "required"),
+                ("ToMonth", "required"),
+                ("ToYear", "required"),
+            ])
+        );
+        let duplicate = DuplicateHoldingRequest {
+            from_month: 13,
+            from_year: 1899,
+            to_month: 1,
+            to_year: 2024,
+            overwrite: false,
+        };
+        assert_eq!(
+            failing_tags(&duplicate),
+            tags(&[("FromMonth", "max"), ("FromYear", "min")])
+        );
+    }
+
+    #[test]
+    fn test_holding_id_parses_like_go_parse_int() {
+        assert_eq!(parse_holding_id("42"), Ok(42));
+        assert_eq!(parse_holding_id("-7"), Ok(-7));
+        assert_eq!(parse_holding_id("+7"), Ok(7));
+        assert_eq!(
+            parse_holding_id("abc").unwrap_err(),
+            r#"strconv.ParseInt: parsing "abc": invalid syntax"#
+        );
+        assert_eq!(
+            parse_holding_id("9223372036854775808").unwrap_err(),
+            r#"strconv.ParseInt: parsing "9223372036854775808": value out of range"#
+        );
+        for bad in ["", "+", "-", " 1", "1.5", "0x1"] {
+            assert!(
+                parse_holding_id(bad)
+                    .unwrap_err()
+                    .ends_with("invalid syntax"),
+                "{bad}"
+            );
+        }
+    }
 
     #[test]
     fn test_create_and_duplicate_missing_fields_fail_validation() {
@@ -347,7 +432,7 @@ mod tests {
             month: 5,
             year: 2024,
         };
-        assert!(req.validate().is_err());
+        assert_eq!(failing_tags(&req), tags(&[("Currency", "len")]));
     }
 
     #[test]

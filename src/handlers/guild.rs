@@ -6,7 +6,7 @@ use crate::dto::guild::{
 };
 use crate::http::auth::{AuthUser, OptionalAuthUser};
 use crate::http::error::AppError;
-use crate::http::extract::{VJson, VPath, VQuery};
+use crate::http::extract::{VBind, VPath, VQuery, bind_message};
 use crate::http::response::ApiResponse;
 use crate::infra::database::DbPool;
 use crate::models::guild::{
@@ -35,15 +35,15 @@ use std::time::Duration;
 const GUILD_STREAM_HEARTBEAT: Duration = Duration::from_secs(25);
 
 /// Maps guild errors for the guild endpoints (echobackend's
-/// `handleGuildError`).
-fn map_guild_error(err: GuildError) -> AppError {
-    match err {
-        GuildError::Db(err) => AppError::from(err),
-        GuildError::GuildNotFound => AppError::NotFound("Guild not found".to_string()),
+/// `handleGuildError`, falling back to a 500 with the endpoint `message`).
+fn map_guild_error(message: &'static str) -> impl FnOnce(GuildError) -> AppError {
+    move |err| match err {
+        GuildError::Db(err) => AppError::from(err).context(message),
+        GuildError::GuildNotFound => AppError::not_found("Guild not found", Some(err.to_string())),
         GuildError::NotOwned => AppError::Forbidden("Access forbidden".to_string()),
-        GuildError::SlugExists => AppError::Conflict("Guild slug already taken".to_string()),
+        GuildError::SlugExists => AppError::conflict("Guild slug already taken", err.to_string()),
         GuildError::AlreadyMember => {
-            AppError::Conflict("Already a member of this guild".to_string())
+            AppError::conflict("Already a member of this guild", err.to_string())
         }
         GuildError::SpamRejected(reason) => {
             AppError::spam_rejected("Content rejected by anti-spam policy", "name", reason)
@@ -55,20 +55,31 @@ fn map_guild_error(err: GuildError) -> AppError {
 /// Maps guild errors for the channel, message and stream endpoints
 /// (echobackend's `handleGuildChannelError`). Unlike the guild endpoints, a
 /// non-member is forbidden here rather than a bad request.
-fn map_guild_channel_error(err: GuildError) -> AppError {
-    match err {
-        GuildError::Db(err) => AppError::from(err),
-        GuildError::GuildNotFound => AppError::NotFound("Guild not found".to_string()),
-        GuildError::ChannelNotFound => AppError::NotFound("Channel not found".to_string()),
-        GuildError::MessageNotFound => AppError::NotFound("Message not found".to_string()),
+fn map_guild_channel_error(message: &'static str) -> impl FnOnce(GuildError) -> AppError {
+    move |err| match err {
+        GuildError::Db(err) => AppError::from(err).context(message),
+        GuildError::GuildNotFound => AppError::not_found("Guild not found", Some(err.to_string())),
+        GuildError::ChannelNotFound => {
+            AppError::not_found("Channel not found", Some(err.to_string()))
+        }
+        GuildError::MessageNotFound => {
+            AppError::not_found("Message not found", Some(err.to_string()))
+        }
         GuildError::NotOwned | GuildError::NotMember | GuildError::MessageNotOwned => {
             AppError::Forbidden("Access forbidden".to_string())
         }
         GuildError::ChannelNameExists => {
-            AppError::Conflict("Channel name already taken".to_string())
+            AppError::conflict("Channel name already taken", err.to_string())
         }
         other => AppError::BadRequest(other.to_string()),
     }
+}
+
+/// echobackend `c.Bind` + `c.Validate` with "Invalid request body" on a body
+/// that does not bind; an empty body binds to zero values (422 `required`).
+fn bind_body<T>(body: Result<VBind<T>, AppError>) -> Result<T, AppError> {
+    body.map(|VBind(value)| value)
+        .map_err(bind_message("Invalid request body"))
 }
 
 fn viewer_id(viewer: &OptionalAuthUser) -> Option<uuid::Uuid> {
@@ -78,8 +89,9 @@ fn viewer_id(viewer: &OptionalAuthUser) -> Option<uuid::Uuid> {
 pub async fn create_guild(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
-    VJson(req): VJson<CreateGuildRequest>,
+    body: Result<VBind<CreateGuildRequest>, AppError>,
 ) -> Result<(StatusCode, Json<ApiResponse<GuildResponse>>), AppError> {
+    let req = bind_body(body)?;
     let guild = services::guild::create_guild(
         &pool,
         auth_user.id,
@@ -92,7 +104,7 @@ pub async fn create_guild(
         },
     )
     .await
-    .map_err(map_guild_error)?;
+    .map_err(map_guild_error("Failed to create guild"))?;
     Ok((
         StatusCode::CREATED,
         Json(ApiResponse::success_with_message(
@@ -112,7 +124,7 @@ pub async fn list_guilds(
     let (guilds, total) =
         services::guild::list_guilds(&pool, query.search.as_deref(), limit, offset)
             .await
-            .map_err(map_guild_error)?;
+            .map_err(map_guild_error("Failed to fetch guilds"))?;
     Ok(Json(ApiResponse::with_meta_message(
         "Guilds fetched successfully",
         guilds,
@@ -131,7 +143,7 @@ pub async fn get_my_guilds(
     let (limit, offset) = query.resolve(20);
     let (guilds, total) = services::guild::list_my_guilds(&pool, auth_user.id, limit, offset)
         .await
-        .map_err(map_guild_error)?;
+        .map_err(map_guild_error("Failed to fetch guilds"))?;
     Ok(Json(ApiResponse::with_meta_message(
         "Guilds fetched successfully",
         guilds,
@@ -149,7 +161,7 @@ pub async fn get_guild(
 ) -> Result<Json<ApiResponse<GuildResponse>>, AppError> {
     let guild = services::guild::get_guild_by_slug(&pool, &path.slug, viewer_id(&viewer))
         .await
-        .map_err(map_guild_error)?;
+        .map_err(map_guild_error("Failed to fetch guild"))?;
     Ok(Json(ApiResponse::success_with_message(
         "Guild fetched successfully",
         guild,
@@ -160,8 +172,9 @@ pub async fn update_guild(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(path): VPath<GuildSlugPath>,
-    VJson(req): VJson<UpdateGuildRequest>,
+    body: Result<VBind<UpdateGuildRequest>, AppError>,
 ) -> Result<Json<ApiResponse<GuildResponse>>, AppError> {
+    let req = bind_body(body)?;
     let guild = services::guild::update_guild(
         &pool,
         &path.slug,
@@ -174,7 +187,7 @@ pub async fn update_guild(
         },
     )
     .await
-    .map_err(map_guild_error)?;
+    .map_err(map_guild_error("Failed to update guild"))?;
     Ok(Json(ApiResponse::success_with_message(
         "Guild updated successfully",
         guild,
@@ -188,7 +201,7 @@ pub async fn delete_guild(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     services::guild::delete_guild(&pool, &path.slug, auth_user.id)
         .await
-        .map_err(map_guild_error)?;
+        .map_err(map_guild_error("Failed to delete guild"))?;
     Ok(Json(ApiResponse::message("Guild deleted successfully")))
 }
 
@@ -199,7 +212,7 @@ pub async fn join_guild(
 ) -> Result<(StatusCode, Json<ApiResponse<GuildMemberResponse>>), AppError> {
     let member = services::guild::join_guild(&pool, &path.slug, auth_user.id)
         .await
-        .map_err(map_guild_error)?;
+        .map_err(map_guild_error("Failed to join guild"))?;
     Ok((
         StatusCode::CREATED,
         Json(ApiResponse::success_with_message(
@@ -216,7 +229,7 @@ pub async fn leave_guild(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     services::guild::leave_guild(&pool, &path.slug, auth_user.id)
         .await
-        .map_err(map_guild_error)?;
+        .map_err(map_guild_error("Failed to leave guild"))?;
     Ok(Json(ApiResponse::message("Left guild successfully")))
 }
 
@@ -230,7 +243,7 @@ pub async fn get_members(
     let (members, total) =
         services::guild::list_members(&pool, &path.slug, viewer_id(&viewer), limit, offset)
             .await
-            .map_err(map_guild_error)?;
+            .map_err(map_guild_error("Failed to fetch guild members"))?;
     Ok(Json(ApiResponse::with_meta_message(
         "Guild members fetched successfully",
         members,
@@ -247,7 +260,7 @@ pub async fn list_channels(
 ) -> Result<Json<ApiResponse<Vec<GuildChannelResponse>>>, AppError> {
     let channels = services::guild_channel::list_channels(&pool, &path.slug, viewer_id(&viewer))
         .await
-        .map_err(map_guild_channel_error)?;
+        .map_err(map_guild_channel_error("Failed to fetch channels"))?;
     Ok(Json(ApiResponse::success_with_message(
         "Channels fetched successfully",
         channels,
@@ -258,8 +271,9 @@ pub async fn create_channel(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(path): VPath<GuildSlugPath>,
-    VJson(req): VJson<CreateGuildChannelRequest>,
+    body: Result<VBind<CreateGuildChannelRequest>, AppError>,
 ) -> Result<(StatusCode, Json<ApiResponse<GuildChannelResponse>>), AppError> {
+    let req = bind_body(body)?;
     let channel = services::guild_channel::create_channel(
         &pool,
         &path.slug,
@@ -269,7 +283,7 @@ pub async fn create_channel(
         req.position,
     )
     .await
-    .map_err(map_guild_channel_error)?;
+    .map_err(map_guild_channel_error("Failed to create channel"))?;
     Ok((
         StatusCode::CREATED,
         Json(ApiResponse::success_with_message(
@@ -283,8 +297,9 @@ pub async fn update_channel(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(path): VPath<GuildChannelPath>,
-    VJson(req): VJson<UpdateGuildChannelRequest>,
+    body: Result<VBind<UpdateGuildChannelRequest>, AppError>,
 ) -> Result<Json<ApiResponse<GuildChannelResponse>>, AppError> {
+    let req = bind_body(body)?;
     let channel = services::guild_channel::update_channel(
         &pool,
         &path.slug,
@@ -297,7 +312,7 @@ pub async fn update_channel(
         },
     )
     .await
-    .map_err(map_guild_channel_error)?;
+    .map_err(map_guild_channel_error("Failed to update channel"))?;
     Ok(Json(ApiResponse::success_with_message(
         "Channel updated successfully",
         channel,
@@ -311,7 +326,7 @@ pub async fn delete_channel(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     services::guild_channel::delete_channel(&pool, &path.slug, &path.channel_id, auth_user.id)
         .await
-        .map_err(map_guild_channel_error)?;
+        .map_err(map_guild_channel_error("Failed to delete channel"))?;
     Ok(Json(ApiResponse::message("Channel deleted successfully")))
 }
 
@@ -332,7 +347,7 @@ pub async fn list_messages(
         query.resolve_limit(),
     )
     .await
-    .map_err(map_guild_channel_error)?;
+    .map_err(map_guild_channel_error("Failed to fetch messages"))?;
     Ok(Json(GuildMessagesResponse {
         success: true,
         message: "Messages fetched successfully".to_string(),
@@ -345,8 +360,9 @@ pub async fn send_message(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(path): VPath<GuildChannelPath>,
-    VJson(req): VJson<CreateGuildMessageRequest>,
+    body: Result<VBind<CreateGuildMessageRequest>, AppError>,
 ) -> Result<(StatusCode, Json<ApiResponse<GuildMessageResponse>>), AppError> {
+    let req = bind_body(body)?;
     let message = services::guild_channel::send_message(
         &pool,
         &path.slug,
@@ -356,7 +372,7 @@ pub async fn send_message(
         req.reply_to_id.as_deref(),
     )
     .await
-    .map_err(map_guild_channel_error)?;
+    .map_err(map_guild_channel_error("Failed to send message"))?;
     Ok((
         StatusCode::CREATED,
         Json(ApiResponse::success_with_message(
@@ -370,8 +386,9 @@ pub async fn edit_message(
     State(pool): State<DbPool>,
     auth_user: AuthUser,
     VPath(path): VPath<GuildMessagePath>,
-    VJson(req): VJson<UpdateGuildMessageRequest>,
+    body: Result<VBind<UpdateGuildMessageRequest>, AppError>,
 ) -> Result<Json<ApiResponse<GuildMessageResponse>>, AppError> {
+    let req = bind_body(body)?;
     let message = services::guild_channel::edit_message(
         &pool,
         &path.slug,
@@ -381,7 +398,7 @@ pub async fn edit_message(
         &req.content,
     )
     .await
-    .map_err(map_guild_channel_error)?;
+    .map_err(map_guild_channel_error("Failed to edit message"))?;
     Ok(Json(ApiResponse::success_with_message(
         "Message updated successfully",
         message,
@@ -401,7 +418,7 @@ pub async fn delete_message(
         auth_user.id,
     )
     .await
-    .map_err(map_guild_channel_error)?;
+    .map_err(map_guild_channel_error("Failed to delete message"))?;
     Ok(Json(ApiResponse::message("Message deleted successfully")))
 }
 
@@ -424,7 +441,7 @@ pub async fn stream_events(
     let user_id = auth_user.id;
     let (guild_id, mut sub) = services::guild_channel::subscribe(&pool, &path.slug, user_id)
         .await
-        .map_err(map_guild_channel_error)?;
+        .map_err(map_guild_channel_error("Failed to open event stream"))?;
 
     let stream = async_stream::stream! {
         yield Ok::<_, Infallible>(Event::default().comment("connected"));
@@ -514,11 +531,11 @@ mod tests {
     #[test]
     fn test_not_member_maps_differently_per_endpoint_group() {
         assert!(matches!(
-            map_guild_error(GuildError::NotMember),
+            map_guild_error("Failed to join guild")(GuildError::NotMember),
             AppError::BadRequest(msg) if msg == "not a member of this guild"
         ));
         assert!(matches!(
-            map_guild_channel_error(GuildError::NotMember),
+            map_guild_channel_error("Failed to send message")(GuildError::NotMember),
             AppError::Forbidden(_)
         ));
     }
@@ -526,20 +543,37 @@ mod tests {
     #[test]
     fn test_guild_error_mapping() {
         assert!(matches!(
-            map_guild_error(GuildError::SlugExists),
-            AppError::Conflict(_)
+            map_guild_error("Failed to create guild")(GuildError::SlugExists),
+            AppError::Detailed { status: StatusCode::CONFLICT, message, error: Some(error) }
+                if message == "Guild slug already taken" && error == "guild slug already taken"
         ));
         assert!(matches!(
-            map_guild_error(GuildError::OwnerCannotLeave),
+            map_guild_error("Failed to leave guild")(GuildError::OwnerCannotLeave),
             AppError::BadRequest(_)
         ));
         assert!(matches!(
-            map_guild_channel_error(GuildError::InvalidMessageCursor),
+            map_guild_channel_error("Failed to fetch messages")(GuildError::InvalidMessageCursor),
             AppError::BadRequest(msg) if msg == "invalid message cursor"
         ));
         assert!(matches!(
-            map_guild_channel_error(GuildError::ChannelNameExists),
-            AppError::Conflict(_)
+            map_guild_channel_error("Failed to create channel")(GuildError::ChannelNameExists),
+            AppError::Detailed { status: StatusCode::CONFLICT, message, error: Some(error) }
+                if message == "Channel name already taken"
+                    && error == "a channel with this name already exists in the guild"
+        ));
+        assert!(matches!(
+            map_guild_channel_error("Failed to edit message")(GuildError::MessageNotFound),
+            AppError::Detailed { status: StatusCode::NOT_FOUND, message, error: Some(error) }
+                if message == "Message not found" && error == "message not found"
+        ));
+        assert!(matches!(
+            map_guild_error("Failed to fetch guild")(GuildError::GuildNotFound),
+            AppError::Detailed { status: StatusCode::NOT_FOUND, message, error: Some(error) }
+                if message == "Guild not found" && error == "guild not found"
+        ));
+        assert!(matches!(
+            map_guild_error("Failed to delete guild")(GuildError::Db(sea_orm::DbErr::Custom("x".into()))),
+            AppError::InternalServerError(message) if message == "Failed to delete guild"
         ));
     }
 }

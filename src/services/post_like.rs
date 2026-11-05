@@ -15,7 +15,10 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub enum PostLikeError {
     Db(DbErr),
-    PostNotFound,
+    /// echobackend's `ErrPostNotFound` with its error text: "failed to check
+    /// post existence: post not found" for a missing post, "post not found"
+    /// for a hidden one.
+    PostNotFound(&'static str),
     AlreadyLiked,
     NotLiked,
 }
@@ -26,10 +29,22 @@ impl From<DbErr> for PostLikeError {
     }
 }
 
+/// echobackend `fmt.Errorf("failed to check post existence: %w", err)` around
+/// a failed `GetPostByID`.
+const POST_LOOKUP_NOT_FOUND: &str = "failed to check post existence: post not found";
+
 /// echobackend `LikePost`: `GetPostByID` + `ensurePostInteractable`, so a
 /// hidden post or one whose author is soft-deleted is reported as missing.
-async fn post_interactable(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbErr> {
-    crate::services::post::interactable_post_exists(db, post_id).await
+async fn ensure_post_interactable(
+    db: &DatabaseConnection,
+    post_id: Uuid,
+) -> Result<(), PostLikeError> {
+    use crate::services::post::PostPresence;
+    match crate::services::post::post_presence(db, post_id).await? {
+        PostPresence::Missing => Err(PostLikeError::PostNotFound(POST_LOOKUP_NOT_FOUND)),
+        PostPresence::Hidden => Err(PostLikeError::PostNotFound("post not found")),
+        PostPresence::Interactable => Ok(()),
+    }
 }
 
 /// echobackend `UnlikePost`: only `GetPostByID` (author not soft-deleted).
@@ -69,9 +84,7 @@ pub async fn like_post(
     post_id: Uuid,
     user_id: Uuid,
 ) -> Result<(), PostLikeError> {
-    if !post_interactable(db, post_id).await? {
-        return Err(PostLikeError::PostNotFound);
-    }
+    ensure_post_interactable(db, post_id).await?;
     if like_exists(db, post_id, user_id).await? {
         return Err(PostLikeError::AlreadyLiked);
     }
@@ -95,7 +108,7 @@ pub async fn unlike_post(
     user_id: Uuid,
 ) -> Result<(), PostLikeError> {
     if !post_active(db, post_id).await? {
-        return Err(PostLikeError::PostNotFound);
+        return Err(PostLikeError::PostNotFound(POST_LOOKUP_NOT_FOUND));
     }
 
     let result = post_likes::Entity::delete_many()

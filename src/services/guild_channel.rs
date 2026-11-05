@@ -13,6 +13,7 @@
 //! query that yields the guild, the caller's role and the channel together.
 
 use crate::domain::slug;
+use crate::dto::validation::parse_canonical_uuid;
 use crate::entities::{guild_channel_messages, guild_channels, guild_members};
 use crate::infra::realtime::{self, Subscription};
 use crate::models::guild::{
@@ -114,7 +115,7 @@ async fn resolve_member_channel(
 ) -> Result<(GuildChannelAccess, Uuid), GuildError> {
     // A malformed id is looked up as "no channel", so the guild checks still
     // run first and a hidden guild keeps reading as missing.
-    let channel_id = Uuid::parse_str(channel_id).ok();
+    let channel_id = parse_canonical_uuid(channel_id);
     let access = resolve_guild(db, guild_slug, Some(user_id), channel_id).await?;
     if access.role.is_empty() {
         return Err(GuildError::NotMember);
@@ -231,7 +232,7 @@ pub async fn update_channel(
     user_id: Uuid,
     input: UpdateChannelInput,
 ) -> Result<GuildChannelResponse, GuildError> {
-    let access = require_manager(db, guild_slug, user_id, Uuid::parse_str(channel_id).ok()).await?;
+    let access = require_manager(db, guild_slug, user_id, parse_canonical_uuid(channel_id)).await?;
     let channel_id = access.channel_id.ok_or(GuildError::ChannelNotFound)?;
     let name = input.name.as_deref().map(channel_name).transpose()?;
 
@@ -275,7 +276,7 @@ pub async fn delete_channel(
     channel_id: &str,
     user_id: Uuid,
 ) -> Result<(), GuildError> {
-    let access = require_manager(db, guild_slug, user_id, Uuid::parse_str(channel_id).ok()).await?;
+    let access = require_manager(db, guild_slug, user_id, parse_canonical_uuid(channel_id)).await?;
     let channel_id = access.channel_id.ok_or(GuildError::ChannelNotFound)?;
 
     let result = guild_channels::Entity::delete_many()
@@ -356,7 +357,7 @@ async fn find_message(
     channel_id: Uuid,
     message_id: &str,
 ) -> Result<guild_channel_messages::Model, GuildError> {
-    let message_id = Uuid::parse_str(message_id).map_err(|_| GuildError::MessageNotFound)?;
+    let message_id = parse_canonical_uuid(message_id).ok_or(GuildError::MessageNotFound)?;
     guild_channel_messages::Entity::find_by_id(message_id)
         .filter(guild_channel_messages::Column::ChannelId.eq(channel_id))
         .one(db)
@@ -376,7 +377,7 @@ pub async fn list_messages(
     limit: i64,
 ) -> Result<(Vec<GuildMessageResponse>, GuildMessageCursorMeta), GuildError> {
     let before = match before.filter(|b| !b.is_empty()) {
-        Some(raw) => Some(Uuid::parse_str(raw).map_err(|_| GuildError::InvalidMessageCursor)?),
+        Some(raw) => Some(parse_canonical_uuid(raw).ok_or(GuildError::InvalidMessageCursor)?),
         None => None,
     };
     let (access, channel_id) = resolve_member_channel(db, guild_slug, channel_id, user_id).await?;

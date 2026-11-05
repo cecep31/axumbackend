@@ -1,3 +1,4 @@
+use crate::dto::validation::required;
 use garde::Validate;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -20,10 +21,11 @@ pub struct FolderIdPath {
     pub folder_id: String,
 }
 
-/// echobackend `omitempty,uuid`: empty passes, anything else must be a UUID.
+/// echobackend `omitempty,uuid`: empty passes, anything else must be a
+/// 36-char hyphenated UUID (either case), like go-playground's `uuid` tag.
 fn optional_uuid<T: AsRef<str>>(value: &T, _: &()) -> garde::Result {
     let value = value.as_ref();
-    if value.is_empty() || Uuid::parse_str(value).is_ok() {
+    if value.is_empty() || (value.len() == 36 && Uuid::parse_str(value).is_ok()) {
         Ok(())
     } else {
         Err(garde::Error::new("uuid"))
@@ -54,7 +56,7 @@ impl ToggleBookmarkRequest {
     }
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Deserialize, Validate, Default)]
 pub struct UpdateBookmarkRequest {
     #[garde(length(chars, max = 255))]
     pub name: Option<String>,
@@ -62,21 +64,27 @@ pub struct UpdateBookmarkRequest {
     pub notes: Option<String>,
 }
 
-#[derive(Deserialize, Validate)]
+/// echobackend `MoveBookmarkRequest` (`folder_id` `omitempty,uuid`): kept as
+/// a string so a malformed id is a 422 tag `uuid`, not a bind error. An empty
+/// body binds to the default (no folder). The handler then requires the
+/// lowercase hyphenated form (echobackend `MoveBookmark`'s `IsValidUUID`).
+#[derive(Deserialize, Validate, Default)]
 pub struct MoveBookmarkRequest {
-    #[garde(skip)]
-    pub folder_id: Option<Uuid>,
+    #[garde(inner(custom(optional_uuid)))]
+    pub folder_id: Option<String>,
 }
 
-#[derive(Deserialize, Validate)]
+/// echobackend `CreateBookmarkFolderRequest`: `name` `required,min=1,max=100`.
+#[derive(Deserialize, Validate, Default)]
+#[serde(default)]
 pub struct CreateBookmarkFolderRequest {
-    #[garde(length(chars, min = 1, max = 100))]
+    #[garde(custom(required), length(chars, min = 1, max = 100))]
     pub name: String,
     #[garde(length(chars, max = 1000))]
     pub description: Option<String>,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Deserialize, Validate, Default)]
 pub struct UpdateBookmarkFolderRequest {
     #[garde(length(chars, min = 1, max = 100))]
     pub name: Option<String>,
@@ -123,5 +131,54 @@ mod tests {
         assert!(toggle(Some(id)).validate().is_ok());
         assert_eq!(toggle(Some(id)).folder_uuid(), Uuid::parse_str(id).ok());
         assert_eq!(toggle(Some("")).folder_uuid(), None);
+    }
+
+    #[test]
+    fn move_folder_id_is_omitempty_uuid() {
+        use crate::dto::validation::failing_tags;
+        let req: MoveBookmarkRequest = serde_json::from_str(r#"{"folder_id":"nope"}"#).unwrap();
+        assert_eq!(
+            failing_tags(&req),
+            vec![("FolderID".to_string(), "uuid".to_string())]
+        );
+        let req: MoveBookmarkRequest = serde_json::from_str(r#"{"folder_id":null}"#).unwrap();
+        assert!(failing_tags(&req).is_empty());
+        assert_eq!(req.folder_id, None);
+        let id = "0190a000-0000-7000-8000-000000000001";
+        let req: MoveBookmarkRequest =
+            serde_json::from_str(&format!(r#"{{"folder_id":"{id}"}}"#)).unwrap();
+        assert!(failing_tags(&req).is_empty());
+        assert!(failing_tags(&MoveBookmarkRequest::default()).is_empty());
+
+        // go-playground `uuid`: only the 36-char hyphenated form, any case.
+        for bad in [
+            "0190a8f21c3e7b4a9d6e2f1a3b4c5d6e",
+            "{0190a8f2-1c3e-7b4a-9d6e-2f1a3b4c5d6e}",
+            "urn:uuid:0190a8f2-1c3e-7b4a-9d6e-2f1a3b4c5d6e",
+        ] {
+            let req = MoveBookmarkRequest {
+                folder_id: Some(bad.to_string()),
+            };
+            assert_eq!(
+                failing_tags(&req),
+                vec![("FolderID".to_string(), "uuid".to_string())],
+                "{bad}"
+            );
+            assert!(toggle(Some(bad)).validate().is_err(), "{bad}");
+        }
+        let upper = MoveBookmarkRequest {
+            folder_id: Some("0190A8F2-1C3E-7B4A-9D6E-2F1A3B4C5D6E".to_string()),
+        };
+        assert!(failing_tags(&upper).is_empty());
+    }
+
+    #[test]
+    fn create_folder_name_is_required() {
+        use crate::dto::validation::failing_tags;
+        let req: CreateBookmarkFolderRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            failing_tags(&req),
+            vec![("Name".to_string(), "required".to_string())]
+        );
     }
 }

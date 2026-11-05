@@ -1,30 +1,33 @@
-use crate::dto::validation::parse_pagination;
+use crate::dto::validation::{parse_pagination, required};
 use crate::services;
 use garde::Validate;
 use serde::Deserialize;
 
-#[derive(Deserialize, Validate)]
+/// echobackend `CreatePostRequest`: `title`/`slug` `required,min=7`, `body`
+/// `required,min=10`. A missing field defaults to empty (`#[serde(default)]`)
+/// so it is a 422 `required` rather than a bind error.
+#[derive(Deserialize, Validate, Default)]
+#[serde(default)]
 pub struct CreatePostRequest {
-    #[garde(length(chars, min = 7))]
+    #[garde(custom(required), length(chars, min = 7))]
     pub title: String,
     #[garde(skip)]
     pub photo_url: Option<String>,
-    #[garde(length(chars, min = 7))]
+    #[garde(custom(required), length(chars, min = 7))]
     pub slug: String,
-    #[garde(length(chars, min = 10))]
+    #[garde(custom(required), length(chars, min = 10))]
     pub body: String,
-    #[serde(default)]
     #[garde(skip)]
     pub published: bool,
-    #[serde(default)]
     #[garde(skip)]
     pub tags: Vec<String>,
 }
 
 /// Mirrors echobackend's `UpdatePostRequest` (`internal/dto/post.go`), which
 /// carries no `validate` tags at all — empty-string fields are accepted and
-/// simply ignored by the update service.
-#[derive(Deserialize, Validate)]
+/// simply ignored by the update service. An empty body binds to the default
+/// (a no-op update), like echo's `c.Bind` on a zero-length body.
+#[derive(Deserialize, Validate, Default)]
 pub struct UpdatePostRequest {
     #[garde(skip)]
     pub title: Option<String>,
@@ -87,12 +90,23 @@ pub struct MyPostsAnalyticsQuery {
     pub end_date: Option<String>,
 }
 
-/// `months` is clamped leniently to `1..=24` (default `12`), mirroring
-/// echobackend's `GetMyPostsLikesByMonth`.
+/// `months` is parsed leniently, mirroring echobackend's
+/// `GetMyPostsLikesByMonth`: only an integer in `1..=24` is used; anything
+/// else (missing, non-numeric, out of range) means `12`.
 #[derive(Deserialize, Validate)]
 pub struct MyPostsLikesByMonthQuery {
     #[garde(skip)]
-    pub months: Option<i64>,
+    pub months: Option<String>,
+}
+
+impl MyPostsLikesByMonthQuery {
+    pub fn months(&self) -> i64 {
+        self.months
+            .as_deref()
+            .and_then(|raw| raw.parse::<i64>().ok())
+            .filter(|months| (1..=24).contains(months))
+            .unwrap_or(12)
+    }
 }
 
 /// echobackend `PostQueryFilter.GetSortOrder`: exactly `asc` or `desc`,
@@ -457,5 +471,58 @@ mod tests {
             limit: Some("0".into()),
         };
         assert_eq!(random.limit_or(9), 9);
+    }
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(f, t)| (f.to_string(), t.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_create_post_missing_fields_are_required() {
+        use crate::dto::validation::failing_tags;
+        // `{}` (or an empty body) binds to the default: every field `required`,
+        // in declaration order like go-playground.
+        let req: CreatePostRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            failing_tags(&req),
+            pairs(&[
+                ("Title", "required"),
+                ("Slug", "required"),
+                ("Body", "required")
+            ])
+        );
+        let req: CreatePostRequest =
+            serde_json::from_str(r#"{"title":"","slug":"short","body":"0123456789"}"#).unwrap();
+        assert_eq!(
+            failing_tags(&req),
+            pairs(&[("Title", "required"), ("Slug", "min")])
+        );
+    }
+
+    #[test]
+    fn test_update_post_request_default_is_noop() {
+        let req = UpdatePostRequest::default();
+        assert!(req.title.is_none() && req.body.is_none() && req.tags.is_none());
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_likes_by_month_months_is_lenient() {
+        let months = |raw: Option<&str>| {
+            MyPostsLikesByMonthQuery {
+                months: raw.map(Into::into),
+            }
+            .months()
+        };
+        assert_eq!(months(None), 12);
+        assert_eq!(months(Some("abc")), 12);
+        assert_eq!(months(Some("")), 12);
+        assert_eq!(months(Some("0")), 12);
+        assert_eq!(months(Some("25")), 12);
+        assert_eq!(months(Some("1")), 1);
+        assert_eq!(months(Some("24")), 24);
     }
 }

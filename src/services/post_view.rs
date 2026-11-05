@@ -16,7 +16,10 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub enum PostViewError {
     Db(DbErr),
-    PostNotFound,
+    /// echobackend's `ErrPostNotFound` with its error text: "failed to verify
+    /// post existence: post not found" when the lookup fails, "post not
+    /// found" for a hidden post (or `GetViewsByPostID`'s unwrapped lookup).
+    PostNotFound(&'static str),
     /// The requester is neither the post author nor a super admin
     /// (echobackend `ErrNotAuthor`).
     NotAuthor,
@@ -57,11 +60,20 @@ impl From<DbErr> for PostViewError {
     }
 }
 
-async fn post_exists(db: &DatabaseConnection, post_id: Uuid) -> Result<bool, DbErr> {
-    // Mirrors echobackend GetPostByID + ensurePostInteractable: a hidden post,
-    // or one whose author is soft-deleted, is reported as missing so
-    // engagement endpoints do not confirm that it exists.
-    crate::services::post::interactable_post_exists(db, post_id).await
+/// echobackend `ensurePostViewable` (and the same check in `RecordView`):
+/// `GetPostByID` wrapped as "failed to verify post existence: %w", then
+/// `ensurePostInteractable`. A hidden post, or one whose author is
+/// soft-deleted, is reported as missing so these endpoints do not confirm
+/// that it exists.
+async fn ensure_post_viewable(db: &DatabaseConnection, post_id: Uuid) -> Result<(), PostViewError> {
+    use crate::services::post::PostPresence;
+    match crate::services::post::post_presence(db, post_id).await? {
+        PostPresence::Missing => Err(PostViewError::PostNotFound(
+            "failed to verify post existence: post not found",
+        )),
+        PostPresence::Hidden => Err(PostViewError::PostNotFound("post not found")),
+        PostPresence::Interactable => Ok(()),
+    }
 }
 
 async fn has_user_viewed(
@@ -102,9 +114,7 @@ pub async fn record_view(
         return Ok(());
     }
 
-    if !post_exists(db, post_id).await? {
-        return Err(PostViewError::PostNotFound);
-    }
+    ensure_post_viewable(db, post_id).await?;
 
     if let Some(user_id) = user_id
         && has_user_viewed(db, post_id, user_id).await?
@@ -150,7 +160,7 @@ pub async fn get_views_by_post_id(
     // echobackend GetPostByID: hidden posts are allowed, a soft-deleted
     // author's post is missing.
     let Some(post) = crate::services::post::find_active_post(db, post_id).await? else {
-        return Err(PostViewError::PostNotFound);
+        return Err(PostViewError::PostNotFound("post not found"));
     };
     if !is_admin && post.created_by != requester_id {
         return Err(PostViewError::NotAuthor);
@@ -177,12 +187,14 @@ pub async fn get_views_by_post_id(
     Ok((views, total as i64))
 }
 
-/// Like echobackend `GetViewStats`, the post itself is not looked up: a
-/// missing or hidden post simply has zero views.
+/// echobackend `GetViewStats`: `ensurePostViewable` first, so a missing or
+/// hidden post is a 404 rather than zero views.
 pub async fn get_view_stats(
     db: &DatabaseConnection,
     post_id: Uuid,
 ) -> Result<PostViewStats, PostViewError> {
+    ensure_post_viewable(db, post_id).await?;
+
     #[derive(FromQueryResult)]
     struct ViewStatsRow {
         total_views: i64,
@@ -221,12 +233,14 @@ pub async fn get_view_stats(
     })
 }
 
-/// echobackend `HasUserViewedPost`: no post lookup (hidden posts included).
+/// echobackend `HasUserViewedPost`: `ensurePostViewable` first, so a missing
+/// or hidden post is a 404.
 pub async fn has_user_viewed_post(
     db: &DatabaseConnection,
     post_id: Uuid,
     user_id: Uuid,
 ) -> Result<ViewStatusResponse, PostViewError> {
+    ensure_post_viewable(db, post_id).await?;
     Ok(ViewStatusResponse {
         has_viewed: has_user_viewed(db, post_id, user_id).await?,
     })

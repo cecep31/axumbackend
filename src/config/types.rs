@@ -50,7 +50,7 @@ pub const DEFAULT_GITHUB_REDIRECT_URI: &str =
 pub const DEFAULT_SMTP_PORT: i64 = 587;
 pub const DEFAULT_SMTP_TIMEOUT_SECS: u64 = 10;
 pub const DEFAULT_SMTP_TASK_TIMEOUT_SECS: u64 = 30;
-pub const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 60;
 
 // ============================================================================
 // Configuration Structures

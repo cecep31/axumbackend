@@ -1,6 +1,5 @@
 use garde::Validate;
 use serde::Deserialize;
-use uuid::Uuid;
 
 #[derive(Deserialize, Validate)]
 pub struct NotificationQuery {
@@ -20,10 +19,4 @@ impl NotificationQuery {
     pub fn resolve(&self) -> (i64, i64) {
         crate::dto::validation::parse_pagination(self.offset.as_deref(), self.limit.as_deref(), 20)
     }
-}
-
-#[derive(Deserialize, Validate)]
-pub struct NotificationPath {
-    #[garde(skip)]
-    pub id: Uuid,
 }
