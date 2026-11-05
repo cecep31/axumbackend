@@ -1,3 +1,4 @@
+mod ai;
 mod auth;
 mod bookmark;
 mod chat;
@@ -52,6 +53,7 @@ pub fn create_router(limiter: Option<rate_limit::TokenBucketLimiter>) -> Router<
     // Streaming (SSE) routes stay outside the request timeout.
     let mut router = Router::new()
         .merge(api_routes)
+        .merge(ai::routes())
         .merge(chat::routes())
         .merge(guild::stream_routes())
         .fallback(mw::route_not_found)

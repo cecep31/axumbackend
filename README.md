@@ -8,6 +8,7 @@ Rust backend (Axum + SeaORM + PostgreSQL) for the Pilput platform. It is a port 
 - **Blog**: posts, tags, comments, likes, bookmarks (with folders), views, follows, reports and moderation, notifications, statistics.
 - **Guilds**: communities with members, channels and messages, with realtime delivery over SSE.
 - **AI chat**: conversations and messages via OpenRouter, with SSE streaming and generated titles.
+- **AI article generation**: streams an HTML draft article (SSE) from a prompt, tone and length for the create/edit-post page; nothing is stored.
 - **Holdings**: investment portfolio with analytics, corporate actions, and stock/exchange-rate quotes.
 - **Platform**: global and per-route rate limiting, optional Redis cache (fail-open), S3 uploads, SMTP/Resend email, structured logging, graceful shutdown, Docker.
 
@@ -58,6 +59,7 @@ All routes are under `/api` unless noted. Responses use the `{ success, message,
 | Notifications | `GET /notifications`, `GET /notifications/unread-count`, `PATCH /notifications/read-all`, `PATCH /notifications/{id}/read` |
 | Guilds | `GET/POST /guilds`, `GET /guilds/me`, `GET/PATCH/DELETE /guilds/{slug}`, `GET /guilds/{slug}/members`, `POST /guilds/{slug}/join`, `DELETE /guilds/{slug}/leave`, channels and messages under `/guilds/{slug}/channels/...` (plus an SSE stream) |
 | AI chat | `GET/POST /chat/conversations`, `POST /chat/conversations/stream`, `GET/PUT/DELETE /chat/conversations/{id}`, `GET/POST /chat/conversations/{id}/messages`, `POST .../messages/stream`, `GET/DELETE /chat/messages/{id}` |
+| AI article | `POST /ai/generate-article` (SSE; super admins only, 20/hour; 503 when OpenRouter is not configured) |
 | Holdings | `GET/POST /holdings`, `GET/PUT/DELETE /holdings/{id}`, `GET /holdings/summary\|trends\|compare\|monthly\|calendar`, `POST /holdings/duplicate\|sync`, `GET /holding-types` |
 | Exchange rates | `GET /exchange-rates` |
 

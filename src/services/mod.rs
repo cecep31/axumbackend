@@ -1,3 +1,4 @@
+pub mod article_generation;
 pub mod auth;
 pub mod bookmark;
 pub mod chat;

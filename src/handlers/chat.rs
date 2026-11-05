@@ -298,12 +298,15 @@ pub async fn delete_message(
 /// Serializes one `{ "type": kind, "data": data }` stream event into a
 /// `data:` line. The payloads (strings, `ChatMessageResponse`) always
 /// serialize, so the empty fallback is unreachable in practice.
-fn sse_data_event<T: Serialize>(kind: &'static str, data: T) -> Result<Event, Infallible> {
+pub(super) fn sse_data_event<T: Serialize>(
+    kind: &'static str,
+    data: T,
+) -> Result<Event, Infallible> {
     let payload = serde_json::to_string(&ChatStreamEvent { kind, data }).unwrap_or_default();
     Ok(Event::default().data(payload))
 }
 
-fn sse_error_event(message: &str) -> Result<Event, Infallible> {
+pub(super) fn sse_error_event(message: &str) -> Result<Event, Infallible> {
     sse_data_event("error", message)
 }
 
