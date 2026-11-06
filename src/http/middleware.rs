@@ -135,12 +135,15 @@ pub fn cors(http_config: &HttpConfig) -> CorsLayer {
     {
         AllowOrigin::any()
     } else {
-        AllowOrigin::list(
-            http_config
-                .allow_origins
-                .iter()
-                .filter_map(|o| o.parse::<HeaderValue>().ok()),
-        )
+        AllowOrigin::list(http_config.allow_origins.iter().filter_map(|origin| {
+            match origin.parse::<HeaderValue>() {
+                Ok(value) => Some(value),
+                Err(_) => {
+                    tracing::warn!(%origin, "cors: ignoring invalid origin in HTTP_ALLOW_ORIGINS");
+                    None
+                }
+            }
+        }))
     };
 
     CorsLayer::new()
