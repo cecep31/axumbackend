@@ -25,7 +25,7 @@ Edit `.env` with your database credentials:
 ```env
 PORT=8080
 DATABASE_URL="postgresql://postgres:password@localhost:5432/axumbackend"
-DB_POOL_MAX_OPEN=20
+DB_POOL_MAX_OPEN=5
 JWT_SECRET="change-this-to-at-least-32-characters"
 FRONTEND_RESET_PASSWORD_URL="http://localhost:3000/reset-password"
 FRONTEND_DELETE_ACCOUNT_URL="http://localhost:3000/confirm-delete-account"

@@ -8,8 +8,8 @@ pub const DEFAULT_PORT: u16 = 8080;
 /// Like echobackend, `DATABASE_URL` has no default: an empty value fails
 /// `Config::validate` with "DATABASE_URL is required".
 pub const DEFAULT_DATABASE_URL: &str = "";
-pub const DEFAULT_POOL_MAX_SIZE: usize = 25;
-pub const DEFAULT_POOL_MAX_IDLE: usize = 25;
+pub const DEFAULT_POOL_MAX_SIZE: usize = 5;
+pub const DEFAULT_POOL_MAX_IDLE: usize = 5;
 pub const DEFAULT_POOL_CONN_LIFETIME_SECS: u64 = 15 * 60;
 pub const DEFAULT_POOL_CONN_IDLE_TIME_SECS: u64 = 5 * 60;
 pub const DEFAULT_CONNECTION_TIMEOUT_SECS: u64 = 30;
