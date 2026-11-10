@@ -62,6 +62,11 @@ pub enum AuthError {
     Hash(String),
     Request(reqwest::Error),
     OAuth(String),
+    /// No email transport is configured, so a flow that must email the user
+    /// cannot run (echobackend `ErrEmailNotConfigured`).
+    EmailNotConfigured,
+    /// Queuing an email failed (queue full or closed).
+    Email(String),
 }
 
 impl From<DbErr> for AuthError {

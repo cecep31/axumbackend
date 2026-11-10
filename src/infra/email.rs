@@ -1,8 +1,8 @@
-//! Password-reset email delivery, mirroring echobackend's
-//! `internal/platform/email.Service`: messages are queued on an in-process
-//! channel (capacity 128) and sent by 2 background workers, each attempt
-//! bounded by `SMTP_TASK_TIMEOUT_SECONDS`, so the forgot-password request
-//! never waits on delivery.
+//! Password-reset and account-deletion email delivery, mirroring
+//! echobackend's `internal/platform/email.Service`: messages are queued on an
+//! in-process channel (capacity 128) and sent by 2 background workers, each
+//! attempt bounded by `SMTP_TASK_TIMEOUT_SECONDS`, so the request never waits
+//! on delivery.
 //!
 //! Transport selection ([`QueuedMailer::from_config`]):
 //! 1. SMTP when `SMTP_HOST`, `SMTP_PORT` and `SMTP_FROM` are set (echobackend).
@@ -39,11 +39,24 @@ pub trait Mailer: Send + Sync {
     /// `EnqueuePasswordResetEmail`). Fails when delivery is not configured or
     /// the queue is full; delivery errors are only logged by the workers.
     fn enqueue_password_reset_email(&self, to: &str, reset_link: &str) -> Result<(), String>;
+    /// Queues the email confirming an account deletion (echobackend
+    /// `EnqueueAccountDeletionEmail`). Same failure modes as
+    /// [`Mailer::enqueue_password_reset_email`].
+    fn enqueue_account_deletion_email(&self, to: &str, confirm_link: &str) -> Result<(), String>;
 }
 
-struct PasswordResetPayload {
+/// Which email a queued task sends (echobackend `emailKind`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmailKind {
+    PasswordReset,
+    AccountDeletion,
+}
+
+/// One queued email; `link` is the token link it carries (echobackend `emailTask`).
+struct EmailTask {
+    kind: EmailKind,
     to: String,
-    reset_link: String,
+    link: String,
 }
 
 enum Transport {
@@ -60,7 +73,7 @@ enum Transport {
 
 /// Production mailer: SMTP (or Resend) behind an in-process worker pool.
 pub struct QueuedMailer {
-    tasks: Option<mpsc::Sender<PasswordResetPayload>>,
+    tasks: Option<mpsc::Sender<EmailTask>>,
 }
 
 impl QueuedMailer {
@@ -112,13 +125,24 @@ impl Mailer for QueuedMailer {
     }
 
     fn enqueue_password_reset_email(&self, to: &str, reset_link: &str) -> Result<(), String> {
+        self.enqueue(EmailKind::PasswordReset, to, reset_link)
+    }
+
+    fn enqueue_account_deletion_email(&self, to: &str, confirm_link: &str) -> Result<(), String> {
+        self.enqueue(EmailKind::AccountDeletion, to, confirm_link)
+    }
+}
+
+impl QueuedMailer {
+    fn enqueue(&self, kind: EmailKind, to: &str, link: &str) -> Result<(), String> {
         let Some(tasks) = &self.tasks else {
             return Err("email service not configured".to_string());
         };
         tasks
-            .try_send(PasswordResetPayload {
+            .try_send(EmailTask {
+                kind,
                 to: to.to_string(),
-                reset_link: reset_link.to_string(),
+                link: link.to_string(),
             })
             .map_err(|err| match err {
                 mpsc::error::TrySendError::Full(_) => "email queue is full".to_string(),
@@ -171,8 +195,20 @@ fn build_transport(cfg: &EmailConfig) -> Result<Option<Transport>, String> {
     Ok(None)
 }
 
-async fn deliver(transport: &Transport, task_timeout: Duration, payload: PasswordResetPayload) {
-    let send = send_password_reset_email(transport, &payload.to, &payload.reset_link);
+async fn deliver(transport: &Transport, task_timeout: Duration, task: EmailTask) {
+    let (subject, (text, html), what) = match task.kind {
+        EmailKind::PasswordReset => (
+            "Reset your password",
+            password_reset_template(&task.link, "1 hour"),
+            "password reset",
+        ),
+        EmailKind::AccountDeletion => (
+            "Confirm deleting your account",
+            account_deletion_template(&task.link, "30 minutes"),
+            "account deletion",
+        ),
+    };
+    let send = send_email(transport, &task.to, subject, &text, &html);
     let result = if task_timeout.is_zero() {
         send.await
     } else {
@@ -181,17 +217,17 @@ async fn deliver(transport: &Transport, task_timeout: Duration, payload: Passwor
             .unwrap_or_else(|_| Err("email task timed out".to_string()))
     };
     if let Err(err) = result {
-        tracing::error!(error = %err, to = %payload.to, "failed to send password reset email");
+        tracing::error!(error = %err, to = %task.to, "failed to send {what} email");
     }
 }
 
-async fn send_password_reset_email(
+async fn send_email(
     transport: &Transport,
     to: &str,
-    reset_link: &str,
+    subject: &str,
+    text: &str,
+    html: &str,
 ) -> Result<(), String> {
-    let (text, html) = password_reset_template(reset_link, "1 hour");
-    let subject = "Reset your password";
     match transport {
         Transport::Smtp { transport, from } => {
             let to = to
@@ -201,7 +237,10 @@ async fn send_password_reset_email(
                 .from(from.clone())
                 .to(to)
                 .subject(subject)
-                .multipart(MultiPart::alternative_plain_html(text, html))
+                .multipart(MultiPart::alternative_plain_html(
+                    text.to_string(),
+                    html.to_string(),
+                ))
                 .map_err(|err| err.to_string())?;
             transport
                 .send(message)
@@ -213,7 +252,7 @@ async fn send_password_reset_email(
             api_key,
             from,
             client,
-        } => send_resend(client, api_key, from, to, subject, &text, &html).await,
+        } => send_resend(client, api_key, from, to, subject, text, html).await,
     }
 }
 
@@ -258,21 +297,75 @@ async fn send_resend(
     Err(format!("resend returned {status}: {body}"))
 }
 
-/// echobackend's `passwordResetTemplate`, verbatim.
+/// echobackend's `passwordResetTemplate`.
 fn password_reset_template(reset_link: &str, expires_in: &str) -> (String, String) {
     let text = format!(
         "We received a request to reset your password.\n\nReset your password here:\n{reset_link}\n\nThis link expires in {expires_in}. If you did not request a password reset, you can safely ignore this email."
     );
 
-    let escaped_link = escape_html(reset_link);
-    let escaped_expires_in = escape_html(expires_in);
-    let html = format!(
+    let html = link_email_html(&LinkEmail {
+        title: "Reset Your Password",
+        heading: "Reset your password",
+        intro: "We received a request to reset the password for your account. Use the button below to choose a new password.",
+        button_text: "Reset password",
+        link: reset_link,
+        expires_in,
+        warning: "For your security, do not forward this email or share the reset link.",
+        footer: "If you did not request a password reset, you can safely ignore this email.",
+    });
+
+    (text, html)
+}
+
+/// echobackend's `accountDeletionTemplate`.
+fn account_deletion_template(confirm_link: &str, expires_in: &str) -> (String, String) {
+    let text = format!(
+        "We received a request to permanently delete your Pilput account.\n\nConfirm the deletion here:\n{confirm_link}\n\nThis link expires in {expires_in}. If you did not request this, ignore this email and your account will stay as it is. You may also want to change your password."
+    );
+
+    let html = link_email_html(&LinkEmail {
+        title: "Confirm Account Deletion",
+        heading: "Confirm deleting your account",
+        intro: "We received a request to delete your Pilput account. Use the button below to confirm. Once confirmed, you will be signed out everywhere and will no longer be able to sign in.",
+        button_text: "Delete my account",
+        link: confirm_link,
+        expires_in,
+        warning: "Do not forward this email. Anyone with this link can delete your account.",
+        footer: "If you did not request this, ignore this email and your account will stay as it is. You may also want to change your password.",
+    });
+
+    (text, html)
+}
+
+/// Content of an email whose main action is one link button (echobackend `linkEmail`).
+struct LinkEmail<'a> {
+    title: &'a str,
+    heading: &'a str,
+    intro: &'a str,
+    button_text: &'a str,
+    link: &'a str,
+    expires_in: &'a str,
+    warning: &'a str,
+    footer: &'a str,
+}
+
+/// echobackend's `linkEmailHTML`, verbatim; every field is HTML-escaped.
+fn link_email_html(e: &LinkEmail<'_>) -> String {
+    let title = escape_html(e.title);
+    let heading = escape_html(e.heading);
+    let intro = escape_html(e.intro);
+    let button_text = escape_html(e.button_text);
+    let link = escape_html(e.link);
+    let expires_in = escape_html(e.expires_in);
+    let warning = escape_html(e.warning);
+    let footer = escape_html(e.footer);
+    format!(
         r#"<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Reset Your Password</title>
+  <title>{title}</title>
   <style>
     body {{ margin: 0; padding: 0; background: #ffffff; color: #111111; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; }}
     .page {{ width: 100%; padding: 32px 16px; background: #ffffff; }}
@@ -303,29 +396,27 @@ fn password_reset_template(reset_link: &str, expires_in: &str) -> (String, Strin
     <div class="container">
       <div class="header">
         <p class="brand">Pilput</p>
-        <h1>Reset your password</h1>
+        <h1>{heading}</h1>
       </div>
       <div class="content">
-        <p>We received a request to reset the password for your account. Use the button below to choose a new password.</p>
+        <p>{intro}</p>
         <div class="button-wrap">
-          <a href="{escaped_link}" class="button">Reset password</a>
+          <a href="{link}" class="button">{button_text}</a>
         </div>
-        <div class="meta">This link expires in <strong>{escaped_expires_in}</strong>. For your security, do not forward this email or share the reset link.</div>
+        <div class="meta">This link expires in <strong>{expires_in}</strong>. {warning}</div>
         <div class="fallback">
           <p>If the button does not work, copy and paste this link into your browser:</p>
-          <p><a href="{escaped_link}" class="link">{escaped_link}</a></p>
+          <p><a href="{link}" class="link">{link}</a></p>
         </div>
       </div>
     </div>
     <div class="footer">
-      <p>If you did not request a password reset, you can safely ignore this email.</p>
+      <p>{footer}</p>
     </div>
   </div>
 </body>
 </html>"#
-    );
-
-    (text, html)
+    )
 }
 
 /// Go `html.EscapeString`.
@@ -380,6 +471,26 @@ mod tests {
                 .enqueue_password_reset_email("a@b.co", "http://x")
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn unconfigured_mailer_rejects_account_deletion_email() {
+        let mailer = QueuedMailer::from_config(&email_config());
+        assert_eq!(
+            mailer.enqueue_account_deletion_email("a@b.co", "http://x"),
+            Err("email service not configured".to_string())
+        );
+    }
+
+    #[test]
+    fn account_deletion_template_escapes_link() {
+        let link = "http://example.com/confirm-delete-account?token=ad_123&x=<b>";
+        let (text, html) = account_deletion_template(link, "30 minutes");
+        assert!(text.contains(link));
+        assert!(html.contains("token=ad_123&amp;x=&lt;b&gt;"));
+        assert!(html.contains("30 minutes"));
+        assert!(html.contains("<title>Confirm Account Deletion</title>"));
+        assert!(html.contains(">Delete my account</a>"));
     }
 
     #[test]

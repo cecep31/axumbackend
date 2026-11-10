@@ -2,12 +2,12 @@ mod oauth;
 mod sessions;
 
 use crate::dto::auth::{
-    ActivityLogQuery, ChangePasswordRequest, CheckUsernameRequest, FailedLoginsQuery,
-    ForgotPasswordRequest, LoginRequest, LogoutRequest, RecentActivityQuery, RefreshTokenRequest,
-    RegisterRequest, ResetPasswordRequest, UpdateProfileRequest,
+    ActivityLogQuery, ChangePasswordRequest, CheckUsernameRequest, ConfirmAccountDeletionRequest,
+    FailedLoginsQuery, ForgotPasswordRequest, LoginRequest, LogoutRequest, RecentActivityQuery,
+    RefreshTokenRequest, RegisterRequest, ResetPasswordRequest, UpdateProfileRequest,
 };
 use crate::dto::validation::parse_pagination;
-use crate::http::auth::AuthUser;
+use crate::http::auth::{AuthUser, require_auth};
 use crate::http::client_ip::RequestClient;
 use crate::http::error::AppError;
 use crate::http::extract::{VBind, VQuery};
@@ -39,6 +39,7 @@ pub(super) fn internal_auth_error(message: &'static str, err: AuthError) -> AppE
         AuthError::Hash(err) => AppError::internal(message, err),
         AuthError::Request(err) => AppError::internal(message, err),
         AuthError::OAuth(err) => AppError::internal(message, err),
+        AuthError::Email(err) => AppError::internal(message, err),
         other => AppError::internal(message, format!("{other:?}")),
     }
 }
@@ -322,16 +323,61 @@ pub async fn update_profile(
     )))
 }
 
-/// `DELETE /api/auth/account` — mirrors echobackend's `AuthHandler.DeleteAccount`.
-pub async fn delete_account(
+/// `POST /api/auth/account/delete-request` — mirrors echobackend's
+/// `AuthHandler.RequestAccountDeletion`: emails a one-time confirmation link;
+/// the account is not deleted yet.
+pub async fn request_account_deletion(
     State(pool): State<DbPool>,
+    State(mailer): State<Arc<dyn Mailer>>,
     auth_user: AuthUser,
+    RequestClient(client): RequestClient,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    services::auth::delete_account(&pool, auth_user.id)
+    services::auth::request_account_deletion(&pool, mailer.as_ref(), auth_user.id, client)
         .await
-        // echobackend reports every failure here, a missing user included,
-        // as a 500.
-        .map_err(|err| internal_auth_error("Failed to delete account", err))?;
+        .map_err(|err| match err {
+            // echobackend `response.ServiceUnavailable`.
+            AuthError::EmailNotConfigured => AppError::Detailed {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: "Email delivery is not available, account deletion cannot be confirmed"
+                    .to_string(),
+                error: Some("Service Unavailable".to_string()),
+            },
+            AuthError::UserNotFound => {
+                AppError::not_found("User not found", Some("user not found".into()))
+            }
+            other => internal_auth_error("Failed to send account deletion email", other),
+        })?;
+
+    Ok(Json(ApiResponse::message(
+        "A confirmation link has been sent to your email",
+    )))
+}
+
+/// `POST /api/auth/account/delete-confirm` — mirrors echobackend's
+/// `AuthHandler.ConfirmAccountDeletion`: deletes the account owning the
+/// emailed token. Unauthenticated; the token is the proof.
+pub async fn confirm_account_deletion(
+    State(pool): State<DbPool>,
+    RequestClient(client): RequestClient,
+    VBind(req): VBind<ConfirmAccountDeletionRequest>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    services::auth::confirm_account_deletion(&pool, &req.token, client)
+        .await
+        .map_err(|err| match err {
+            AuthError::InvalidToken => AppError::bad_request(
+                "Invalid deletion link",
+                Some("invalid or expired token".into()),
+            ),
+            AuthError::TokenUsed => AppError::bad_request(
+                "Deletion link has already been used",
+                Some("account deletion token has already been used".into()),
+            ),
+            AuthError::TokenExpired => AppError::bad_request(
+                "Deletion link has expired",
+                Some("account deletion token has expired".into()),
+            ),
+            other => internal_auth_error("Failed to delete account", other),
+        })?;
 
     Ok(Json(ApiResponse::message("Account deleted successfully")))
 }
@@ -356,6 +402,12 @@ pub fn routes() -> Router<AppState> {
         RateLimiter::new(10, Duration::from_secs(60), trust_proxy).shared("auth:oauth-exchange");
     let check_username_limiter = RateLimiter::new(20, Duration::from_secs(5 * 60), trust_proxy)
         .shared("auth:check-username");
+    let account_delete_request_limiter =
+        RateLimiter::new(3, Duration::from_secs(5 * 60), trust_proxy)
+            .shared("auth:account-delete-request");
+    let account_delete_confirm_limiter =
+        RateLimiter::new(5, Duration::from_secs(5 * 60), trust_proxy)
+            .shared("auth:account-delete-confirm");
     Router::new()
         .route(
             "/api/auth/register",
@@ -394,7 +446,27 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/profile", get(profile).put(update_profile))
-        .route("/api/auth/account", axum::routing::delete(delete_account))
+        // Deleting an account takes two steps: the request emails a one-time
+        // link, and only the confirm call with that link's token deletes it.
+        // There is deliberately no immediate `DELETE /api/auth/account`.
+        // echobackend runs `Auth()` before the limiter, so `require_auth` is
+        // the outer layer and a 401 never consumes the budget.
+        .route(
+            "/api/auth/account/delete-request",
+            post(request_account_deletion)
+                .route_layer(middleware::from_fn_with_state(
+                    account_delete_request_limiter,
+                    rate_limit,
+                ))
+                .route_layer(middleware::from_fn(require_auth)),
+        )
+        .route(
+            "/api/auth/account/delete-confirm",
+            post(confirm_account_deletion).route_layer(middleware::from_fn_with_state(
+                account_delete_confirm_limiter,
+                rate_limit,
+            )),
+        )
         .route("/api/auth/password", axum::routing::patch(change_password))
         .route("/api/auth/sessions/revoke-all", post(revoke_all_sessions))
         .route(
@@ -416,4 +488,162 @@ pub fn routes() -> Router<AppState> {
                 rate_limit,
             )),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{Method, Request};
+    use std::net::SocketAddr;
+    use tower::ServiceExt;
+
+    struct FakeMailer {
+        configured: bool,
+    }
+
+    impl Mailer for FakeMailer {
+        fn is_configured(&self) -> bool {
+            self.configured
+        }
+        fn enqueue_password_reset_email(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn enqueue_account_deletion_email(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// Auth routes over a disconnected database (SeaORM panics on any query),
+    /// so these tests cover only what happens before the database.
+    fn app(email_configured: bool) -> Router {
+        routes().with_state(AppState {
+            db: DbPool::default(),
+            mailer: Arc::new(FakeMailer {
+                configured: email_configured,
+            }),
+        })
+    }
+
+    fn request(
+        method: Method,
+        uri: &str,
+        authenticated: bool,
+        body: &'static str,
+    ) -> Request<Body> {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo("10.0.0.7:1".parse::<SocketAddr>().unwrap()));
+        if authenticated {
+            // Stands in for a verified Bearer token.
+            req.extensions_mut().insert(AuthUser {
+                id: uuid::Uuid::now_v7(),
+                is_super_admin: false,
+            });
+        }
+        req
+    }
+
+    async fn send(app: Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let res = app.oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    /// The immediate deletion endpoint is gone, so the email confirmation
+    /// cannot be bypassed.
+    #[tokio::test]
+    async fn immediate_account_deletion_route_is_removed() {
+        let res = app(true)
+            .oneshot(request(Method::DELETE, "/api/auth/account", true, ""))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                res.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            ),
+            "{}",
+            res.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_request_requires_auth() {
+        let (status, body) = send(
+            app(true),
+            request(Method::POST, "/api/auth/account/delete-request", false, ""),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "Unauthorized access");
+    }
+
+    #[tokio::test]
+    async fn delete_request_without_email_is_503() {
+        let (status, body) = send(
+            app(false),
+            request(Method::POST, "/api/auth/account/delete-request", true, ""),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "success": false,
+                "message": "Email delivery is not available, account deletion cannot be confirmed",
+                "error": "Service Unavailable"
+            })
+        );
+    }
+
+    /// echobackend: 3 requests per 5 minutes; 401s run before the limiter.
+    #[tokio::test]
+    async fn delete_request_is_rate_limited_after_auth() {
+        let app = app(false);
+        for _ in 0..4 {
+            let (status, _) = send(
+                app.clone(),
+                request(Method::POST, "/api/auth/account/delete-request", false, ""),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        for _ in 0..3 {
+            let (status, _) = send(
+                app.clone(),
+                request(Method::POST, "/api/auth/account/delete-request", true, ""),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        }
+        let (status, _) = send(
+            app,
+            request(Method::POST, "/api/auth/account/delete-request", true, ""),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn delete_confirm_validates_body() {
+        let uri = "/api/auth/account/delete-confirm";
+        let (status, body) = send(app(true), request(Method::POST, uri, false, "{")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["message"], "Invalid request format");
+
+        let (status, body) = send(app(true), request(Method::POST, uri, false, "{}")).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["errors"][0]["field"], "Token");
+        assert_eq!(body["errors"][0]["tag"], "required");
+    }
 }

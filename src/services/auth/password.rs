@@ -162,20 +162,18 @@ pub async fn forgot_password(
 }
 
 pub(super) fn build_password_reset_link(token: &str) -> String {
-    reset_link_with_base(
+    token_link_with_base(
         &crate::config::EmailConfig::get().frontend_reset_password_url,
+        crate::config::DEFAULT_FRONTEND_RESET_PASSWORD_URL,
         token,
     )
 }
 
-/// echobackend `buildPasswordResetLink`: sets the `token` query parameter
-/// (URL-encoded, replacing any existing one) and keeps the rest of the query.
-pub(super) fn reset_link_with_base(base: &str, token: &str) -> String {
-    let base = if base.is_empty() {
-        "http://localhost:3000/reset-password"
-    } else {
-        base
-    };
+/// echobackend `buildTokenLink`: sets the `token` query parameter of `base`
+/// (URL-encoded, replacing any existing one) and keeps the rest of the query;
+/// `fallback` is used when `base` is empty.
+pub(super) fn token_link_with_base(base: &str, fallback: &str, token: &str) -> String {
+    let base = if base.is_empty() { fallback } else { base };
     let Ok(mut url) = reqwest::Url::parse(base) else {
         return format!("{base}?token={}", go_query_escape(token));
     };

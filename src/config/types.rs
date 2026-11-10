@@ -27,6 +27,8 @@ pub const DEFAULT_EMAIL_FROM: &str = "noreply@pilput.net";
 pub const DEFAULT_FRONTEND_URL: &str = "http://localhost:3000";
 pub const DEFAULT_FRONTEND_OAUTH_CALLBACK_URL: &str = "http://localhost:3000/auth/callback";
 pub const DEFAULT_FRONTEND_RESET_PASSWORD_URL: &str = "http://localhost:3000/reset-password";
+pub const DEFAULT_FRONTEND_DELETE_ACCOUNT_URL: &str =
+    "http://localhost:3000/confirm-delete-account";
 pub const DEFAULT_MAIN_DOMAIN: &str = "localhost";
 /// HTTP_RATE_LIMIT_RPS default: 0 disables the global limiter (echobackend).
 pub const DEFAULT_RATE_LIMIT_RPS: i64 = 0;
@@ -155,6 +157,9 @@ pub struct FrontendConfig {
     pub url: String,
     pub oauth_callback_url: String,
     pub reset_password_url: String,
+    /// Frontend page the account deletion email links to
+    /// (FRONTEND_DELETE_ACCOUNT_URL); the backend sets its `token` query param.
+    pub delete_account_url: String,
     pub main_domain: String,
 }
 

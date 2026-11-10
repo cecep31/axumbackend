@@ -1,3 +1,4 @@
+pub mod account_deletion_tokens;
 pub mod auth_activity_logs;
 pub mod bookmark_folders;
 pub mod chat_conversations;

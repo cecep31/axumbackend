@@ -198,6 +198,10 @@ impl FrontendConfig {
                 "FRONTEND_RESET_PASSWORD_URL",
                 DEFAULT_FRONTEND_RESET_PASSWORD_URL,
             ),
+            delete_account_url: env_string(
+                "FRONTEND_DELETE_ACCOUNT_URL",
+                DEFAULT_FRONTEND_DELETE_ACCOUNT_URL,
+            ),
             main_domain: env_string("MAIN_DOMAIN", DEFAULT_MAIN_DOMAIN),
         }
     }

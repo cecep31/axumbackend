@@ -22,6 +22,7 @@ use std::sync::{Mutex, OnceLock};
 use uuid::Uuid;
 
 mod account;
+mod account_deletion;
 mod activity;
 mod github;
 mod password;
@@ -29,6 +30,7 @@ mod session;
 mod types;
 
 pub use account::*;
+pub use account_deletion::*;
 pub use activity::*;
 pub use github::*;
 pub use password::*;

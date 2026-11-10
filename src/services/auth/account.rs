@@ -283,29 +283,6 @@ pub async fn update_profile(
     })
 }
 
-pub async fn delete_account(db: &DatabaseConnection, user_id: Uuid) -> Result<(), AuthError> {
-    let user = users::Entity::find_by_id(user_id)
-        .filter(users::Column::DeletedAt.is_null())
-        .one(db)
-        .await?
-        .ok_or(AuthError::UserNotFound)?;
-
-    let mut active: users::ActiveModel = user.into();
-    active.deleted_at = Set(Some(Utc::now().into()));
-    active.updated_at = Set(Some(Utc::now().into()));
-    active.update(db).await?;
-
-    if let Err(err) = sessions::Entity::delete_many()
-        .filter(sessions::Column::UserId.eq(user_id))
-        .exec(db)
-        .await
-    {
-        tracing::warn!(?err, %user_id, "failed to invalidate sessions after account deletion");
-    }
-
-    Ok(())
-}
-
 pub async fn check_email_availability(
     db: &DatabaseConnection,
     email: &str,

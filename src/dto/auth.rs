@@ -54,6 +54,15 @@ pub struct ResetPasswordRequest {
     pub password: String,
 }
 
+/// Token from the account deletion email (echobackend
+/// `ConfirmAccountDeletionRequest`, `validate:"required,max=255"`).
+#[derive(Default, Deserialize, Validate)]
+#[serde(default)]
+pub struct ConfirmAccountDeletionRequest {
+    #[garde(custom(required), length(chars, max = 255))]
+    pub token: String,
+}
+
 #[derive(Default, Deserialize, Validate)]
 #[serde(default)]
 pub struct ChangePasswordRequest {
@@ -417,6 +426,23 @@ mod tests {
         assert_eq!(
             tags(&ResetPasswordRequest::default()),
             vec![pair("Token", "required"), pair("Password", "required")]
+        );
+        assert_eq!(
+            tags(&ConfirmAccountDeletionRequest::default()),
+            vec![pair("Token", "required")]
+        );
+        assert_eq!(
+            tags(&ConfirmAccountDeletionRequest {
+                token: "a".repeat(256)
+            }),
+            vec![pair("Token", "max")]
+        );
+        assert!(
+            ConfirmAccountDeletionRequest {
+                token: "a".repeat(255)
+            }
+            .validate()
+            .is_ok()
         );
         assert_eq!(
             tags(&RefreshTokenRequest::default()),

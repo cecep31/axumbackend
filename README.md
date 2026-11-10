@@ -28,6 +28,7 @@ DATABASE_URL="postgresql://postgres:password@localhost:5432/axumbackend"
 DB_POOL_MAX_OPEN=20
 JWT_SECRET="change-this-to-at-least-32-characters"
 FRONTEND_RESET_PASSWORD_URL="http://localhost:3000/reset-password"
+FRONTEND_DELETE_ACCOUNT_URL="http://localhost:3000/confirm-delete-account"
 SMTP_HOST=""
 SMTP_FROM="noreply@pilput.net"
 ```
@@ -47,7 +48,7 @@ All routes are under `/api` unless noted. Responses use the `{ success, message,
 | Area | Endpoints |
 |------|-----------|
 | Health | `GET /`, `GET /health` |
-| Auth | `POST /auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/check-username`; `GET/PUT /auth/profile`; `PATCH /auth/password`; `DELETE /auth/account`; `POST /auth/sessions/revoke-all`; `DELETE /auth/sessions/{user_id}` (Admin); `GET /auth/activity-logs[/recent\|/failed-logins]` |
+| Auth | `POST /auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/check-username`; `GET/PUT /auth/profile`; `PATCH /auth/password`; `POST /auth/account/delete-request`, `/auth/account/delete-confirm`; `POST /auth/sessions/revoke-all`; `DELETE /auth/sessions/{user_id}` (Admin); `GET /auth/activity-logs[/recent\|/failed-logins]` |
 | GitHub OAuth | `GET /auth/oauth/github`, `GET /auth/oauth/github/callback`, `POST /auth/oauth/exchange` |
 | Posts | `GET/POST /posts`; `GET/PUT/DELETE /posts/{id}`; `GET /posts/random`, `/trending`, `/sitemap`, `/me`, `/feed/for-you`, `/tag/{tag}`, `/username/{username}`, `/u/{username}/{slug}`; `GET/PUT/DELETE /posts/me/{id}`; `POST /posts/image`; stats: `/posts/stats`, `/stats/engagement`, `/me/analytics[/likes-by-month]` |
 | Post engagement | `POST/DELETE /posts/{id}/like`, `GET /posts/{id}/likes\|like-stats\|liked`; `POST /posts/{id}/view`, `GET /posts/{id}/views\|view-stats\|viewed` |
@@ -65,7 +66,7 @@ All routes are under `/api` unless noted. Responses use the `{ success, message,
 
 The routers in `src/handlers/` are the source of truth for the exact list.
 
-### Password Reset Email
+### Password Reset and Account Deletion Email
 
 `POST /api/auth/forgot-password` always returns the same success response for registered and unregistered emails. Like echobackend, the email is queued in-process (capacity 128) and delivered by 2 background workers, so the request never waits on delivery:
 
@@ -78,8 +79,11 @@ The routers in `src/handlers/` are the source of truth for the exact list.
 | `SMTP_FROM` (alias `EMAIL_FROM`) | Sender email address |
 | `RESEND_API_KEY` | axum-only fallback transport, used when `SMTP_HOST` is empty |
 | `FRONTEND_RESET_PASSWORD_URL` | Frontend reset page; backend appends `?token=...` |
+| `FRONTEND_DELETE_ACCOUNT_URL` | Frontend page confirming an account deletion (default `http://localhost:3000/confirm-delete-account`); backend appends `?token=...` |
 
 If no transport is configured, the reset token is still created and a `devMode: true` activity log is recorded (the link itself is never logged).
+
+Deleting an account needs email confirmation: `POST /api/auth/account/delete-request` (authenticated, 3 per 5 min) emails a one-time link valid for 30 minutes, and `POST /api/auth/account/delete-confirm` with `{"token": "..."}` (no auth, 5 per 5 min) soft-deletes the account and revokes its sessions. Without a configured transport the request answers 503 and creates no token. Tokens live in `account_deletion_tokens` (echobackend migration `20261109120000`).
 
 ## Development
 
