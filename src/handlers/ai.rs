@@ -64,7 +64,7 @@ pub async fn generate_article(
                             content.push_str(&chunk);
                             yield sse_data_event("ai_chunk", &chunk);
                         }
-                        openrouter::StreamEvent::Usage(_) => {}
+                        openrouter::StreamEvent::Reasoning(_) | openrouter::StreamEvent::Usage(_) => {}
                         openrouter::StreamEvent::Error(err) => {
                             failed = Some(err);
                             break;

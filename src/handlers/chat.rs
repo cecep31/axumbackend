@@ -312,7 +312,7 @@ pub(super) fn sse_error_event(message: &str) -> Result<Event, Infallible> {
 
 /// Builds the SSE response for a prepared AI stream, mirroring echobackend's
 /// `streamChatEvents`: the initial event (`conversation_created` /
-/// `user_message`), `ai_chunk` events, `ai_complete` (or `error`), and a
+/// `user_message`), `ai_reasoning` / `ai_chunk` events, `ai_complete` (or `error`), and a
 /// final `data: [DONE]`.
 fn ai_stream_response(
     pool: DbPool,
@@ -343,6 +343,9 @@ fn ai_stream_response(
                         openrouter::StreamEvent::Chunk(chunk) => {
                             content.push_str(&chunk);
                             yield sse_data_event("ai_chunk", &chunk);
+                        }
+                        openrouter::StreamEvent::Reasoning(text) => {
+                            yield sse_data_event("ai_reasoning", &text);
                         }
                         openrouter::StreamEvent::Usage(value) => usage = value,
                         openrouter::StreamEvent::Error(err) => {

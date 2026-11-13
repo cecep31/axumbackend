@@ -39,6 +39,8 @@ pub struct OpenRouterResponse {
 /// Events decoded from an OpenRouter SSE stream.
 pub enum StreamEvent {
     Chunk(String),
+    /// Reasoning ("thinking") text from reasoning models. Not persisted.
+    Reasoning(String),
     Usage(OpenRouterUsage),
     Error(String),
 }
@@ -181,8 +183,11 @@ fn decode_stream(response: reqwest::Response) -> impl tokio_stream::Stream<Item 
         }
         #[derive(Deserialize)]
         struct ChunkDelta {
+            // Both fields can arrive as `null`, so decode them as options.
             #[serde(default)]
-            content: String,
+            content: Option<String>,
+            #[serde(default)]
+            reasoning: Option<String>,
         }
 
         let mut buffer = Vec::new();
@@ -218,12 +223,13 @@ fn decode_stream(response: reqwest::Response) -> impl tokio_stream::Stream<Item 
                 if let Some(usage) = payload.usage {
                     yield StreamEvent::Usage(usage);
                 }
-                let content = payload
-                    .choices
-                    .first()
-                    .map(|choice| choice.delta.content.clone())
-                    .unwrap_or_default();
-                if !content.is_empty() {
+                let Some(delta) = payload.choices.into_iter().next().map(|c| c.delta) else {
+                    continue;
+                };
+                if let Some(reasoning) = delta.reasoning.filter(|r| !r.is_empty()) {
+                    yield StreamEvent::Reasoning(reasoning);
+                }
+                if let Some(content) = delta.content.filter(|c| !c.is_empty()) {
                     yield StreamEvent::Chunk(content);
                 }
             }

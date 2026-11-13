@@ -36,7 +36,7 @@ pub struct ChatConversationResponse {
 
 /// One SSE `data:` line of the chat AI stream (echobackend
 /// `streamChatEvents`): `{ "type": ..., "data": ... }` where `type` is
-/// `conversation_created`, `user_message`, `ai_chunk`, `ai_complete` or
+/// `conversation_created`, `user_message`, `ai_reasoning`, `ai_chunk`, `ai_complete` or
 /// `error`.
 #[derive(Debug, Serialize)]
 pub struct ChatStreamEvent<T> {
