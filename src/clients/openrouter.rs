@@ -13,7 +13,7 @@ pub struct OpenRouterMessage {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
 pub struct OpenRouterUsage {
     #[serde(default)]
     pub prompt_tokens: i32,
@@ -37,6 +37,7 @@ pub struct OpenRouterResponse {
 }
 
 /// Events decoded from an OpenRouter SSE stream.
+#[derive(Debug, PartialEq)]
 pub enum StreamEvent {
     Chunk(String),
     /// Reasoning ("thinking") text from reasoning models. Not persisted.
@@ -113,7 +114,6 @@ async fn call_api(
     let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
     let mut request = shared_client()
         .post(&url)
-        .timeout(config.timeout)
         .header("Authorization", format!("Bearer {}", config.api_key))
         .header("Content-Type", "application/json")
         .json(&body);
@@ -124,10 +124,17 @@ async fn call_api(
         request = request.header("X-Title", &config.title);
     }
 
-    let response = request
-        .send()
-        .await
-        .map_err(|err| format!("OpenRouter request failed: {err}"))?;
+    // A streamed answer (especially with reasoning) can legitimately run past
+    // `config.timeout`, so streams only bound the wait for the response head
+    // here and the gap between chunks in `decode_stream`.
+    let response = if stream {
+        tokio::time::timeout(config.timeout, request.send())
+            .await
+            .map_err(|_| "OpenRouter request timed out".to_string())?
+    } else {
+        request.timeout(config.timeout).send().await
+    }
+    .map_err(|err| format!("OpenRouter request failed: {err}"))?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
@@ -168,32 +175,24 @@ pub async fn generate_stream(
 
 /// Decodes an OpenRouter SSE response body into [`StreamEvent`]s, mirroring
 /// echobackend's scanner loop (`data: ` lines, `[DONE]` terminator, latest
-/// `usage` wins, empty delta contents skipped).
+/// `usage` wins, empty delta contents skipped). SSE comment lines such as
+/// `: OPENROUTER PROCESSING` are ignored.
 fn decode_stream(response: reqwest::Response) -> impl tokio_stream::Stream<Item = StreamEvent> {
     async_stream::stream! {
-        #[derive(Deserialize)]
-        struct ChunkPayload {
-            #[serde(default)]
-            choices: Vec<ChunkChoice>,
-            usage: Option<OpenRouterUsage>,
-        }
-        #[derive(Deserialize)]
-        struct ChunkChoice {
-            delta: ChunkDelta,
-        }
-        #[derive(Deserialize)]
-        struct ChunkDelta {
-            // Both fields can arrive as `null`, so decode them as options.
-            #[serde(default)]
-            content: Option<String>,
-            #[serde(default)]
-            reasoning: Option<String>,
-        }
-
+        let idle_timeout = OpenRouterConfig::get().timeout;
         let mut buffer = Vec::new();
         let mut byte_stream = response.bytes_stream();
         'read: loop {
-            let Some(chunk_result) = tokio_stream::StreamExt::next(&mut byte_stream).await else {
+            let next = tokio::time::timeout(
+                idle_timeout,
+                tokio_stream::StreamExt::next(&mut byte_stream),
+            )
+            .await;
+            let Ok(next) = next else {
+                yield StreamEvent::Error("OpenRouter stream timed out".to_string());
+                break;
+            };
+            let Some(chunk_result) = next else {
                 break;
             };
             let bytes = match chunk_result {
@@ -211,30 +210,101 @@ fn decode_stream(response: reqwest::Response) -> impl tokio_stream::Stream<Item 
                 let line_bytes: Vec<u8> = buffer.drain(..=pos).collect();
                 let line_str = String::from_utf8_lossy(&line_bytes);
                 let line = line_str.trim();
-                let Some(data) = line.strip_prefix("data: ") else {
+                let Some(data) = line.strip_prefix("data:").map(str::trim_start) else {
                     continue;
                 };
                 if data == "[DONE]" {
                     break 'read;
                 }
-                let Ok(payload) = serde_json::from_str::<ChunkPayload>(data) else {
-                    continue;
-                };
-                if let Some(usage) = payload.usage {
-                    yield StreamEvent::Usage(usage);
+                let mut stop = false;
+                for event in parse_stream_data(data) {
+                    stop |= matches!(event, StreamEvent::Error(_));
+                    yield event;
                 }
-                let Some(delta) = payload.choices.into_iter().next().map(|c| c.delta) else {
-                    continue;
-                };
-                if let Some(reasoning) = delta.reasoning.filter(|r| !r.is_empty()) {
-                    yield StreamEvent::Reasoning(reasoning);
-                }
-                if let Some(content) = delta.content.filter(|c| !c.is_empty()) {
-                    yield StreamEvent::Chunk(content);
+                if stop {
+                    break 'read;
                 }
             }
         }
     }
+}
+
+/// Parses one SSE `data:` payload of an OpenRouter chat-completions stream.
+///
+/// Decoded leniently via `serde_json::Value` so an unexpected field shape
+/// never drops the whole chunk. Per the OpenRouter docs:
+/// - reasoning streams in `choices[0].delta.reasoning_details` (items of type
+///   `reasoning.text` / `reasoning.summary`; `reasoning.encrypted` carries no
+///   readable text). Some providers also send a plain `delta.reasoning`
+///   string; it is used only when `reasoning_details` has no readable text,
+///   so the same reasoning is never emitted twice.
+/// - mid-stream failures arrive as a top-level `error` object (HTTP stays 200).
+fn parse_stream_data(data: &str) -> Vec<StreamEvent> {
+    use serde_json::Value;
+
+    let Ok(payload) = serde_json::from_str::<Value>(data) else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+
+    if let Some(error) = payload.get("error").filter(|e| !e.is_null()) {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .filter(|m| !m.is_empty())
+            .unwrap_or("OpenRouter stream failed");
+        events.push(StreamEvent::Error(message.to_string()));
+        return events;
+    }
+
+    if let Some(usage) = payload
+        .get("usage")
+        .filter(|u| !u.is_null())
+        .and_then(|u| serde_json::from_value::<OpenRouterUsage>(u.clone()).ok())
+    {
+        events.push(StreamEvent::Usage(usage));
+    }
+
+    let Some(delta) = payload.pointer("/choices/0/delta") else {
+        return events;
+    };
+
+    let from_details: String = delta
+        .get("reasoning_details")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| match item.get("type").and_then(Value::as_str) {
+                    Some("reasoning.text") => item.get("text").and_then(Value::as_str),
+                    Some("reasoning.summary") => item.get("summary").and_then(Value::as_str),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let reasoning = if from_details.is_empty() {
+        delta
+            .get("reasoning")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        from_details
+    };
+    if !reasoning.is_empty() {
+        events.push(StreamEvent::Reasoning(reasoning));
+    }
+
+    if let Some(content) = delta
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|c| !c.is_empty())
+    {
+        events.push(StreamEvent::Chunk(content.to_string()));
+    }
+
+    events
 }
 
 /// Extracts a client-safe message from an upstream error body, mirroring
@@ -257,4 +327,89 @@ pub fn stream_error_message(err: &str) -> String {
         }
     }
     err.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OpenRouterUsage, StreamEvent, parse_stream_data};
+
+    #[test]
+    fn content_chunk() {
+        let data = r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"}}]}"#;
+        assert_eq!(
+            parse_stream_data(data),
+            vec![StreamEvent::Chunk("Hi".into())]
+        );
+    }
+
+    #[test]
+    fn null_content_and_reasoning_are_skipped() {
+        let data = r#"{"choices":[{"delta":{"content":null,"reasoning":null}}]}"#;
+        assert!(parse_stream_data(data).is_empty());
+    }
+
+    #[test]
+    fn reasoning_details_text_and_summary() {
+        let data = r#"{"choices":[{"delta":{"content":"","reasoning":"think","reasoning_details":[
+            {"type":"reasoning.text","text":"think","format":"anthropic-claude-v1","index":0},
+            {"type":"reasoning.encrypted","data":"xyz"}
+        ]}}]}"#;
+        // Same text in both fields is emitted once.
+        assert_eq!(
+            parse_stream_data(data),
+            vec![StreamEvent::Reasoning("think".into())]
+        );
+
+        let data = r#"{"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.summary","summary":"sum"}]}}]}"#;
+        assert_eq!(
+            parse_stream_data(data),
+            vec![StreamEvent::Reasoning("sum".into())]
+        );
+    }
+
+    #[test]
+    fn plain_reasoning_string_fallback() {
+        let data = r#"{"choices":[{"delta":{"content":"","reasoning":"step 1"}}]}"#;
+        assert_eq!(
+            parse_stream_data(data),
+            vec![StreamEvent::Reasoning("step 1".into())]
+        );
+    }
+
+    #[test]
+    fn encrypted_only_reasoning_emits_nothing() {
+        let data = r#"{"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.encrypted","data":"x"}]}}]}"#;
+        assert!(parse_stream_data(data).is_empty());
+    }
+
+    #[test]
+    fn usage_chunk() {
+        let data = r#"{"choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8,"completion_tokens_details":{"reasoning_tokens":2}}}"#;
+        assert_eq!(
+            parse_stream_data(data),
+            vec![StreamEvent::Usage(OpenRouterUsage {
+                prompt_tokens: 3,
+                completion_tokens: 5,
+                total_tokens: 8
+            })]
+        );
+    }
+
+    #[test]
+    fn mid_stream_error() {
+        let data = r#"{"error":{"code":502,"message":"Provider disconnected unexpectedly"},
+            "choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}]}"#;
+        assert_eq!(
+            parse_stream_data(data),
+            vec![StreamEvent::Error(
+                "Provider disconnected unexpectedly".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn invalid_json_is_ignored() {
+        assert!(parse_stream_data("not json").is_empty());
+    }
 }
